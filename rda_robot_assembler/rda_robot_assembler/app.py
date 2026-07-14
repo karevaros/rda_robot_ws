@@ -261,6 +261,12 @@ class Assembler(QtWidgets.QMainWindow):
             v.addLayout(row)
             lv.addWidget(box)
             self.slot_widgets[slot] = {"combo": combo, "chk": chk, "box": box, "btn": edit_btn}
+        btn_refresh = QtWidgets.QPushButton("🔄 모델 새로고침")
+        btn_refresh.setToolTip(
+            "config/models/<슬롯>/ 폴더의 urdf·xacro·yaml 을 다시 스캔해\n"
+            "드롭다운 목록을 갱신(재시작 불필요)")
+        btn_refresh.clicked.connect(self._refresh_models)
+        lv.addWidget(btn_refresh)
         lv.addStretch(1)
         h.addWidget(left)
 
@@ -348,6 +354,23 @@ class Assembler(QtWidgets.QMainWindow):
         self.lbl_status.setText(msg)
 
     # ---------- 이벤트 ----------
+    def _refresh_models(self):
+        """모델 폴더 재스캔 → 슬롯 드롭다운 갱신(현재 선택 유지)."""
+        reg.reload_models()
+        for slot in reg.SLOTS:
+            combo = self.slot_widgets[slot]["combo"]
+            cur = combo.currentData()
+            combo.blockSignals(True)
+            combo.clear()
+            for mid in reg.SLOT_MODELS.get(slot, []):
+                combo.addItem(reg.MODELS[mid]["label"], mid)
+            idx = combo.findData(cur)
+            combo.setCurrentIndex(idx if idx >= 0 else 0)
+            combo.blockSignals(False)
+            self.models[slot] = combo.currentData()
+        n = sum(len(v) for v in reg.SLOT_MODELS.values())
+        self._set_status(f"모델 새로고침 완료 (총 {n}개)")
+
     def _on_model_changed(self, slot):
         self.models[slot] = self.slot_widgets[slot]["combo"].currentData()
         self._reload_part(slot)

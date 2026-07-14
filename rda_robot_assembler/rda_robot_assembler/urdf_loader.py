@@ -13,32 +13,50 @@ _CACHE_DIR = os.path.join(tempfile.gettempdir(), "rda_assembler_cache")
 os.makedirs(_CACHE_DIR, exist_ok=True)
 
 
-def _pkg_resolver(fname):
-    """package://PKG/rest -> <share>/rest"""
-    if fname.startswith("package://"):
-        rest = fname[len("package://"):]
-        pkg, _, tail = rest.partition("/")
-        try:
-            return os.path.join(get_package_share_directory(pkg), tail)
-        except Exception:
-            return fname
-    return fname
+def make_resolver(base_dir=None):
+    """yourdfpy filename_handler. package:// → share, 상대경로 → base_dir 기준."""
+    def resolver(fname):
+        if fname.startswith("package://"):
+            rest = fname[len("package://"):]
+            pkg, _, tail = rest.partition("/")
+            try:
+                return os.path.join(get_package_share_directory(pkg), tail)
+            except Exception:
+                return fname
+        # 폴더 드롭 모델: urdf 옆의 상대경로 mesh 지원
+        if base_dir and not os.path.isabs(fname):
+            cand = os.path.join(base_dir, fname)
+            if os.path.exists(cand):
+                return cand
+        return fname
+    return resolver
+
+
+# 하위호환 별칭(package:// 전용)
+_pkg_resolver = make_resolver(None)
+
+
+def _xacro_source(model):
+    """model 에서 xacro 소스 절대경로 반환(file 우선, 없으면 pkg/xacro)."""
+    if model.get("file"):
+        return model["file"]
+    share = get_package_share_directory(model["pkg"])
+    return os.path.join(share, model["xacro"])
 
 
 def xacro_to_urdf(model):
-    """model dict -> URDF 파일 경로(캐시)."""
-    share = get_package_share_directory(model["pkg"])
-    xacro_path = os.path.join(share, model["xacro"])
+    """model dict -> URDF 파일 경로(캐시). file 또는 pkg/xacro 지원."""
+    src = _xacro_source(model)
     args = [f"{k}:={v}" for k, v in model.get("args", {}).items()]
-    key = model["pkg"] + "__" + os.path.basename(model["xacro"]) + "__" + "_".join(args)
-    key = key.replace("/", "_").replace(":", "")
+    key = "src__" + src + "__" + "_".join(args)
+    key = key.replace("/", "_").replace(":", "").replace(".", "_")
     out = os.path.join(_CACHE_DIR, key + ".urdf")
     # 캐시가 소스보다 최신이면 재사용
-    if os.path.exists(out) and os.path.getmtime(out) >= os.path.getmtime(xacro_path):
+    if os.path.exists(out) and os.path.getmtime(out) >= os.path.getmtime(src):
         return out
-    res = subprocess.run(["xacro", xacro_path] + args, capture_output=True, text=True)
+    res = subprocess.run(["xacro", src] + args, capture_output=True, text=True)
     if res.returncode != 0:
-        raise RuntimeError(f"xacro 실패 ({model['pkg']}):\n{res.stderr[-800:]}")
+        raise RuntimeError(f"xacro 실패 ({src}):\n{res.stderr[-800:]}")
     with open(out, "w") as f:
         f.write(res.stdout)
     return out
@@ -51,8 +69,10 @@ class LoadedPart:
         self.model_id = model_id
         self.model = model
         urdf_path = xacro_to_urdf(model)
+        # 폴더 드롭 모델은 urdf 옆 상대경로 mesh 도 찾도록 base_dir 지정
+        base_dir = os.path.dirname(model["file"]) if model.get("file") else None
         self.robot = yourdfpy.URDF.load(
-            urdf_path, filename_handler=_pkg_resolver,
+            urdf_path, filename_handler=make_resolver(base_dir),
             load_meshes=True, build_scene_graph=True,
         )
         self.root = self.robot.base_link

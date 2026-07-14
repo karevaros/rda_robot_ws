@@ -1,0 +1,9 @@
+# 예시 템플릿 — 실제로 쓰려면 확장자를 .yaml 로 바꾸고 값을 채우세요.
+# (.yaml.example 은 스캔 대상이 아니라 로드되지 않습니다.)
+label: "예시 로봇팔 (제조사/모델)"
+# 소스 지정: file 또는 pkg+xacro 중 하나
+file: my_arm.urdf              # 이 폴더(config/models/arm/)에 함께 넣은 파일
+# pkg: myarm_description
+# xacro: urdf/my_arm.urdf.xacro
+args: {}                       # 필요 시 xacro 인자
+anchor:                        # 부모에 붙는 프레임(비우면 루트 링크 사용)
