@@ -13,7 +13,7 @@ find_package(ament_cmake REQUIRED)
 
 # 리소스 설치 (urdf/xacro, meshes, launch, config)
 install(
-  DIRECTORY urdf meshes launch config
+  DIRECTORY urdf meshes launch config rviz
   DESTINATION share/${PROJECT_NAME}
 )
 

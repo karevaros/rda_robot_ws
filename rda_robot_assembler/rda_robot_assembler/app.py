@@ -30,8 +30,13 @@ SLOT_COLORS = {
 
 DEG = 180.0 / math.pi
 
-# 3D 뷰 그리드/스케일 고정: 각 축 4000mm(=4.0m) 범위. [xmin,xmax,ymin,ymax,zmin,zmax]
-GRID_BOUNDS = (-2.0, 2.0, -2.0, 2.0, 0.0, 4.0)
+# 3D 뷰 외곽 경계 박스/바닥 격자 크기. GRID_SPAN(m) = 축당 전체 폭. 눈금 1m 간격.
+GRID_SPAN = 2.0  # 외곽 격자를 키우려면 이 값만 조정(예: 4.0)
+_H = GRID_SPAN / 2.0
+# [xmin,xmax,ymin,ymax,zmin,zmax] — XY 중앙정렬, Z 는 지면(0)부터
+GRID_BOUNDS = (-_H, _H, -_H, _H, 0.0, GRID_SPAN)
+# 1m 간격 눈금 개수(span/1 + 1)
+_NLAB = int(round(GRID_SPAN)) + 1
 
 
 def default_mounts():
@@ -285,19 +290,21 @@ class Assembler(QtWidgets.QMainWindow):
             self.plotter.clear()
             self.actors = {}
             self.plotter.add_axes()
-            # 그리드/축 스케일을 4000mm 고정 + 눈금 1m 간격(bounds 4m / n_labels 5 → 1.0m)
+            # 외곽 경계 박스 + 눈금 1m 간격(GRID_SPAN 기준)
             try:
                 self.plotter.show_grid(
                     bounds=GRID_BOUNDS, color="gray",
-                    n_xlabels=5, n_ylabels=5, n_zlabels=5,
+                    n_xlabels=_NLAB, n_ylabels=_NLAB, n_zlabels=_NLAB,
                     xtitle="X (m)", ytitle="Y (m)", ztitle="Z (m)",
                 )
             except Exception:
                 pass
-            # 바닥 1m 격자면(4x4m, 1m 셀) — 크기 감각용 레퍼런스
+            # 바닥 1m 셀 격자면(GRID_SPAN x GRID_SPAN) — 크기 감각용 레퍼런스
             try:
+                ncell = max(1, int(round(GRID_SPAN)))
                 floor = pv.Plane(center=(0, 0, 0), direction=(0, 0, 1),
-                                 i_size=4, j_size=4, i_resolution=4, j_resolution=4)
+                                 i_size=GRID_SPAN, j_size=GRID_SPAN,
+                                 i_resolution=ncell, j_resolution=ncell)
                 self.plotter.add_mesh(floor, style="wireframe", color="dimgray",
                                       line_width=1, name="_floor_grid", pickable=False)
             except Exception:
@@ -330,12 +337,14 @@ class Assembler(QtWidgets.QMainWindow):
         lst = []
         for geom, T in part.mesh_instances:
             try:
-                mesh = pv.wrap(geom)
+                # T(root→mesh)를 정점에 baking → mesh 좌표가 root 프레임 기준(작은 값).
+                # (일부 vendor mesh 는 로컬 정점이 원점에서 수 m 떨어져 있어 baking 필수)
+                mesh = pv.wrap(geom).transform(np.asarray(T, dtype=float), inplace=False)
             except Exception:
                 continue
             actor = self.plotter.add_mesh(mesh, color=color, opacity=1.0,
-                                          smooth_shading=True, name=None)
-            lst.append((actor, np.asarray(T, dtype=float)))
+                                          smooth_shading=True)
+            lst.append(actor)
         self.actors[slot] = lst
 
     def _update_transforms(self):
@@ -348,10 +357,10 @@ class Assembler(QtWidgets.QMainWindow):
         for slot, lst in self.actors.items():
             W = world.get(slot)
             visible = W is not None
-            for actor, Tm in lst:
+            for actor in lst:
                 actor.SetVisibility(visible)
                 if visible:
-                    actor.user_matrix = W @ Tm
+                    actor.user_matrix = W
         # 부착 프레임 축
         self.plotter.remove_actor("_attach_axis", render=False)
         if self.chk_axes.isChecked() and self.active_slot in self.mounts:

@@ -1,31 +1,52 @@
-# 파트 결합(mount) 설정 — rda_robot_assembler 앱이 생성/갱신.
-# rda_robot.urdf.xacro 가 이 파일을 읽어 각 파트의 부착 프레임·오프셋을 적용한다.
-# xyz: m, rpy: rad (URDF 규약). parent_frame: 통합 트리에 존재하는 링크명.
 mounts:
   arm:
     model: rb5_850e
     parent_slot: base
     parent_frame: base_link
-    xyz: [0.0, 0.0, 0.25]
-    rpy: [0.0, 0.0, 0.0]
+    xyz:
+    - 0.0
+    - 0.0
+    - 0.095
+    rpy:
+    - 0.0
+    - 0.0
+    - 1.570796
   endeffector:
     model: onrobot_rg2
     parent_slot: arm
     parent_frame: tcp
-    xyz: [0.0, 0.0, 0.0]
-    rpy: [0.0, 0.0, 0.0]
+    xyz:
+    - 0.0
+    - 0.0
+    - 0.0
+    rpy:
+    - 0.0
+    - 0.0
+    - -1.570796
   sensor1:
     model: d405
     parent_slot: endeffector
     parent_frame: rg2_hand
-    xyz: [0.02, 0.0, 0.03]
-    rpy: [0.0, 0.0, 0.0]
+    xyz:
+    - 0.02
+    - 0.0
+    - 0.03
+    rpy:
+    - 0.0
+    - 0.0
+    - 0.0
   sensor2:
     model: d435i
     parent_slot: base
     parent_frame: base_link
-    xyz: [-0.25, 0.0, 0.6]
-    rpy: [0.0, 0.3, 0.0]
+    xyz:
+    - 0.0
+    - -0.14
+    - 0.6
+    rpy:
+    - 0.0
+    - 0.0
+    - 1.570796
 models:
   base: scout_v2
   arm: rb5_850e
