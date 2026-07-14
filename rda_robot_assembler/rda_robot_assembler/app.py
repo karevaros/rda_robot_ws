@@ -30,6 +30,9 @@ SLOT_COLORS = {
 
 DEG = 180.0 / math.pi
 
+# 3D 뷰 그리드/스케일 고정: 각 축 4000mm(=4.0m) 범위. [xmin,xmax,ymin,ymax,zmin,zmax]
+GRID_BOUNDS = (-2.0, 2.0, -2.0, 2.0, 0.0, 4.0)
+
 
 def default_mounts():
     """초안 기본 결합값(비교표 초안 기준)."""
@@ -204,7 +207,7 @@ class Assembler(QtWidgets.QMainWindow):
         self.chk_axes = QtWidgets.QCheckBox("부착 프레임 축 표시"); self.chk_axes.setChecked(True)
         self.chk_axes.stateChanged.connect(lambda _s: self._refresh_view())
         btn_reset_view = QtWidgets.QPushButton("뷰 리셋")
-        btn_reset_view.clicked.connect(lambda: self.plotter.reset_camera())
+        btn_reset_view.clicked.connect(self._fit_view)
         tb.addWidget(self.chk_axes); tb.addStretch(1); tb.addWidget(btn_reset_view)
         mv.addLayout(tb)
         h.addWidget(mid, 1)
@@ -282,8 +285,12 @@ class Assembler(QtWidgets.QMainWindow):
             self.plotter.clear()
             self.actors = {}
             self.plotter.add_axes()
+            # 그리드/축 스케일을 4000mm 고정(자동맞춤으로 로봇이 작게 보이는 문제 방지)
             try:
-                self.plotter.show_grid(color="gray")
+                self.plotter.show_grid(
+                    bounds=GRID_BOUNDS, color="gray",
+                    xtitle="X (m)", ytitle="Y (m)", ztitle="Z (m)",
+                )
             except Exception:
                 pass
             for slot in reg.SLOTS:
@@ -291,7 +298,22 @@ class Assembler(QtWidgets.QMainWindow):
                     continue
                 self._add_part_actors(slot)
         self._update_transforms()
+        if full:
+            self._fit_view()
         self.plotter.render()
+
+    def _fit_view(self):
+        """카메라를 고정 4m 영역에 맞춤(자동 scene fit 대신)."""
+        try:
+            self.plotter.reset_camera(bounds=list(GRID_BOUNDS))
+        except TypeError:
+            # 구버전 호환: 경계 상자 기준 수동 설정
+            self.plotter.reset_camera()
+        try:
+            self.plotter.view_isometric()
+            self.plotter.reset_camera(bounds=list(GRID_BOUNDS))
+        except Exception:
+            pass
 
     def _add_part_actors(self, slot):
         part = self.loaded[slot]
