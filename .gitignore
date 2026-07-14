@@ -5,3 +5,6 @@ __pycache__/
 *.pyc
 .vscode/
 *.stl.bak
+
+# 외부 벤더 리포 clone (upstream 별도 관리, 우리 저장소엔 추출물만 편입)
+vendor/

@@ -1,0 +1,13 @@
+<?xml version="1.0"?>
+<!-- OnRobot RG2 단독 표시용 (RViz2 검증). world 에 그리퍼를 부착. -->
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="onrobot_rg2_standalone">
+
+  <xacro:include filename="$(find rda_robot_description)/urdf/parts/endeffector/onrobot_rg2_macro.xacro"/>
+
+  <link name="world"/>
+
+  <xacro:onrobot_rg2 parent="world" prefix="">
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </xacro:onrobot_rg2>
+
+</robot>

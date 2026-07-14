@@ -1,0 +1,97 @@
+<?xml version="1.0"?>
+<!--
+  OnRobot RG2 2-finger gripper — rda_robot_description 편입판
+  출처: AndrejOrsula/ur5_rg2_ign (BSD) 의 ur5_rg2.urdf 에서 RG2 부분만 추출.
+  변경점:
+    - package 참조를 rda_robot_description/meshes/rg2 로 재지정.
+    - 원본 rg2_finger_joint2 의 mimic 대상이 panda_finger_joint1(오기)이던 것을
+      rg2_finger_joint1 로 수정.
+    - parent link 에 부착 가능한 xacro:macro 로 재구성.
+  링크: <prefix>rg2_hand / rg2_leftfinger / rg2_rightfinger
+  관절: <prefix>rg2_finger_joint1(revolute, 구동), rg2_finger_joint2(mimic)
+-->
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="onrobot_rg2">
+
+  <xacro:macro name="onrobot_rg2" params="parent prefix:='' *origin">
+
+    <!-- 그리퍼 본체를 parent 에 고정 -->
+    <joint name="${prefix}rg2_hand_joint" type="fixed">
+      <parent link="${parent}"/>
+      <child link="${prefix}rg2_hand"/>
+      <xacro:insert_block name="origin"/>
+    </joint>
+
+    <link name="${prefix}rg2_hand">
+      <visual name="${prefix}rg2_hand_visual">
+        <geometry>
+          <mesh filename="package://rda_robot_description/meshes/rg2/visual/hand.dae"/>
+        </geometry>
+      </visual>
+      <collision name="${prefix}rg2_hand_collision">
+        <geometry>
+          <mesh filename="package://rda_robot_description/meshes/rg2/collision/hand.stl"/>
+        </geometry>
+      </collision>
+      <inertial>
+        <mass value="0.5"/>
+        <inertia ixx="1e-3" ixy="0" ixz="0" iyy="1e-3" iyz="0" izz="1e-3"/>
+      </inertial>
+    </link>
+
+    <link name="${prefix}rg2_leftfinger">
+      <visual>
+        <geometry>
+          <mesh filename="package://rda_robot_description/meshes/rg2/visual/finger.dae"/>
+        </geometry>
+      </visual>
+      <collision>
+        <geometry>
+          <mesh filename="package://rda_robot_description/meshes/rg2/collision/finger.stl"/>
+        </geometry>
+      </collision>
+      <inertial>
+        <mass value="0.1"/>
+        <inertia ixx="1e-4" ixy="0" ixz="0" iyy="1e-4" iyz="0" izz="1e-4"/>
+      </inertial>
+    </link>
+
+    <link name="${prefix}rg2_rightfinger">
+      <visual>
+        <origin rpy="3.141592653589793 0 0" xyz="0 0 0"/>
+        <geometry>
+          <mesh filename="package://rda_robot_description/meshes/rg2/visual/finger.dae"/>
+        </geometry>
+      </visual>
+      <collision>
+        <origin rpy="3.141592653589793 0 0" xyz="0 0 0"/>
+        <geometry>
+          <mesh filename="package://rda_robot_description/meshes/rg2/collision/finger.stl"/>
+        </geometry>
+      </collision>
+      <inertial>
+        <mass value="0.1"/>
+        <inertia ixx="1e-4" ixy="0" ixz="0" iyy="1e-4" iyz="0" izz="1e-4"/>
+      </inertial>
+    </link>
+
+    <!-- 구동 핑거 (좌) -->
+    <joint name="${prefix}rg2_finger_joint1" type="revolute">
+      <parent link="${prefix}rg2_hand"/>
+      <child link="${prefix}rg2_leftfinger"/>
+      <origin rpy="0 0 0" xyz="0.105 0.017 0"/>
+      <axis xyz="0 0 1"/>
+      <limit effort="10.6" lower="0.0" upper="1.18" velocity="1.57"/>
+    </joint>
+
+    <!-- 종동 핑거 (우) — 좌측 관절을 미러링 -->
+    <joint name="${prefix}rg2_finger_joint2" type="revolute">
+      <parent link="${prefix}rg2_hand"/>
+      <child link="${prefix}rg2_rightfinger"/>
+      <origin rpy="0 0 0" xyz="0.105 -0.017 0"/>
+      <axis xyz="0 0 -1"/>
+      <limit effort="10.6" lower="0.0" upper="1.18" velocity="1.57"/>
+      <mimic joint="${prefix}rg2_finger_joint1"/>
+    </joint>
+
+  </xacro:macro>
+</robot>
