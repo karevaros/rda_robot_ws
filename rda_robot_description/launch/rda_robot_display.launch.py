@@ -41,6 +41,8 @@ def _launch_setup(context, *args, **kwargs):
 
     rsp = Node(package="robot_state_publisher", executable="robot_state_publisher",
                output="screen", parameters=[{"robot_description": robot_description}])
+    # robot_description 은 rsp 가 /robot_description 토픽(latched)으로 발행 → jsp_gui 가 구독.
+    # (주의) robot_description 을 CLI '-p' 로 넘기면 XML 개행/특수문자로 파싱 실패하니 금지.
     jsp = Node(package="joint_state_publisher_gui", executable="joint_state_publisher_gui",
                parameters=[{"zeros": zeros}] if zeros else [])
     rviz = Node(package="rviz2", executable="rviz2", output="screen",
