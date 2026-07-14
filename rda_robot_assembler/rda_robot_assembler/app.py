@@ -285,12 +285,21 @@ class Assembler(QtWidgets.QMainWindow):
             self.plotter.clear()
             self.actors = {}
             self.plotter.add_axes()
-            # 그리드/축 스케일을 4000mm 고정(자동맞춤으로 로봇이 작게 보이는 문제 방지)
+            # 그리드/축 스케일을 4000mm 고정 + 눈금 1m 간격(bounds 4m / n_labels 5 → 1.0m)
             try:
                 self.plotter.show_grid(
                     bounds=GRID_BOUNDS, color="gray",
+                    n_xlabels=5, n_ylabels=5, n_zlabels=5,
                     xtitle="X (m)", ytitle="Y (m)", ztitle="Z (m)",
                 )
+            except Exception:
+                pass
+            # 바닥 1m 격자면(4x4m, 1m 셀) — 크기 감각용 레퍼런스
+            try:
+                floor = pv.Plane(center=(0, 0, 0), direction=(0, 0, 1),
+                                 i_size=4, j_size=4, i_resolution=4, j_resolution=4)
+                self.plotter.add_mesh(floor, style="wireframe", color="dimgray",
+                                      line_width=1, name="_floor_grid", pickable=False)
             except Exception:
                 pass
             for slot in reg.SLOTS:
