@@ -59,7 +59,31 @@ class LoadedPart:
         self.scene = self.robot.scene
         self.base_frame = self.scene.graph.base_frame
 
-        # 프레임(링크) FK: name -> 4x4 (root->frame)
+        # 링크 이름(부착점 드롭다운용, 순서 보존)
+        self.link_names = list(self.robot.link_map.keys())
+
+        # 가동(actuated) 관절 + limit — 초기 포즈 UI 용
+        self.actuated = list(getattr(self.robot, "actuated_joint_names", []))
+        self.joint_limits = {}
+        for jn in self.actuated:
+            j = self.robot.joint_map.get(jn)
+            lo, hi = -3.14159, 3.14159
+            if j is not None and getattr(j, "limit", None) is not None:
+                if j.limit.lower is not None:
+                    lo = float(j.limit.lower)
+                if j.limit.upper is not None:
+                    hi = float(j.limit.upper)
+            self.joint_limits[jn] = (lo, hi)
+        self.joint_pose = {jn: 0.0 for jn in self.actuated}
+
+        # anchor(부모에 붙는 프레임) 이름 — 관절과 무관(루트측)하므로 고정
+        anchor = model.get("anchor") or self.root
+        self.anchor = anchor
+
+        self._extract()
+
+    def _extract(self):
+        """현재 관절 포즈 기준으로 프레임 FK / anchor 변환 / mesh 인스턴스 재계산."""
         self.frames = {}
         for name in self.scene.graph.nodes:
             try:
@@ -67,16 +91,11 @@ class LoadedPart:
                 self.frames[name] = np.asarray(T, dtype=float)
             except Exception:
                 pass
-        # 링크 이름은 순서 보존(부착점 드롭다운용)
-        self.link_names = list(self.robot.link_map.keys())
-
-        # anchor(부모에 붙는 프레임) 변환 root->anchor
-        anchor = model.get("anchor") or self.root
-        self.anchor = anchor if anchor in self.frames else self.root
+        if self.anchor not in self.frames:
+            self.anchor = self.root
         self.T_root_anchor = self.frames.get(self.anchor, np.eye(4))
         self.T_anchor_root = np.linalg.inv(self.T_root_anchor)
 
-        # 렌더용 mesh 인스턴스: (trimesh_geom, T_root_mesh)
         self.mesh_instances = []
         for node in self.scene.graph.nodes_geometry:
             T, gname = self.scene.graph[node]
@@ -84,6 +103,23 @@ class LoadedPart:
             if geom is None or not hasattr(geom, "vertices"):
                 continue
             self.mesh_instances.append((geom, np.asarray(T, dtype=float)))
+
+    def set_joint_pose(self, pose):
+        """pose: dict {joint_name: rad}. 가동관절만 반영 후 FK/mesh 재계산."""
+        if not self.actuated:
+            return
+        cfg = {}
+        for jn in self.actuated:
+            v = pose.get(jn, self.joint_pose.get(jn, 0.0))
+            self.joint_pose[jn] = float(v)
+            cfg[jn] = float(v)
+        try:
+            self.robot.update_cfg(cfg)
+        except Exception:
+            # dict 미지원 버전 대비: 순서 배열로
+            arr = np.array([cfg[j] for j in self.actuated], dtype=float)
+            self.robot.update_cfg(arr)
+        self._extract()
 
     def frame_world(self, part_world, frame):
         """이 파트가 part_world 에 놓였을 때 특정 프레임의 world 변환."""

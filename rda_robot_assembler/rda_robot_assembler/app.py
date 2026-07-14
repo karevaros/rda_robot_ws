@@ -147,6 +147,63 @@ class MountEditor(QtWidgets.QWidget):
         )
 
 
+class JointPoseEditor(QtWidgets.QWidget):
+    """활성 슬롯의 가동관절 초기 포즈(슬라이더+°). 관절 없으면 숨김."""
+    changed = QtCore.pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._block = False
+        self.v = QtWidgets.QVBoxLayout(self)
+        self.v.setContentsMargins(0, 0, 0, 0)
+        self.title = QtWidgets.QLabel("관절 초기 포즈")
+        f = self.title.font(); f.setBold(True)
+        self.title.setFont(f)
+        self.v.addWidget(self.title)
+        self.form_host = QtWidgets.QWidget()
+        self.form = QtWidgets.QFormLayout(self.form_host)
+        self.form.setContentsMargins(0, 0, 0, 0)
+        self.v.addWidget(self.form_host)
+        self.rows = {}   # joint -> (slider, spin)
+        self.active = None
+
+    def load(self, slot, part):
+        """part.actuated / joint_limits / joint_pose 로 행 재구성."""
+        self._block = True
+        self.active = slot
+        # 기존 행 제거
+        while self.form.rowCount():
+            self.form.removeRow(0)
+        self.rows = {}
+        acts = getattr(part, "actuated", []) if part else []
+        self.setVisible(bool(acts))
+        for jn in acts:
+            lo, hi = part.joint_limits.get(jn, (-math.pi, math.pi))
+            val = part.joint_pose.get(jn, 0.0)
+            slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+            slider.setRange(int(math.degrees(lo)), int(math.degrees(hi)))
+            spin = QtWidgets.QDoubleSpinBox()
+            spin.setRange(math.degrees(lo), math.degrees(hi))
+            spin.setDecimals(1); spin.setSingleStep(1.0); spin.setSuffix(" °")
+            spin.setValue(math.degrees(val)); slider.setValue(int(math.degrees(val)))
+            slider.valueChanged.connect(lambda d, s=spin: (s.blockSignals(True), s.setValue(d), s.blockSignals(False), self._emit()))
+            spin.valueChanged.connect(lambda d, sl=slider: (sl.blockSignals(True), sl.setValue(int(d)), sl.blockSignals(False), self._emit()))
+            row = QtWidgets.QWidget(); hl = QtWidgets.QHBoxLayout(row)
+            hl.setContentsMargins(0, 0, 0, 0)
+            hl.addWidget(slider, 1); hl.addWidget(spin)
+            self.form.addRow(jn, row)
+            self.rows[jn] = (slider, spin)
+        self._block = False
+
+    def _emit(self):
+        if not self._block:
+            self.changed.emit()
+
+    def current_pose(self):
+        """joint -> rad"""
+        return {jn: math.radians(spin.value()) for jn, (sl, spin) in self.rows.items()}
+
+
 class Assembler(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
@@ -156,8 +213,9 @@ class Assembler(QtWidgets.QMainWindow):
         self.models = {s: reg.default_model(s) for s in reg.SLOTS}
         self.enabled = {s: True for s in reg.SLOTS}
         self.loaded = {}          # slot -> LoadedPart
-        self.actors = {}          # slot -> list[(actor, T_root_mesh)]
+        self.actors = {}          # slot -> list[actor]
         self.mounts = default_mounts()
+        self.joint_pose = {}      # slot -> {joint: rad}
         self.active_slot = "arm"
 
         self._build_ui()
@@ -223,6 +281,11 @@ class Assembler(QtWidgets.QMainWindow):
         self.editor = MountEditor()
         self.editor.changed.connect(self._on_mount_changed)
         rv.addWidget(self.editor)
+        line = QtWidgets.QFrame(); line.setFrameShape(QtWidgets.QFrame.HLine)
+        rv.addWidget(line)
+        self.jpose = JointPoseEditor()
+        self.jpose.changed.connect(self._on_jpose_changed)
+        rv.addWidget(self.jpose)
         rv.addStretch(1)
         self.lbl_status = QtWidgets.QLabel("")
         self.lbl_status.setWordWrap(True)
@@ -275,6 +338,7 @@ class Assembler(QtWidgets.QMainWindow):
             return
         self.active_slot = slot
         self.editor.load(slot, self.mounts.get(slot, Mount()))
+        self.jpose.load(slot, self.loaded.get(slot))
         for s, w in self.slot_widgets.items():
             w["box"].setStyleSheet("QGroupBox{font-weight:bold;border:2px solid #e08a3c;margin-top:6px;}"
                                    if s == slot else "")
@@ -283,6 +347,27 @@ class Assembler(QtWidgets.QMainWindow):
         if self.active_slot:
             self.mounts[self.active_slot] = self.editor.current_mount()
             self._refresh_view()
+
+    def _on_jpose_changed(self):
+        slot = self.active_slot
+        if slot and slot in self.loaded:
+            self.joint_pose[slot] = self.jpose.current_pose()
+            self._apply_joint_pose(slot)
+
+    def _apply_joint_pose(self, slot):
+        """관절 포즈를 파트에 반영 → 해당 파트 액터 재생성 → 배치 갱신."""
+        part = self.loaded.get(slot)
+        if part is None:
+            return
+        part.set_joint_pose(self.joint_pose.get(slot, {}))
+        for a in self.actors.get(slot, []):
+            try:
+                self.plotter.remove_actor(a, render=False)
+            except Exception:
+                pass
+        self._add_part_actors(slot)
+        self._update_transforms()
+        self.plotter.render()
 
     # ---------- 렌더링 ----------
     def _refresh_view(self, full=False):
@@ -411,10 +496,18 @@ class Assembler(QtWidgets.QMainWindow):
                 "xyz": [round(float(v), 5) for v in mnt.xyz],
                 "rpy": [round(float(v), 6) for v in mnt.rpy],
             }
+        # 관절 초기 포즈(flat: joint->rad) — 로드된 모든 가동관절 현재값
+        ipose = {}
+        for slot, part in self.loaded.items():
+            if not self.enabled.get(slot):
+                continue
+            for jn, v in getattr(part, "joint_pose", {}).items():
+                ipose[jn] = round(float(v), 6)
         path = self._mounts_path()
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w") as f:
-            yaml.safe_dump({"mounts": data, "models": self.models}, f,
+            yaml.safe_dump({"mounts": data, "models": self.models,
+                            "initial_pose": ipose}, f,
                            allow_unicode=True, sort_keys=False)
         QtWidgets.QMessageBox.information(self, "저장", f"저장됨:\n{path}")
 
@@ -429,8 +522,15 @@ class Assembler(QtWidgets.QMainWindow):
         for slot, m in mp.items():
             self.mounts[slot] = Mount(m.get("parent_slot"), m.get("parent_frame"),
                                       m.get("xyz", [0, 0, 0]), m.get("rpy", [0, 0, 0]))
+        # 관절 초기 포즈 배분·반영
+        ip = d.get("initial_pose", {}) or {}
+        for slot, part in self.loaded.items():
+            pose = {jn: float(ip[jn]) for jn in getattr(part, "actuated", []) if jn in ip}
+            if pose:
+                self.joint_pose[slot] = pose
+                part.set_joint_pose(pose)
         self._select_slot(self.active_slot)
-        self._refresh_view()
+        self._refresh_view(full=True)
 
     def _reset(self):
         self.mounts = default_mounts()
