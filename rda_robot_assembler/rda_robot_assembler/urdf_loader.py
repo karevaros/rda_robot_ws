@@ -80,6 +80,13 @@ class LoadedPart:
         anchor = model.get("anchor") or self.root
         self.anchor = anchor
 
+        # 인접 링크쌍(관절로 연결 = 설계상 접촉) — 자충돌 검사 시 무시용
+        self.adjacent_links = set()
+        for j in self.robot.joint_map.values():
+            pa, ch = getattr(j, "parent", None), getattr(j, "child", None)
+            if pa and ch:
+                self.adjacent_links.add(frozenset((pa, ch)))
+
         self._extract()
 
     def _extract(self):
@@ -96,13 +103,25 @@ class LoadedPart:
         self.T_root_anchor = self.frames.get(self.anchor, np.eye(4))
         self.T_anchor_root = np.linalg.inv(self.T_root_anchor)
 
+        # 렌더용 mesh 인스턴스 + 충돌검사용 링크별 mesh(면 있는 것만)
         self.mesh_instances = []
-        for node in self.scene.graph.nodes_geometry:
-            T, gname = self.scene.graph[node]
+        self.link_meshes = {}   # link_name -> list[(geom, T_root_mesh)]
+        graph = self.scene.graph
+        for node in graph.nodes_geometry:
+            T, gname = graph[node]
             geom = self.scene.geometry.get(gname)
             if geom is None or not hasattr(geom, "vertices"):
                 continue
-            self.mesh_instances.append((geom, np.asarray(T, dtype=float)))
+            T = np.asarray(T, dtype=float)
+            self.mesh_instances.append((geom, T))
+            # 충돌객체는 삼각면이 있어야 함(FCL). 링크는 geometry 노드의 부모 프레임.
+            if getattr(geom, "faces", None) is None:
+                continue
+            try:
+                link = graph.transforms.parents.get(node) or self.root
+            except Exception:
+                link = self.root
+            self.link_meshes.setdefault(link, []).append((geom, T))
 
     def set_joint_pose(self, pose):
         """pose: dict {joint_name: rad}. 가동관절만 반영 후 FK/mesh 재계산."""

@@ -18,6 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from rda_robot_assembler import part_registry as reg
 from rda_robot_assembler import urdf_loader as ul
 from rda_robot_assembler.assembly import Mount, compute_placements
+from rda_robot_assembler import collision as col
 
 # 슬롯별 표시 색(파트 구분용)
 SLOT_COLORS = {
@@ -217,12 +218,15 @@ class Assembler(QtWidgets.QMainWindow):
         self.mounts = default_mounts()
         self.joint_pose = {}      # slot -> {joint: rad}
         self.active_slot = "arm"
+        self.collider = col.CollisionChecker()   # 자충돌 검사기
 
         self._build_ui()
         self._reload_all_parts()
         self.editor.set_providers(self._slot_choices, self._frames_of)
         self._select_slot("arm")
         self._refresh_view(full=True)
+        # 초기(기본) 배치의 겹침을 기준으로 보정 → 이후 이탈만 경고
+        self._calibrate_baseline(initial=True)
 
     # ---------- UI ----------
     def _build_ui(self):
@@ -269,9 +273,18 @@ class Assembler(QtWidgets.QMainWindow):
         tb = QtWidgets.QHBoxLayout()
         self.chk_axes = QtWidgets.QCheckBox("부착 프레임 축 표시"); self.chk_axes.setChecked(True)
         self.chk_axes.stateChanged.connect(lambda _s: self._refresh_view())
+        self.chk_collision = QtWidgets.QCheckBox("충돌 검사"); self.chk_collision.setChecked(True)
+        self.chk_collision.stateChanged.connect(self._on_collision_toggle)
+        btn_calib = QtWidgets.QPushButton("기준 보정")
+        btn_calib.setToolTip("현재 겹침을 기준으로 등록해 이후 무시(모델 자체 겹침 보정)")
+        btn_calib.clicked.connect(lambda _c: self._calibrate_baseline())
+        btn_calib_clear = QtWidgets.QPushButton("보정 해제")
+        btn_calib_clear.clicked.connect(self._clear_baseline)
         btn_reset_view = QtWidgets.QPushButton("뷰 리셋")
         btn_reset_view.clicked.connect(self._fit_view)
-        tb.addWidget(self.chk_axes); tb.addStretch(1); tb.addWidget(btn_reset_view)
+        tb.addWidget(self.chk_axes); tb.addWidget(self.chk_collision)
+        tb.addWidget(btn_calib); tb.addWidget(btn_calib_clear)
+        tb.addStretch(1); tb.addWidget(btn_reset_view)
         mv.addLayout(tb)
         h.addWidget(mid, 1)
 
@@ -287,6 +300,9 @@ class Assembler(QtWidgets.QMainWindow):
         self.jpose.changed.connect(self._on_jpose_changed)
         rv.addWidget(self.jpose)
         rv.addStretch(1)
+        self.lbl_collision = QtWidgets.QLabel("자충돌: —")
+        self.lbl_collision.setWordWrap(True)
+        rv.addWidget(self.lbl_collision)
         self.lbl_status = QtWidgets.QLabel("")
         self.lbl_status.setWordWrap(True)
         self.lbl_status.setStyleSheet("color:#c04a5e;")
@@ -316,8 +332,17 @@ class Assembler(QtWidgets.QMainWindow):
         except Exception as e:
             self.loaded.pop(slot, None)
             self._set_status(f"[{slot}] 로드 실패: {e}")
+        self._sync_collider(slot)
         if refresh:
             self._refresh_view(full=True)
+
+    def _sync_collider(self, slot):
+        """충돌객체를 loaded&enabled 상태와 일치시킴(포즈 반영 포함)."""
+        part = self.loaded.get(slot)
+        if part is not None and self.enabled.get(slot):
+            self.collider.rebuild_part(slot, part)
+        else:
+            self.collider.drop_part(slot)
 
     def _set_status(self, msg):
         self.lbl_status.setText(msg)
@@ -331,6 +356,7 @@ class Assembler(QtWidgets.QMainWindow):
 
     def _on_enable_changed(self, slot):
         self.enabled[slot] = self.slot_widgets[slot]["chk"].isChecked()
+        self._sync_collider(slot)
         self._refresh_view(full=True)
 
     def _select_slot(self, slot):
@@ -360,6 +386,7 @@ class Assembler(QtWidgets.QMainWindow):
         if part is None:
             return
         part.set_joint_pose(self.joint_pose.get(slot, {}))
+        self._sync_collider(slot)   # 바뀐 포즈로 충돌객체 재빌드
         for a in self.actors.get(slot, []):
             try:
                 self.plotter.remove_actor(a, render=False)
@@ -368,6 +395,45 @@ class Assembler(QtWidgets.QMainWindow):
         self._add_part_actors(slot)
         self._update_transforms()
         self.plotter.render()
+
+    # ---------- 자충돌 ----------
+    def _report_collision(self, active, pairs):
+        if not getattr(self, "lbl_collision", None):
+            return
+        if not active:
+            self.lbl_collision.setText("자충돌 검사: 꺼짐")
+            self.lbl_collision.setStyleSheet("color:gray;")
+        elif not pairs:
+            self.lbl_collision.setText("자충돌: 없음 ✓")
+            self.lbl_collision.setStyleSheet("color:#2e7d32;")
+        else:
+            def lbl(s):
+                return reg.SLOT_LABELS.get(s, s)
+            txt = ", ".join(f"{lbl(a)}(자체)" if a == b else f"{lbl(a)}↔{lbl(b)}"
+                            for a, b in sorted(pairs))
+            self.lbl_collision.setText(f"⚠ 자충돌 {len(pairs)}건: {txt}")
+            self.lbl_collision.setStyleSheet("color:#c62828; font-weight:bold;")
+
+    def _on_collision_toggle(self):
+        self.collider.enabled = self.chk_collision.isChecked()
+        self._refresh_view()
+
+    def _calibrate_baseline(self, initial=False):
+        """현재 배치의 겹침을 기준(무시)으로 등록."""
+        placed = {s: self.loaded[s] for s in self.loaded if self.enabled.get(s)}
+        world = compute_placements(placed, self.mounts)
+        for s in world:
+            self.collider.set_world(s, world[s])
+        n = self.collider.calibrate({s: self.loaded[s] for s in world}, self.mounts)
+        self._refresh_view()
+        if not initial:
+            QtWidgets.QMessageBox.information(
+                self, "기준 보정",
+                f"현재 겹침 {n}쌍을 기준으로 등록했습니다.\n이후 이 겹침은 자충돌로 보지 않습니다.")
+
+    def _clear_baseline(self):
+        self.collider.clear_calibration()
+        self._refresh_view()
 
     # ---------- 렌더링 ----------
     def _refresh_view(self, full=False):
@@ -458,6 +524,27 @@ class Assembler(QtWidgets.QMainWindow):
             self._set_status("미배치(부모 확인 필요): " + ", ".join(missing))
         elif self.lbl_status.text().startswith("미배치"):
             self._set_status("")
+
+        # ---- 자충돌 검사 & 하이라이트(충돌 파트=빨강) ----
+        colliding_slots, pairs = set(), set()
+        active = getattr(self, "collider", None) is not None and self.collider.enabled
+        if active:
+            for slot in world:
+                self.collider.set_world(slot, world[slot])
+            loaded_placed = {s: self.loaded[s] for s in world}
+            for pr in self.collider.check(loaded_placed, self.mounts):
+                a, b = tuple(pr)
+                sa, sb = a.split("::")[0], b.split("::")[0]
+                colliding_slots.update((sa, sb))
+                pairs.add(tuple(sorted((sa, sb))))
+        self._report_collision(active, pairs)
+        for slot, lst in self.actors.items():
+            c = "#ff2020" if slot in colliding_slots else SLOT_COLORS.get(slot, "#cccccc")
+            for actor in lst:
+                try:
+                    actor.prop.color = c
+                except Exception:
+                    pass
 
     def _draw_axis(self, T, name, length=0.15):
         # 간단한 3색 축 마커

@@ -15,7 +15,7 @@
   <exec_depend>python3-numpy</exec_depend>
   <exec_depend>python3-scipy</exec_depend>
   <exec_depend>rda_robot_description</exec_depend>
-  <!-- pip 설치 필요(rosdep 밖): PyQt5, pyvista, pyvistaqt, trimesh, yourdfpy, pycollada -->
+  <!-- pip 설치 필요(rosdep 밖): PyQt5, pyvista, pyvistaqt, trimesh, yourdfpy, pycollada, python-fcl(자충돌 검사) -->
 
   <export>
     <build_type>ament_python</build_type>
