@@ -1,53 +1,62 @@
 <?xml version="1.0"?>
 <!--
-  rda_robot — 4개 파트 통합 URDF 초안 (2주차 산출물)
-  구성: ⓐScout 2.0(모바일, 루트) + ⓑRB5-850e(팔) + ⓒOnRobot RG2(그리퍼)
-        + ⓓD405(eye-in-hand) + D435i(eye-to-hand)
-  주의:
-    - mount origin(장착 위치/자세)은 도면 확정 전 초안 추정값 = TODO.
-    - RB5는 rb_6dof 매크로 prefix 버그로 무접두(link0..6,tcp) 사용. 상세: docs/파트규약-비교.md
-  검증: xacro→urdf, check_urdf 단일 트리, RViz2 표시.
+  rda_robot — 4개 파트 통합 URDF (mounts.yaml 기반)
+  구성: ⓐScout 2.0(루트) + ⓑRB5-850e(팔) + ⓒOnRobot RG2(그리퍼)
+        + ⓓ센서1(eye-in-hand) + 센서2(eye-to-hand)
+  결합값(parent_frame·xyz·rpy)은 config/mounts.yaml 에서 읽는다.
+  → rda_robot_assembler 앱으로 mounts.yaml 을 편집하면 여기 통합 형상이 바뀐다.
+  주의: RB5 는 rb_6dof prefix 버그로 무접두(link0..6). 상세: docs/파트규약-비교.md
 -->
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="rda_robot">
 
-  <!-- ============ ⓐ 모바일: Scout 2.0 (매크로 아님 → base_link 루트 직접 정의) ============ -->
+  <xacro:arg name="mounts_file" default="$(find rda_robot_description)/config/mounts.yaml"/>
+  <xacro:property name="M" value="${xacro.load_yaml('$(arg mounts_file)')['mounts']}"/>
+
+  <!-- ============ ⓐ 모바일: Scout 2.0 (루트 base_link) ============ -->
   <xacro:include filename="$(find scout_description)/urdf/scout_v2.xacro"/>
 
   <!-- ============ ⓑ 로봇팔: RB5-850e ============ -->
   <xacro:include filename="$(find rbpodo_description)/robots/rb_6dof.xacro"/>
-  <!-- TODO: 실제 팔 장착 위치(스카웃 상판 높이/오프셋) 확정 필요 -->
+  <xacro:property name="am" value="${M['arm']}"/>
   <joint name="arm_mount_joint" type="fixed">
-    <parent link="base_link"/>
+    <parent link="${am['parent_frame']}"/>
     <child link="link0"/>
-    <origin xyz="0.0 0.0 0.25" rpy="0 0 0"/>
+    <origin xyz="${am['xyz'][0]} ${am['xyz'][1]} ${am['xyz'][2]}"
+            rpy="${am['rpy'][0]} ${am['rpy'][1]} ${am['rpy'][2]}"/>
   </joint>
   <xacro:rb_6dof model_id="rb5_850e" prefix="" tcp_name="tcp"/>
 
-  <!-- ============ ⓒ 엔드이펙터: OnRobot RG2 (팔 tcp 에 부착) ============ -->
+  <!-- ============ ⓒ 엔드이펙터: OnRobot RG2 ============ -->
   <xacro:include filename="$(find rda_robot_description)/urdf/parts/endeffector/onrobot_rg2_macro.xacro"/>
-  <!-- TODO: 실제 플랜지-그리퍼 어댑터 오프셋 확정 필요 -->
-  <xacro:onrobot_rg2 parent="tcp" prefix="">
-    <origin xyz="0 0 0" rpy="0 0 0"/>
+  <xacro:property name="em" value="${M['endeffector']}"/>
+  <xacro:onrobot_rg2 parent="${em['parent_frame']}" prefix="">
+    <origin xyz="${em['xyz'][0]} ${em['xyz'][1]} ${em['xyz'][2]}"
+            rpy="${em['rpy'][0]} ${em['rpy'][1]} ${em['rpy'][2]}"/>
   </xacro:onrobot_rg2>
 
-  <!-- ============ ⓓ 센서 1: D405 (eye-in-hand, 그리퍼 손목에 부착) ============ -->
+  <!-- ============ ⓓ 센서: RealSense (모델별 매크로 선택) ============ -->
   <xacro:include filename="$(find realsense2_description)/urdf/_d405.urdf.xacro"/>
-  <!-- TODO: 실제 eye-in-hand 브래킷 위치 확정 필요 -->
-  <xacro:sensor_d405 parent="rg2_hand" name="d405" use_nominal_extrinsics="true">
-    <origin xyz="0.02 0.0 0.03" rpy="0 0 0"/>
-  </xacro:sensor_d405>
-
-  <!-- ============ ⓓ 센서 2: D435i (eye-to-hand, 베이스 마스트에 부착) ============ -->
   <xacro:include filename="$(find realsense2_description)/urdf/_d435i.urdf.xacro"/>
-  <!-- 초안 마스트: 베이스 위 고정 프레임 (TODO: 실제 마스트 형상/높이) -->
-  <link name="sensor_mast"/>
-  <joint name="mast_joint" type="fixed">
-    <parent link="base_link"/>
-    <child link="sensor_mast"/>
-    <origin xyz="-0.25 0.0 0.6" rpy="0 0.3 0"/>
-  </joint>
-  <xacro:sensor_d435i parent="sensor_mast" name="d435i" use_nominal_extrinsics="true">
-    <origin xyz="0 0 0" rpy="0 0 0"/>
-  </xacro:sensor_d435i>
+
+  <!-- 센서 부착 매크로: 모델에 따라 d405/d435i 인스턴스화 -->
+  <xacro:macro name="mount_sensor" params="key">
+    <xacro:property name="s" value="${M[key]}"/>
+    <xacro:property name="sname" value="${s['model']}"/>
+    <xacro:if value="${sname == 'd405'}">
+      <xacro:sensor_d405 parent="${s['parent_frame']}" name="${sname}" use_nominal_extrinsics="true">
+        <origin xyz="${s['xyz'][0]} ${s['xyz'][1]} ${s['xyz'][2]}"
+                rpy="${s['rpy'][0]} ${s['rpy'][1]} ${s['rpy'][2]}"/>
+      </xacro:sensor_d405>
+    </xacro:if>
+    <xacro:if value="${sname == 'd435i'}">
+      <xacro:sensor_d435i parent="${s['parent_frame']}" name="${sname}" use_nominal_extrinsics="true">
+        <origin xyz="${s['xyz'][0]} ${s['xyz'][1]} ${s['xyz'][2]}"
+                rpy="${s['rpy'][0]} ${s['rpy'][1]} ${s['rpy'][2]}"/>
+      </xacro:sensor_d435i>
+    </xacro:if>
+  </xacro:macro>
+
+  <xacro:mount_sensor key="sensor1"/>
+  <xacro:mount_sensor key="sensor2"/>
 
 </robot>
