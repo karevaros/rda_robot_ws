@@ -6,7 +6,7 @@ mounts:
     xyz:
     - 0.0
     - 0.0
-    - 0.095
+    - 0.11
     rpy:
     - 0.0
     - 0.0
@@ -41,11 +41,11 @@ mounts:
     parent_frame: base_link
     xyz:
     - 0.0
-    - -0.14
+    - -0.32
     - 0.6
     rpy:
     - 0.0
-    - 0.0
+    - 0.300197
     - 1.570796
 models:
   base: scout_v2
@@ -53,3 +53,11 @@ models:
   endeffector: onrobot_rg2
   sensor1: d405
   sensor2: d435i
+initial_pose:
+  base: 0.0
+  shoulder: 0.0
+  elbow: 0.0
+  wrist1: 0.0
+  wrist2: 0.0
+  wrist3: 0.0
+  rg2_finger_joint1: 0.0

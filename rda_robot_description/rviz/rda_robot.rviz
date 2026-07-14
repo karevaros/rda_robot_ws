@@ -21,6 +21,14 @@ Visualization Manager:
       Enabled: true
       Show Names: true
       Marker Scale: 0.3
+    - Class: rviz_default_plugins/MarkerArray
+      Name: SelfCollision
+      Enabled: true
+      Topic:
+        Value: /self_collision_markers
+        Depth: 1
+        Durability Policy: Volatile
+        Reliability Policy: Reliable
   Global Options:
     Fixed Frame: base_link
     Frame Rate: 30

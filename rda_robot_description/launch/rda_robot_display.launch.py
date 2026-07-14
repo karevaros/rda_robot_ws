@@ -47,7 +47,14 @@ def _launch_setup(context, *args, **kwargs):
                parameters=[{"zeros": zeros}] if zeros else [])
     rviz = Node(package="rviz2", executable="rviz2", output="screen",
                 arguments=["-d", rviz_path])
-    return [rsp, jsp, rviz]
+    nodes = [rsp, jsp, rviz]
+
+    # 자충돌 모니터(기본 RViz 에서 움직임 시 충돌 감지) — collision:=false 로 끔.
+    if LaunchConfiguration("collision").perform(context).lower() in ("1", "true", "yes"):
+        nodes.append(Node(package="rda_robot_bringup",
+                          executable="self_collision_monitor.py",
+                          output="screen"))
+    return nodes
 
 
 def generate_launch_description():
@@ -56,4 +63,8 @@ def generate_launch_description():
     mounts_arg = DeclareLaunchArgument(
         "mounts_file", default_value=default_mounts,
         description="결합/초기포즈 yaml 경로")
-    return LaunchDescription([mounts_arg, OpaqueFunction(function=_launch_setup)])
+    collision_arg = DeclareLaunchArgument(
+        "collision", default_value="true",
+        description="자충돌 모니터 실행 여부(RViz 빨강 마커 표시)")
+    return LaunchDescription([mounts_arg, collision_arg,
+                              OpaqueFunction(function=_launch_setup)])
