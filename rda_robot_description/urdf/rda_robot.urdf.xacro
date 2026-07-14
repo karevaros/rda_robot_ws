@@ -1,44 +1,69 @@
 <?xml version="1.0"?>
 <!--
-  rda_robot — 4개 파트 통합 URDF (mounts.yaml 기반)
-  구성: ⓐScout 2.0(루트) + ⓑRB5-850e(팔) + ⓒOnRobot RG2(그리퍼)
-        + ⓓ센서1(eye-in-hand) + 센서2(eye-to-hand)
-  결합값(parent_frame·xyz·rpy)은 config/mounts.yaml 에서 읽는다.
-  → rda_robot_assembler 앱으로 mounts.yaml 을 편집하면 여기 통합 형상이 바뀐다.
+  rda_robot — 4개 파트 통합 URDF (mounts.yaml 기반, 모델 자동 스위칭)
+  구성: ⓐ베이스(모바일) + ⓑ로봇팔 + ⓒ엔드이펙터(그리퍼) + ⓓ센서1·2
+
+  ■ 모델/결합값 출처: config/mounts.yaml (rda_robot_assembler 앱이 저장)
+    - models.base           : 베이스 모델 id
+    - mounts.<slot>.model    : 팔/그리퍼/센서 모델 id
+    - mounts.<slot>.parent_frame / xyz / rpy : 결합 위치
+    → 앱 드롭다운에서 모델을 바꿔 저장하면 여기 통합 형상이 자동으로 바뀐다.
+
+  ■ 새 모델 추가법: 해당 슬롯의 <xacro:if value="${...=='새id'}"> 블록을 복사해
+    include(있으면)·mount joint·매크로 호출을 그 모델에 맞게 채운다.
+    (각 모델은 매크로 인터페이스·루트 링크명이 달라 슬롯당 분기 블록이 필요하다.)
+
   주의: RB5 는 rb_6dof prefix 버그로 무접두(link0..6). 상세: docs/파트규약-비교.md
 -->
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="rda_robot">
 
   <xacro:arg name="mounts_file" default="$(find rda_robot_description)/config/mounts.yaml"/>
-  <xacro:property name="M" value="${xacro.load_yaml('$(arg mounts_file)')['mounts']}"/>
+  <xacro:property name="Y" value="${xacro.load_yaml('$(arg mounts_file)')}"/>
+  <xacro:property name="M" value="${Y['mounts']}"/>
+  <xacro:property name="SEL" value="${Y['models']}"/>
 
-  <!-- ============ ⓐ 모바일: Scout 2.0 (루트 base_link) ============ -->
-  <xacro:include filename="$(find scout_description)/urdf/scout_v2.xacro"/>
+  <!-- ============ ⓐ 베이스(모바일) — models.base 로 스위칭 ============ -->
+  <xacro:property name="bname" value="${SEL['base']}"/>
+  <xacro:if value="${bname == 'scout_v2'}">
+    <xacro:include filename="$(find scout_description)/urdf/scout_v2.xacro"/>
+  </xacro:if>
+  <!-- 새 베이스 추가:
+  <xacro:if value="${bname == '새베이스id'}">
+    <xacro:include filename="$(find 새패키지)/urdf/새베이스.xacro"/>
+  </xacro:if>
+  -->
 
-  <!-- ============ ⓑ 로봇팔: RB5-850e ============ -->
-  <xacro:include filename="$(find rbpodo_description)/robots/rb_6dof.xacro"/>
+  <!-- ============ ⓑ 로봇팔 — mounts.arm.model 로 스위칭 ============ -->
   <xacro:property name="am" value="${M['arm']}"/>
-  <joint name="arm_mount_joint" type="fixed">
-    <parent link="${am['parent_frame']}"/>
-    <child link="link0"/>
-    <origin xyz="${am['xyz'][0]} ${am['xyz'][1]} ${am['xyz'][2]}"
-            rpy="${am['rpy'][0]} ${am['rpy'][1]} ${am['rpy'][2]}"/>
-  </joint>
-  <xacro:rb_6dof model_id="rb5_850e" prefix="" tcp_name="tcp"/>
+  <xacro:property name="aname" value="${am['model']}"/>
+  <xacro:if value="${aname == 'rb5_850e'}">
+    <xacro:include filename="$(find rbpodo_description)/robots/rb_6dof.xacro"/>
+    <joint name="arm_mount_joint" type="fixed">
+      <parent link="${am['parent_frame']}"/>
+      <child link="link0"/>
+      <origin xyz="${am['xyz'][0]} ${am['xyz'][1]} ${am['xyz'][2]}"
+              rpy="${am['rpy'][0]} ${am['rpy'][1]} ${am['rpy'][2]}"/>
+    </joint>
+    <xacro:rb_6dof model_id="rb5_850e" prefix="" tcp_name="tcp"/>
+  </xacro:if>
+  <!-- 새 팔 추가: include + arm_mount_joint(child=그 팔의 루트링크) + 그 팔 매크로 호출 -->
 
-  <!-- ============ ⓒ 엔드이펙터: OnRobot RG2 ============ -->
-  <xacro:include filename="$(find rda_robot_description)/urdf/parts/endeffector/onrobot_rg2_macro.xacro"/>
+  <!-- ============ ⓒ 엔드이펙터 — mounts.endeffector.model 로 스위칭 ============ -->
   <xacro:property name="em" value="${M['endeffector']}"/>
-  <xacro:onrobot_rg2 parent="${em['parent_frame']}" prefix="">
-    <origin xyz="${em['xyz'][0]} ${em['xyz'][1]} ${em['xyz'][2]}"
-            rpy="${em['rpy'][0]} ${em['rpy'][1]} ${em['rpy'][2]}"/>
-  </xacro:onrobot_rg2>
+  <xacro:property name="ename" value="${em['model']}"/>
+  <xacro:if value="${ename == 'onrobot_rg2'}">
+    <xacro:include filename="$(find rda_robot_description)/urdf/parts/endeffector/onrobot_rg2_macro.xacro"/>
+    <xacro:onrobot_rg2 parent="${em['parent_frame']}" prefix="">
+      <origin xyz="${em['xyz'][0]} ${em['xyz'][1]} ${em['xyz'][2]}"
+              rpy="${em['rpy'][0]} ${em['rpy'][1]} ${em['rpy'][2]}"/>
+    </xacro:onrobot_rg2>
+  </xacro:if>
+  <!-- 새 그리퍼 추가: include + 그 그리퍼 매크로 호출(parent=${em['parent_frame']}) -->
 
-  <!-- ============ ⓓ 센서: RealSense (모델별 매크로 선택) ============ -->
+  <!-- ============ ⓓ 센서: RealSense (mounts.sensorN.model 로 스위칭) ============ -->
   <xacro:include filename="$(find realsense2_description)/urdf/_d405.urdf.xacro"/>
   <xacro:include filename="$(find realsense2_description)/urdf/_d435i.urdf.xacro"/>
 
-  <!-- 센서 부착 매크로: 모델에 따라 d405/d435i 인스턴스화 -->
   <xacro:macro name="mount_sensor" params="key">
     <xacro:property name="s" value="${M[key]}"/>
     <xacro:property name="sname" value="${s['model']}"/>
