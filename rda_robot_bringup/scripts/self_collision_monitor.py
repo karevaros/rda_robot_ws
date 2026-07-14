@@ -53,12 +53,13 @@ class SelfCollisionMonitor(Node):
         self.declare_parameter("auto_baseline", True)
         self.declare_parameter("min_period", 0.1)
         self.declare_parameter("text_z", 1.6)
+        self.declare_parameter("inflate", 1.01)   # 빨강 mesh z-fighting 방지 배율
 
         self.robot = None
         self.fk = None
         self.mgr = None
         self.linkmesh = {}
-        self.link_aabb = {}     # link -> (center(3), extent(3)) in link frame
+        self.link_visuals = {}  # link -> list[(mesh_uri, scale(3), T_link_visual(4x4))]
         self.adj = set()        # frozenset(a,b) 인접 링크
         self.allowed = set()    # frozenset(a,b) 기준 보정
         self.base_frame = "base_link"
@@ -116,15 +117,30 @@ class SelfCollisionMonitor(Node):
             linkmesh.setdefault(link, []).append(m)
 
         mgr = trimesh.collision.CollisionManager()
-        aabb = {}
         for link, ms in linkmesh.items():
             comb = ms[0] if len(ms) == 1 else trimesh.util.concatenate(ms)
             mgr.add_object(link, comb)
-            lo, hi = comb.bounds
-            aabb[link] = ((lo + hi) / 2.0, np.maximum(hi - lo, 1e-3))
+
+        # 링크별 visual mesh 리소스(빨강 오버레이 마커용) — 원본 package:// URI 보존
+        link_visuals = {}
+        for lname, link in robot.link_map.items():
+            vlist = []
+            for vis in (getattr(link, "visuals", None) or []):
+                geom = getattr(vis, "geometry", None)
+                mesh = getattr(geom, "mesh", None) if geom is not None else None
+                uri = getattr(mesh, "filename", None) if mesh is not None else None
+                if not uri:
+                    continue
+                sc = getattr(mesh, "scale", None)
+                sc = [1.0, 1.0, 1.0] if sc is None else [float(s) for s in sc]
+                org = getattr(vis, "origin", None)
+                org = np.eye(4) if org is None else np.asarray(org, float)
+                vlist.append((uri, sc, org))
+            if vlist:
+                link_visuals[lname] = vlist
 
         self.robot, self.fk, self.base_frame = robot, fk, base
-        self.mgr, self.linkmesh, self.link_aabb = mgr, linkmesh, aabb
+        self.mgr, self.linkmesh, self.link_visuals = mgr, linkmesh, link_visuals
         self.adj = {frozenset((j.parent, j.child))
                     for j in robot.joint_map.values() if j.parent and j.child}
         self.allowed = set()
@@ -189,29 +205,37 @@ class SelfCollisionMonitor(Node):
         colliding = set()
         for p in pairs:
             colliding |= set(p)
-        for i, link in enumerate(sorted(colliding)):
-            c, ext = self.link_aabb[link]
-            W = Ws[link]
-            pos = W @ np.array([c[0], c[1], c[2], 1.0])
-            q = Rotation.from_matrix(np.array(W[:3, :3], dtype=float)).as_quat()  # xyzw
-            m = Marker()
-            m.header.frame_id = self.base_frame
-            m.ns = "self_collision"
-            m.id = i
-            m.type = Marker.CUBE
-            m.action = Marker.ADD
-            m.pose.position.x = float(pos[0])
-            m.pose.position.y = float(pos[1])
-            m.pose.position.z = float(pos[2])
-            m.pose.orientation.x = float(q[0])
-            m.pose.orientation.y = float(q[1])
-            m.pose.orientation.z = float(q[2])
-            m.pose.orientation.w = float(q[3])
-            m.scale.x = float(ext[0])
-            m.scale.y = float(ext[1])
-            m.scale.z = float(ext[2])
-            m.color.r, m.color.g, m.color.b, m.color.a = 1.0, 0.1, 0.1, 0.45
-            arr.markers.append(m)
+        inflate = float(self.get_parameter("inflate").value)
+        mid = 0
+        for link in sorted(colliding):
+            W = Ws.get(link)
+            if W is None:
+                continue
+            # 충돌 링크의 실제 visual mesh 를 빨강으로 덧씌움(MESH_RESOURCE)
+            for uri, sc, org in self.link_visuals.get(link, []):
+                M = W @ org
+                q = Rotation.from_matrix(np.array(M[:3, :3], dtype=float)).as_quat()
+                m = Marker()
+                m.header.frame_id = self.base_frame
+                m.ns = "self_collision"
+                m.id = mid
+                mid += 1
+                m.type = Marker.MESH_RESOURCE
+                m.action = Marker.ADD
+                m.mesh_resource = uri
+                m.mesh_use_embedded_materials = False
+                m.pose.position.x = float(M[0, 3])
+                m.pose.position.y = float(M[1, 3])
+                m.pose.position.z = float(M[2, 3])
+                m.pose.orientation.x = float(q[0])
+                m.pose.orientation.y = float(q[1])
+                m.pose.orientation.z = float(q[2])
+                m.pose.orientation.w = float(q[3])
+                m.scale.x = sc[0] * inflate
+                m.scale.y = sc[1] * inflate
+                m.scale.z = sc[2] * inflate
+                m.color.r, m.color.g, m.color.b, m.color.a = 1.0, 0.05, 0.05, 1.0
+                arr.markers.append(m)
 
         t = Marker()
         t.header.frame_id = self.base_frame
