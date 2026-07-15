@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""rda_robot 파트 조립기 (PyQt5 + pyvista 내장 3D).
+"""RDA 로봇 어셈블러 (PyQt5 + pyvista 내장 3D).
 
-좌: 파트 슬롯 선택(모델/표시)  |  중앙: 3D 뷰  |  우: 결합 설정(부모프레임/거리/각도)
+좌: 파트 슬롯 선택(모델/표시)  |  중앙: 3D 뷰  |  우: 결합 설정(부착 프레임/거리/각도)
 결과: mounts.yaml 저장 → rda_robot.urdf.xacro 가 읽어 통합.
 """
 import os
@@ -19,6 +19,9 @@ from rda_robot_assembler import part_registry as reg
 from rda_robot_assembler import urdf_loader as ul
 from rda_robot_assembler.assembly import Mount, compute_placements
 from rda_robot_assembler import collision as col
+
+# 앱 표시 이름(사람이 읽는 이름). ROS 패키지명·실행 명령어는 rda_robot_assembler 유지.
+APP_NAME = "RDA 로봇 어셈블러"
 
 # 슬롯별 표시 색(파트 구분용)
 SLOT_COLORS = {
@@ -50,6 +53,15 @@ def default_mounts():
     }
 
 
+class SlotBox(QtWidgets.QGroupBox):
+    """클릭하면 해당 슬롯이 선택되는 그룹박스."""
+    clicked = QtCore.pyqtSignal()
+
+    def mousePressEvent(self, ev):
+        self.clicked.emit()
+        super().mousePressEvent(ev)
+
+
 class MountEditor(QtWidgets.QWidget):
     """우측 결합 설정 위젯(활성 슬롯 1개)."""
     changed = QtCore.pyqtSignal()
@@ -65,19 +77,25 @@ class MountEditor(QtWidgets.QWidget):
 
         self.parent_slot = QtWidgets.QComboBox()
         self.parent_frame = QtWidgets.QComboBox()
-        form.addRow("부모 파트", self.parent_slot)
-        form.addRow("부모 TF(프레임)", self.parent_frame)
+        self.parent_slot.setToolTip("이 파트를 어느 파트에 붙일지 선택")
+        self.parent_frame.setToolTip("부모 파트의 어느 링크(프레임)에 붙일지 선택")
+        form.addRow("붙일 파트", self.parent_slot)
+        form.addRow("부착 프레임", self.parent_frame)
 
         self.sp = {}
-        for key, lo, hi, step, suffix in [
-            ("x", -3, 3, 0.005, " m"), ("y", -3, 3, 0.005, " m"), ("z", -3, 3, 0.005, " m"),
-            ("roll", -180, 180, 1.0, " °"), ("pitch", -180, 180, 1.0, " °"), ("yaw", -180, 180, 1.0, " °"),
+        for key, label, lo, hi, step, suffix in [
+            ("x", "X (앞/뒤)", -3, 3, 0.005, " m"),
+            ("y", "Y (좌/우)", -3, 3, 0.005, " m"),
+            ("z", "Z (위/아래)", -3, 3, 0.005, " m"),
+            ("roll", "Roll (X축 회전)", -180, 180, 1.0, " °"),
+            ("pitch", "Pitch (Y축 회전)", -180, 180, 1.0, " °"),
+            ("yaw", "Yaw (Z축 회전)", -180, 180, 1.0, " °"),
         ]:
             s = QtWidgets.QDoubleSpinBox()
             s.setRange(lo, hi); s.setSingleStep(step); s.setDecimals(3 if suffix == " m" else 1)
             s.setSuffix(suffix)
             self.sp[key] = s
-            form.addRow(key.upper() if len(key) == 1 else key.capitalize(), s)
+            form.addRow(label, s)
 
         self.parent_slot.currentIndexChanged.connect(self._on_parent_slot)
         for w in [self.parent_frame]:
@@ -157,7 +175,7 @@ class JointPoseEditor(QtWidgets.QWidget):
         self._block = False
         self.v = QtWidgets.QVBoxLayout(self)
         self.v.setContentsMargins(0, 0, 0, 0)
-        self.title = QtWidgets.QLabel("관절 초기 포즈")
+        self.title = QtWidgets.QLabel("관절 초기 포즈 (시작 자세)")
         f = self.title.font(); f.setBold(True)
         self.title.setFont(f)
         self.v.addWidget(self.title)
@@ -208,7 +226,6 @@ class JointPoseEditor(QtWidgets.QWidget):
 class Assembler(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("rda_robot 파트 조립기")
         self.resize(1500, 900)
 
         self.models = {s: reg.default_model(s) for s in reg.SLOTS}
@@ -219,6 +236,7 @@ class Assembler(QtWidgets.QMainWindow):
         self.joint_pose = {}      # slot -> {joint: rad}
         self.active_slot = "arm"
         self.collider = col.CollisionChecker()   # 자충돌 검사기
+        self._dirty = False       # 저장 후 변경 여부(제목 * 표시)
 
         self._build_ui()
         self._reload_all_parts()
@@ -227,21 +245,120 @@ class Assembler(QtWidgets.QMainWindow):
         self._refresh_view(full=True)
         # 초기(기본) 배치의 겹침을 기준으로 보정 → 이후 이탈만 경고
         self._calibrate_baseline(initial=True)
+        self._set_dirty(False)
+        self._set_status("파트 슬롯을 클릭해 결합 설정을 편집하세요.")
 
     # ---------- UI ----------
     def _build_ui(self):
-        central = QtWidgets.QWidget()
-        self.setCentralWidget(central)
-        h = QtWidgets.QHBoxLayout(central)
+        self._build_actions()
+        self._build_menu()
+        self._build_toolbar()
 
-        # 좌: 슬롯 패널
-        left = QtWidgets.QWidget(); left.setFixedWidth(300)
+        splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        splitter.setChildrenCollapsible(False)
+        splitter.addWidget(self._build_left())
+        splitter.addWidget(self._build_center())
+        splitter.addWidget(self._build_right())
+        splitter.setStretchFactor(0, 0)   # 좌: 고정 성향
+        splitter.setStretchFactor(1, 1)   # 중앙 3D 뷰가 여유공간 차지
+        splitter.setStretchFactor(2, 0)   # 우: 고정 성향
+        splitter.setSizes([300, 880, 320])
+        self.splitter = splitter
+        self.setCentralWidget(splitter)
+
+        self._build_statusbar()
+        self._update_title()
+
+    def _build_actions(self):
+        """메뉴/툴바가 공유하는 액션(체크 상태의 단일 소스)."""
+        def act(text, slot=None, shortcut=None, tip=None, checkable=False, checked=False):
+            a = QtWidgets.QAction(text, self)
+            if shortcut:
+                a.setShortcut(shortcut)
+            if tip:
+                a.setToolTip(tip); a.setStatusTip(tip)
+            if checkable:
+                a.setCheckable(True); a.setChecked(checked)
+            if slot:
+                a.triggered.connect(slot)
+            return a
+
+        # 파일
+        self.act_save = act("저장", self._save, QtGui.QKeySequence.Save,
+                            "현재 결합값·초기 포즈를 mounts.yaml 로 저장")
+        self.act_load = act("불러오기", self._load, QtGui.QKeySequence.Open,
+                            "mounts.yaml 에서 결합값·초기 포즈를 다시 읽음")
+        self.act_reset = act("기본값으로 되돌리기", self._reset, None,
+                             "결합값을 초안 기본값으로 되돌림(저장 전까지 파일은 그대로)")
+        self.act_quit = act("종료", self.close, QtGui.QKeySequence.Quit)
+
+        # 보기
+        self.act_axes = act("부착 프레임 축", lambda: self._refresh_view(), "A",
+                            "선택한 파트가 붙는 부모 프레임의 XYZ 축을 3D에 표시",
+                            checkable=True, checked=True)
+        self.act_iso = act("등각 보기", lambda: self._set_view("iso"), "1")
+        self.act_front = act("앞에서 보기", lambda: self._set_view("front"), "2")
+        self.act_side = act("옆에서 보기", lambda: self._set_view("side"), "3")
+        self.act_top = act("위에서 보기", lambda: self._set_view("top"), "4")
+        self.act_fit = act("뷰 맞춤", self._fit_view, "0", "카메라를 기본 위치로 되돌림")
+
+        # 도구
+        self.act_collision = act("자충돌 검사", self._on_collision_toggle, "C",
+                                 "파트끼리 겹치면 3D에서 빨강으로 표시",
+                                 checkable=True, checked=True)
+        self.act_calib = act("현재 겹침 무시", lambda: self._calibrate_baseline(), None,
+                             "지금 겹쳐 있는 쌍을 정상으로 등록 → 이후 새로 생긴 겹침만 경고")
+        self.act_calib_clear = act("무시 목록 비우기", self._clear_baseline, None,
+                                   "등록해 둔 겹침 무시를 모두 해제")
+        self.act_refresh = act("모델 새로고침", self._refresh_models, "F5",
+                               "config/models/<슬롯>/ 폴더를 다시 스캔해 드롭다운 갱신")
+
+    def _build_menu(self):
+        mb = self.menuBar()
+        m = mb.addMenu("파일(&F)")
+        m.addAction(self.act_save); m.addAction(self.act_load)
+        m.addSeparator(); m.addAction(self.act_reset)
+        m.addSeparator(); m.addAction(self.act_quit)
+
+        m = mb.addMenu("보기(&V)")
+        m.addAction(self.act_axes)
+        m.addSeparator()
+        m.addAction(self.act_iso); m.addAction(self.act_front)
+        m.addAction(self.act_side); m.addAction(self.act_top)
+        m.addSeparator(); m.addAction(self.act_fit)
+
+        m = mb.addMenu("도구(&T)")
+        m.addAction(self.act_collision)
+        m.addAction(self.act_calib); m.addAction(self.act_calib_clear)
+        m.addSeparator(); m.addAction(self.act_refresh)
+
+    def _build_toolbar(self):
+        tb = QtWidgets.QToolBar("기본 도구모음")
+        tb.setToolButtonStyle(QtCore.Qt.ToolButtonTextOnly)
+        tb.setMovable(False)
+        tb.addAction(self.act_save)
+        tb.addSeparator()
+        tb.addAction(self.act_collision)
+        tb.addAction(self.act_calib)
+        tb.addAction(self.act_calib_clear)
+        tb.addSeparator()
+        tb.addAction(self.act_axes)
+        tb.addSeparator()
+        tb.addWidget(QtWidgets.QLabel(" 보기: "))
+        tb.addAction(self.act_iso); tb.addAction(self.act_front)
+        tb.addAction(self.act_side); tb.addAction(self.act_top)
+        tb.addAction(self.act_fit)
+        self.addToolBar(QtCore.Qt.TopToolBarArea, tb)
+
+    def _build_left(self):
+        left = QtWidgets.QWidget()
+        left.setMinimumWidth(240)
         lv = QtWidgets.QVBoxLayout(left)
-        lv.addWidget(QtWidgets.QLabel("<b>파트 슬롯</b>"))
+        lv.addWidget(QtWidgets.QLabel("<b>파트 슬롯</b> <span style='color:gray;'>— 클릭해 선택</span>"))
         self.slot_widgets = {}
         for slot in reg.SLOTS:
-            box = QtWidgets.QGroupBox(reg.SLOT_LABELS[slot])
-            box.setCheckable(False)
+            box = SlotBox(reg.SLOT_LABELS[slot])
+            box.clicked.connect(lambda s=slot: self._select_slot(s))
             v = QtWidgets.QVBoxLayout(box)
             combo = QtWidgets.QComboBox()
             for mid in reg.SLOT_MODELS[slot]:
@@ -249,53 +366,36 @@ class Assembler(QtWidgets.QMainWindow):
             combo.currentIndexChanged.connect(lambda _i, s=slot: self._on_model_changed(s))
             v.addWidget(combo)
             row = QtWidgets.QHBoxLayout()
-            chk = QtWidgets.QCheckBox("표시")
+            chk = QtWidgets.QCheckBox("3D에 표시")
             chk.setChecked(True)
             chk.stateChanged.connect(lambda _s, sl=slot: self._on_enable_changed(sl))
-            edit_btn = QtWidgets.QPushButton("결합 설정 ▸")
-            edit_btn.clicked.connect(lambda _c, sl=slot: self._select_slot(sl))
+            row.addWidget(chk)
+            row.addStretch(1)
             if slot == "base":
-                edit_btn.setEnabled(False)
-                edit_btn.setText("(루트)")
-            row.addWidget(chk); row.addWidget(edit_btn)
+                tag = QtWidgets.QLabel("<span style='color:gray;'>루트 · 부모 없음</span>")
+                row.addWidget(tag)
             v.addLayout(row)
             lv.addWidget(box)
-            self.slot_widgets[slot] = {"combo": combo, "chk": chk, "box": box, "btn": edit_btn}
+            self.slot_widgets[slot] = {"combo": combo, "chk": chk, "box": box}
         btn_refresh = QtWidgets.QPushButton("🔄 모델 새로고침")
-        btn_refresh.setToolTip(
-            "config/models/<슬롯>/ 폴더의 urdf·xacro·yaml 을 다시 스캔해\n"
-            "드롭다운 목록을 갱신(재시작 불필요)")
+        btn_refresh.setToolTip(self.act_refresh.toolTip())
         btn_refresh.clicked.connect(self._refresh_models)
         lv.addWidget(btn_refresh)
         lv.addStretch(1)
-        h.addWidget(left)
+        return left
 
-        # 중앙: 3D 뷰
+    def _build_center(self):
         mid = QtWidgets.QWidget()
+        mid.setMinimumWidth(400)
         mv = QtWidgets.QVBoxLayout(mid)
+        mv.setContentsMargins(0, 0, 0, 0)
         self.plotter = QtInteractor(mid)
         mv.addWidget(self.plotter.interactor)
-        # 뷰 툴바
-        tb = QtWidgets.QHBoxLayout()
-        self.chk_axes = QtWidgets.QCheckBox("부착 프레임 축 표시"); self.chk_axes.setChecked(True)
-        self.chk_axes.stateChanged.connect(lambda _s: self._refresh_view())
-        self.chk_collision = QtWidgets.QCheckBox("충돌 검사"); self.chk_collision.setChecked(True)
-        self.chk_collision.stateChanged.connect(self._on_collision_toggle)
-        btn_calib = QtWidgets.QPushButton("기준 보정")
-        btn_calib.setToolTip("현재 겹침을 기준으로 등록해 이후 무시(모델 자체 겹침 보정)")
-        btn_calib.clicked.connect(lambda _c: self._calibrate_baseline())
-        btn_calib_clear = QtWidgets.QPushButton("보정 해제")
-        btn_calib_clear.clicked.connect(self._clear_baseline)
-        btn_reset_view = QtWidgets.QPushButton("뷰 리셋")
-        btn_reset_view.clicked.connect(self._fit_view)
-        tb.addWidget(self.chk_axes); tb.addWidget(self.chk_collision)
-        tb.addWidget(btn_calib); tb.addWidget(btn_calib_clear)
-        tb.addStretch(1); tb.addWidget(btn_reset_view)
-        mv.addLayout(tb)
-        h.addWidget(mid, 1)
+        return mid
 
-        # 우: 설정 + 파일 버튼
-        right = QtWidgets.QWidget(); right.setFixedWidth(320)
+    def _build_right(self):
+        right = QtWidgets.QWidget()
+        right.setMinimumWidth(260)
         rv = QtWidgets.QVBoxLayout(right)
         self.editor = MountEditor()
         self.editor.changed.connect(self._on_mount_changed)
@@ -306,16 +406,22 @@ class Assembler(QtWidgets.QMainWindow):
         self.jpose.changed.connect(self._on_jpose_changed)
         rv.addWidget(self.jpose)
         rv.addStretch(1)
-        self.lbl_collision = QtWidgets.QLabel("자충돌: —")
-        self.lbl_collision.setWordWrap(True)
-        rv.addWidget(self.lbl_collision)
+        return right
+
+    def _build_statusbar(self):
+        sb = self.statusBar()
         self.lbl_status = QtWidgets.QLabel("")
-        self.lbl_status.setWordWrap(True)
-        self.lbl_status.setStyleSheet("color:#c04a5e;")
-        rv.addWidget(self.lbl_status)
-        for text, fn in [("mounts.yaml 저장", self._save), ("불러오기", self._load), ("초안값 초기화", self._reset)]:
-            b = QtWidgets.QPushButton(text); b.clicked.connect(fn); rv.addWidget(b)
-        h.addWidget(right)
+        sb.addWidget(self.lbl_status, 1)
+        self.lbl_collision = QtWidgets.QLabel("자충돌: —")
+        sb.addPermanentWidget(self.lbl_collision)
+
+    def _update_title(self):
+        star = "*" if self._dirty else ""
+        self.setWindowTitle(f"{APP_NAME} — mounts.yaml{star}")
+
+    def _set_dirty(self, dirty=True):
+        self._dirty = dirty
+        self._update_title()
 
     # ---------- 데이터/상태 ----------
     def _slot_choices(self):
@@ -337,7 +443,7 @@ class Assembler(QtWidgets.QMainWindow):
             self._set_status("")
         except Exception as e:
             self.loaded.pop(slot, None)
-            self._set_status(f"[{slot}] 로드 실패: {e}")
+            self._set_status(f"[{slot}] 로드 실패: {e}", error=True)
         self._sync_collider(slot)
         if refresh:
             self._refresh_view(full=True)
@@ -350,8 +456,9 @@ class Assembler(QtWidgets.QMainWindow):
         else:
             self.collider.drop_part(slot)
 
-    def _set_status(self, msg):
+    def _set_status(self, msg, error=False):
         self.lbl_status.setText(msg)
+        self.lbl_status.setStyleSheet("color:#c04a5e; font-weight:bold;" if error else "color:gray;")
 
     # ---------- 이벤트 ----------
     def _refresh_models(self):
@@ -376,14 +483,17 @@ class Assembler(QtWidgets.QMainWindow):
         self._reload_part(slot)
         if self.active_slot == slot:
             self._select_slot(slot)
+        self._set_dirty()
 
     def _on_enable_changed(self, slot):
         self.enabled[slot] = self.slot_widgets[slot]["chk"].isChecked()
         self._sync_collider(slot)
         self._refresh_view(full=True)
+        self._set_dirty()
 
     def _select_slot(self, slot):
         if slot == "base":
+            self._set_status("베이스는 루트 파트라 결합 설정이 없습니다(모델·표시만 변경 가능).")
             return
         self.active_slot = slot
         self.editor.load(slot, self.mounts.get(slot, Mount()))
@@ -391,17 +501,20 @@ class Assembler(QtWidgets.QMainWindow):
         for s, w in self.slot_widgets.items():
             w["box"].setStyleSheet("QGroupBox{font-weight:bold;border:2px solid #e08a3c;margin-top:6px;}"
                                    if s == slot else "")
+        self._refresh_view()
 
     def _on_mount_changed(self):
         if self.active_slot:
             self.mounts[self.active_slot] = self.editor.current_mount()
             self._refresh_view()
+            self._set_dirty()
 
     def _on_jpose_changed(self):
         slot = self.active_slot
         if slot and slot in self.loaded:
             self.joint_pose[slot] = self.jpose.current_pose()
             self._apply_joint_pose(slot)
+            self._set_dirty()
 
     def _apply_joint_pose(self, slot):
         """관절 포즈를 파트에 반영 → 해당 파트 액터 재생성 → 배치 갱신."""
@@ -438,7 +551,7 @@ class Assembler(QtWidgets.QMainWindow):
             self.lbl_collision.setStyleSheet("color:#c62828; font-weight:bold;")
 
     def _on_collision_toggle(self):
-        self.collider.enabled = self.chk_collision.isChecked()
+        self.collider.enabled = self.act_collision.isChecked()
         self._refresh_view()
 
     def _calibrate_baseline(self, initial=False):
@@ -450,13 +563,12 @@ class Assembler(QtWidgets.QMainWindow):
         n = self.collider.calibrate({s: self.loaded[s] for s in world}, self.mounts)
         self._refresh_view()
         if not initial:
-            QtWidgets.QMessageBox.information(
-                self, "기준 보정",
-                f"현재 겹침 {n}쌍을 기준으로 등록했습니다.\n이후 이 겹침은 자충돌로 보지 않습니다.")
+            self._set_status(f"현재 겹침 {n}쌍을 정상으로 등록했습니다. 이후 새로 생긴 겹침만 경고합니다.")
 
     def _clear_baseline(self):
         self.collider.clear_calibration()
         self._refresh_view()
+        self._set_status("겹침 무시 목록을 비웠습니다.")
 
     # ---------- 렌더링 ----------
     def _refresh_view(self, full=False):
@@ -492,8 +604,20 @@ class Assembler(QtWidgets.QMainWindow):
             self._fit_view()
         self.plotter.render()
 
+    def _set_view(self, which):
+        """뷰 프리셋 — 카메라 방향만 바꾸고 화면 범위는 격자 기준 유지."""
+        try:
+            {"iso": self.plotter.view_isometric,
+             "front": self.plotter.view_yz,   # +X 에서 바라봄
+             "side": self.plotter.view_xz,    # -Y 에서 바라봄
+             "top": self.plotter.view_xy}[which]()
+            self.plotter.reset_camera(bounds=list(GRID_BOUNDS))
+        except Exception:
+            pass
+        self.plotter.render()
+
     def _fit_view(self):
-        """카메라를 고정 4m 영역에 맞춤(자동 scene fit 대신)."""
+        """카메라를 고정 격자 영역에 맞춤(자동 scene fit 대신)."""
         try:
             self.plotter.reset_camera(bounds=list(GRID_BOUNDS))
         except TypeError:
@@ -537,14 +661,14 @@ class Assembler(QtWidgets.QMainWindow):
                     actor.user_matrix = W
         # 부착 프레임 축
         self.plotter.remove_actor("_attach_axis", render=False)
-        if self.chk_axes.isChecked() and self.active_slot in self.mounts:
+        if self.act_axes.isChecked() and self.active_slot in self.mounts:
             mnt = self.mounts[self.active_slot]
             ps = mnt.parent_slot
             if ps in world:
                 Fw = world[ps] @ self.loaded[ps].frames.get(mnt.parent_frame, np.eye(4))
                 self._draw_axis(Fw, "_attach_axis")
         if missing:
-            self._set_status("미배치(부모 확인 필요): " + ", ".join(missing))
+            self._set_status("미배치(부모 확인 필요): " + ", ".join(missing), error=True)
         elif self.lbl_status.text().startswith("미배치"):
             self._set_status("")
 
@@ -585,14 +709,8 @@ class Assembler(QtWidgets.QMainWindow):
 
     # ---------- 파일 ----------
     def _mounts_path(self):
-        try:
-            from ament_index_python.packages import get_package_share_directory
-            # 소스 경로에 저장(재빌드 없이 xacro 가 읽도록 share 도 갱신)
-        except Exception:
-            pass
-        # 소스 위치 우선
-        src = os.path.expanduser("~/robot_ws/src/rda_robot_description/config/mounts.yaml")
-        return src
+        # 소스 위치에 저장(재빌드 없이 xacro·launch 가 읽도록)
+        return os.path.expanduser("~/robot_ws/src/rda_robot_description/config/mounts.yaml")
 
     def _save(self):
         data = {}
@@ -619,7 +737,9 @@ class Assembler(QtWidgets.QMainWindow):
             yaml.safe_dump({"mounts": data, "models": self.models,
                             "initial_pose": ipose}, f,
                            allow_unicode=True, sort_keys=False)
-        QtWidgets.QMessageBox.information(self, "저장", f"저장됨:\n{path}")
+        self._set_dirty(False)
+        self._set_status(f"저장됨: {path}")
+        self.statusBar().showMessage("mounts.yaml 저장 완료", 4000)
 
     def _load(self):
         path = self._mounts_path()
@@ -641,15 +761,35 @@ class Assembler(QtWidgets.QMainWindow):
                 part.set_joint_pose(pose)
         self._select_slot(self.active_slot)
         self._refresh_view(full=True)
+        self._set_dirty(False)
+        self._set_status(f"불러옴: {path}")
 
     def _reset(self):
         self.mounts = default_mounts()
         self._select_slot(self.active_slot)
         self._refresh_view()
+        self._set_dirty()
+        self._set_status("결합값을 기본값으로 되돌렸습니다(저장 전까지 파일은 그대로).")
+
+    def closeEvent(self, ev):
+        """저장하지 않은 변경이 있으면 확인."""
+        if not self._dirty:
+            return super().closeEvent(ev)
+        r = QtWidgets.QMessageBox.question(
+            self, "종료", "저장하지 않은 변경이 있습니다. 저장할까요?",
+            QtWidgets.QMessageBox.Save | QtWidgets.QMessageBox.Discard | QtWidgets.QMessageBox.Cancel,
+            QtWidgets.QMessageBox.Save)
+        if r == QtWidgets.QMessageBox.Save:
+            self._save(); ev.accept()
+        elif r == QtWidgets.QMessageBox.Discard:
+            ev.accept()
+        else:
+            ev.ignore()
 
 
 def main():
     app = QtWidgets.QApplication(sys.argv)
+    app.setApplicationName(APP_NAME)
     w = Assembler()
     w.show()
     sys.exit(app.exec_())

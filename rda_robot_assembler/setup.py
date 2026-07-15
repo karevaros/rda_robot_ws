@@ -15,7 +15,7 @@ setup(
     zip_safe=True,
     maintainer="kim",
     maintainer_email="akswnddl255@gmail.com",
-    description="파트 결합 인터랙티브 조립 GUI (mounts.yaml 생성)",
+    description="RDA 로봇 어셈블러 — 파트 결합 인터랙티브 조립 GUI (mounts.yaml 생성)",
     license="Apache-2.0",
     entry_points={
         "console_scripts": [

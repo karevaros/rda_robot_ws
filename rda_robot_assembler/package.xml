@@ -3,8 +3,8 @@
 <package format="3">
   <name>rda_robot_assembler</name>
   <version>0.1.0</version>
-  <description>파트 결합(mount) 인터랙티브 조립 GUI — 파트를 불러와 3D로 보며
-    parent TF·거리·각도를 맞추고 mounts.yaml 로 저장(→ rda_robot.urdf.xacro 반영).</description>
+  <description>RDA 로봇 어셈블러 — 파트를 불러와 3D로 보며 부착 프레임·거리·각도를
+    맞추고 mounts.yaml 로 저장하는 인터랙티브 조립 GUI(→ rda_robot.urdf.xacro 반영).</description>
   <maintainer email="akswnddl255@gmail.com">kim</maintainer>
   <license>Apache-2.0</license>
 
