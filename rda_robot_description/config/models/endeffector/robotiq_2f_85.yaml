@@ -1,0 +1,5 @@
+# PickNikRobotics/ros2_robotiq_gripper · BSD-3-Clause
+label: "Robotiq 2F-85 (2지 평행, 스트로크 85mm)"
+pkg: robotiq_description
+xacro: urdf/robotiq_2f_85_gripper.urdf.xacro
+anchor: robotiq_85_base_link

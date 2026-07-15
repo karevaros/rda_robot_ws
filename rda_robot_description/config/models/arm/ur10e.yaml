@@ -1,0 +1,7 @@
+# Universal Robots · BSD-3-Clause
+# # ※ UR20/UR30 은 mesh 가 별도 제한 라이선스라 등록하지 않음
+label: "UR10e (12.5kg / 1300mm)"
+pkg: ur_description
+xacro: urdf/ur.urdf.xacro
+args: {ur_type: "ur10e", name: "ur10e"}
+anchor: base_link

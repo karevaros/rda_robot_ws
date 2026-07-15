@@ -1,0 +1,4 @@
+# Robotnik · BSD-3-Clause · 팔 탑재를 전제로 설계된 베이스
+label: "Robotnik RB-Kairos (모바일 매니퓰레이터용)"
+pkg: robotnik_description
+xacro: robots/rbkairos/rbkairos.urdf.xacro

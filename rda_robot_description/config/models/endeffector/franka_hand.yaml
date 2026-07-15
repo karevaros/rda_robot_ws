@@ -1,0 +1,5 @@
+# frankaemika/franka_description · Apache-2.0 · 루트 fr3_hand = 부착점
+label: "Franka Hand (2지 평행)"
+pkg: franka_description
+xacro: end_effectors/franka_hand/franka_hand.urdf.xacro
+anchor: fr3_hand

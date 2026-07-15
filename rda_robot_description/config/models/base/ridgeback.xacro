@@ -1,0 +1,8 @@
+<?xml version="1.0"?>
+<!-- Clearpath r100 인스턴스화 래퍼.
+     상류 r100.urdf.xacro 는 <xacro:macro name="r100"> 정의만 있고
+     인스턴스화를 안 해서 그대로 처리하면 링크가 0개다. 이 래퍼가 매크로를 호출한다. -->
+<robot xmlns:xacro="http://ros.org/wiki/xacro" name="ridgeback">
+  <xacro:include filename="$(find clearpath_platform_description)/urdf/r100/r100.urdf.xacro"/>
+  <xacro:r100/>
+</robot>

@@ -1,0 +1,5 @@
+# TurtleBot4 · Apache-2.0 (+irobot_create_description BSD-3)
+# # ⚠ payload 9kg — 우리 팔+그리퍼(약 22~23kg)를 물리적으로 못 얹는다. 구성/참고용.
+label: "TurtleBot4 (참고용 — payload 9kg)"
+pkg: turtlebot4_description
+xacro: urdf/standard/turtlebot4.urdf.xacro

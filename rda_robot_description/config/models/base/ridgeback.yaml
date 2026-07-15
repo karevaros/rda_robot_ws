@@ -1,0 +1,3 @@
+# Clearpath · BSD-3-Clause · payload 100kg 여유. 단 footprint 960x793 로 현재보다 큼
+label: "Clearpath Ridgeback (옴니, 296~311mm, 100kg)"
+file: ridgeback.xacro

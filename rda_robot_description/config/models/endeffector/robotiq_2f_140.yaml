@@ -1,0 +1,6 @@
+# PickNikRobotics/ros2_robotiq_gripper · BSD-3-Clause
+# # 스트로크가 넓어 과일 파지에 현실적으로 가장 적합
+label: "Robotiq 2F-140 (2지 평행, 스트로크 140mm)"
+pkg: robotiq_description
+xacro: urdf/robotiq_2f_140_gripper.urdf.xacro
+anchor: robotiq_base_link

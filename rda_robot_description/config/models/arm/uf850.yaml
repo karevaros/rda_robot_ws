@@ -1,0 +1,6 @@
+# UFACTORY · BSD-3-Clause
+label: "UF850 (5kg / 850mm)"
+pkg: xarm_description
+xacro: urdf/xarm_device.urdf.xacro
+args: {robot_type: "uf850", dof: "6"}
+anchor: link_base

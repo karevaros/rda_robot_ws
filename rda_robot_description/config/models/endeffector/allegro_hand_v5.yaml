@@ -1,0 +1,7 @@
+# Wonikrobotics · BSD-2-Clause · 루트 world → anchor=palm_link
+# # ※ 상류에 description 패키지가 없어 vendor/allegro_hand_description 셰임 사용
+# #   (mesh 는 상류 allegro_hand_controllers 심링크, 드라이버 빌드 회피)
+label: "Allegro Hand V5 (4지 16DOF)"
+pkg: allegro_hand_description
+xacro: urdf/allegro_hand_right.urdf
+anchor: palm_link

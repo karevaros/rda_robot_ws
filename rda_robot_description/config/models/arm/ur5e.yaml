@@ -1,0 +1,6 @@
+# Universal Robots · BSD-3-Clause · 루트가 world 라 anchor=base_link
+label: "UR5e (5kg / 850mm)"
+pkg: ur_description
+xacro: urdf/ur.urdf.xacro
+args: {ur_type: "ur5e", name: "ur5e"}
+anchor: base_link

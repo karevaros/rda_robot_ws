@@ -1,0 +1,4 @@
+# Robotnik · BSD-3-Clause · 저상형 후보 중 유일하게 '더 낮고+더 작고+라이선스 깨끗'
+label: "Robotnik RB-Theron (저상형 305mm, 200kg)"
+pkg: robotnik_description
+xacro: robots/rbtheron/rbtheron.urdf.xacro

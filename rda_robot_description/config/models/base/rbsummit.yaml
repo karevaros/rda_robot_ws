@@ -1,0 +1,4 @@
+# Robotnik · BSD-3-Clause
+label: "Robotnik RB-Summit"
+pkg: robotnik_description
+xacro: robots/rbsummit/rbsummit.urdf.xacro

@@ -1,0 +1,8 @@
+# ABC-iRobotics/onrobot-ros2 · MIT
+# # ※ 같은 레포의 RG2 는 상류 버그로 등록 안 함(매크로가 없는 링크
+# #   onrobot_rg2_base_link 를 parent 로 참조 → check_urdf 트리 생성 실패).
+# #   RG2 는 rda_robot_description 에 편입된 기존 모델(onrobot_rg2)을 쓸 것.
+label: "OnRobot RG6 (2지 평행, 스트로크 160mm)"
+pkg: onrobot_rg_description
+xacro: urdf/onrobot_rg6_model.xacro
+anchor: base_link

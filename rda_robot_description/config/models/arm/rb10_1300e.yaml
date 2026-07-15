@@ -1,0 +1,5 @@
+# Rainbow Robotics · Apache-2.0 · 루트 link0 = 부착점이라 anchor 생략
+# # ※ rb_6dof 매크로의 prefix 버그 상속(다중 팔 구성 시 문제) — 단일 팔은 무관
+label: "RB10-1300e (10kg / 1300mm)"
+pkg: rbpodo_description
+xacro: robots/rb10_1300e.urdf.xacro

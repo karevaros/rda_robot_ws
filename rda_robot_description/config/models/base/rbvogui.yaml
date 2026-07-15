@@ -1,0 +1,4 @@
+# Robotnik · BSD-3-Clause
+label: "Robotnik RB-Vogui"
+pkg: robotnik_description
+xacro: robots/rbvogui/rbvogui.urdf.xacro

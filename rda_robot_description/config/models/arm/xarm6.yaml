@@ -1,0 +1,6 @@
+# UFACTORY · BSD-3-Clause · 루트 world → anchor=link_base
+label: "xArm6 (5kg / 700mm)"
+pkg: xarm_description
+xacro: urdf/xarm_device.urdf.xacro
+args: {robot_type: "xarm", dof: "6"}
+anchor: link_base

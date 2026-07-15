@@ -1,5 +1,43 @@
 # 모델 드롭 폴더 — 코드 편집 없이 조립기에 모델 추가
 
+## 기본 제공 모델 라이브러리 (2026-07-15 추가, 총 28종)
+
+> **새 PC 에서는 먼저** `bash docs/scripts/setup_vendor_models.sh` **를 실행**해야 한다.
+> 아래 모델들이 `pkg:` 로 참조하는 description 패키지는 `vendor/` 에 clone 되는데
+> `vendor/` 는 `.gitignore` 라서, 안 돌리면 드롭다운엔 뜨는데 로드가 실패한다.
+> 검증: `python3 docs/scripts/test_models.py` (28종 전부 로드 + anchor 확인)
+
+| 슬롯 | 모델 | 라이선스 |
+|------|------|----------|
+| **base** | Scout 2.0(기본) · box_base(테스트) | Apache-2.0 |
+| | Robotnik **RB-Theron**(저상 305mm/200kg) · RB-Summit · **RB-Kairos**(팔 탑재 전제) · RB-Vogui | BSD-3 |
+| | Clearpath **Ridgeback**(옴니/100kg) · Jackal · Husky | BSD-3 |
+| | Clearpath Dingo-D / Dingo-O ⚠ payload 20kg · TurtleBot4 ⚠ payload 9kg | BSD-3 / Apache-2.0 |
+| **arm** | RB5-850e(기본) · **RB10-1300e**(10kg/1300mm) | Apache-2.0 |
+| | **UR5e**(5kg/850mm) · **UR10e**(12.5kg/1300mm) | BSD-3 |
+| | **UF850**(5kg/850mm) · **xArm6**(5kg/700mm) | BSD-3 |
+| **endeffector** | OnRobot RG2(기본, 편입본) · **OnRobot RG6**(스트로크 160mm) | BSD / MIT |
+| | **Robotiq 2F-140**(140mm) · **Robotiq 2F-85** | BSD-3 |
+| | **Franka Hand** · **Allegro Hand V5**(4지 16DOF) | Apache-2.0 / BSD-2 |
+| **sensor1/2** | RealSense D405 · D435i | Apache-2.0 |
+
+**⚠ 적재 제약:** 현재 팔+그리퍼+센서 = **약 22~23kg**(URDF 실측). Dingo(20kg)·TurtleBot4(9kg)는
+이 하중을 못 버틴다 — 구성/참고용으로만 넣어두었다.
+
+**과일 수확 관점:** 연한 과일에 이상적인 소프트/적응형 그리퍼는 ROS2 URDF 가 사실상 없다.
+현실적 최선은 스트로크가 넓은 **Robotiq 2F-140** 또는 **OnRobot RG6**.
+
+**등록하지 않은 것과 이유**는 `docs/scripts/setup_vendor_models.sh` 하단 주석 참조
+(MiR100=humble 브랜치인데 catkin · AgileX Tracer/Scout Mini/Bunker=mesh 라이선스 없음 ·
+OnRobot RG2(ABC)=상류 트리 버그 · UR20/30=mesh 별도 제한 라이선스).
+
+**⚠ 통합 URDF 반영은 별도 작업:** 아래 "통합(최종) 로봇에 반영" 참조 — 폴더 드롭은
+조립기 드롭다운까지만 자동이고, `rda_robot.urdf.xacro` 에 슬롯별 `xacro:if` 분기를
+손으로 추가해야 통합 형상에 들어간다. 팔/그리퍼를 바꾸면 `gen_srdf.py` 재실행도 필요.
+
+---
+
+
 이 폴더의 **슬롯 하위 폴더**(`base/ arm/ endeffector/ sensor1/ sensor2/`)에
 파일을 넣으면, 조립기(`rda_robot_assembler`)가 자동으로 인식해 해당 슬롯의
 드롭다운 목록에 추가합니다. **Python 코드(`part_registry.py`) 편집 불필요.**
