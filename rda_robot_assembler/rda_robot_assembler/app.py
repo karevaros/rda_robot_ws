@@ -42,9 +42,15 @@ GRID_BOUNDS = (-_H, _H, -_H, _H, 0.0, GRID_SPAN)
 # 1m 간격 눈금 개수(span/1 + 1)
 _NLAB = int(round(GRID_SPAN)) + 1
 
-# 바닥 격자: 주격자 1m + 보조격자 100mm(치수 감각용)
+# 격자: 주격자 1m + 보조격자 100mm(치수 감각용)
 GRID_MAJOR = 1.0    # m
 GRID_MINOR = 0.1    # m (=100mm)
+# 평면이 3장이라 선이 진하면 로봇을 가린다 → 밝은 회색으로 물러나게.
+GRID_MAJOR_COLOR = "#8a8a8a"
+GRID_MINOR_COLOR = "#d6d6d6"
+# 격자를 그릴 평면 3종 — 조작 중인 파트의 베이스를 지나가게 배치한다.
+#   XY(바닥) / XZ / YZ  ← direction = 각 평면의 법선
+GRID_PLANES = (("xy", (0, 0, 1)), ("xz", (0, 1, 0)), ("yz", (1, 0, 0)))
 
 # 자충돌 시 표시: 충돌 파트는 빨강. 단 '지금 조작 중인 파트'가 상대 파트에 파묻혀
 # 안 보이는 걸 막기 위해, 충돌 상대 파트만 반투명으로 낮춘다.
@@ -246,6 +252,8 @@ class Assembler(QtWidgets.QMainWindow):
         self.active_slot = "arm"
         self.collider = col.CollisionChecker()   # 자충돌 검사기
         self._dirty = False       # 저장 후 변경 여부(제목 * 표시)
+        self._grid_origin = None  # 현재 격자 기준점(파트 베이스) — None 이면 재생성
+        self._bounds = GRID_BOUNDS   # 현재 격자 경계(카메라 맞춤용)
 
         self._build_ui()
         self._reload_all_parts()
@@ -589,62 +597,95 @@ class Assembler(QtWidgets.QMainWindow):
         if full:
             self.plotter.clear()
             self.actors = {}
+            self._grid_origin = None   # clear() 가 격자도 지웠으니 재생성 강제
             self.plotter.add_axes()
-            # 외곽 경계 박스 + 눈금 1m 간격(GRID_SPAN 기준)
-            try:
-                self.plotter.show_grid(
-                    bounds=GRID_BOUNDS, color="gray",
-                    n_xlabels=_NLAB, n_ylabels=_NLAB, n_zlabels=_NLAB,
-                    xtitle="X (m)", ytitle="Y (m)", ztitle="Z (m)",
-                )
-            except Exception:
-                pass
-            # 바닥 격자 — 보조 100mm(옅게) + 주 1m(진하게). 치수 감각용 레퍼런스.
-            for name, step, color, width in [
-                ("_floor_grid_minor", GRID_MINOR, "#4a4a4a", 1),
-                ("_floor_grid_major", GRID_MAJOR, "dimgray", 2),
-            ]:
-                try:
-                    n = max(1, int(round(GRID_SPAN / step)))
-                    plane = pv.Plane(center=(0, 0, 0), direction=(0, 0, 1),
-                                     i_size=GRID_SPAN, j_size=GRID_SPAN,
-                                     i_resolution=n, j_resolution=n)
-                    self.plotter.add_mesh(plane, style="wireframe", color=color,
-                                          line_width=width, name=name,
-                                          pickable=False)
-                except Exception:
-                    pass
             for slot in reg.SLOTS:
                 if not self.enabled.get(slot) or slot not in self.loaded:
                     continue
                 self._add_part_actors(slot)
-        self._update_transforms()
+        self._update_transforms()   # 여기서 격자도 파트 베이스로 따라 옮겨짐
         if full:
             self._fit_view()
         self.plotter.render()
 
+    # ---------- 격자 ----------
+    def _grid_anchor(self, world):
+        """격자 기준점 = 조작 중인 파트가 부모에 붙는 지점(= 그 파트의 베이스).
+
+        anchor 프레임을 쓰는 이유: 파트 root 원점은 모델에 따라 실제 부착점과
+        멀 수 있다(예: RG2 는 root 가 world, 부착은 rg2_hand).
+        """
+        part = self.loaded.get(self.active_slot)
+        W = world.get(self.active_slot)
+        if part is None or W is None:
+            return np.zeros(3)
+        A = np.asarray(W, dtype=float) @ part.frames.get(part.anchor, np.eye(4))
+        return A[:3, 3]
+
+    def _update_grids(self, world):
+        """활성 파트 베이스가 움직였으면 격자를 그 위치로 다시 그린다."""
+        o = self._grid_anchor(world)
+        if self._grid_origin is not None and np.allclose(o, self._grid_origin, atol=1e-6):
+            return
+        self._grid_origin = o
+        self._draw_grids(o)
+
+    def _draw_grids(self, origin):
+        """파트 베이스를 지나는 XY·XZ·YZ 3평면 격자(주 1m + 보조 100mm) + 눈금 박스."""
+        ox, oy, oz = (float(v) for v in origin)
+        h = GRID_SPAN / 2.0
+        self._bounds = (ox - h, ox + h, oy - h, oy + h, oz - h, oz + h)
+        # X/Y/Z 눈금·라벨 박스(기준점 기준으로 이동)
+        try:
+            self.plotter.remove_bounds_axes()
+        except Exception:
+            pass
+        try:
+            self.plotter.show_grid(
+                bounds=self._bounds, color="gray",
+                n_xlabels=_NLAB, n_ylabels=_NLAB, n_zlabels=_NLAB,
+                xtitle="X (m)", ytitle="Y (m)", ztitle="Z (m)",
+            )
+        except Exception:
+            pass
+        for axis, normal in GRID_PLANES:
+            for kind, step, color, width in (
+                ("minor", GRID_MINOR, GRID_MINOR_COLOR, 1),
+                ("major", GRID_MAJOR, GRID_MAJOR_COLOR, 2),
+            ):
+                try:
+                    n = max(1, int(round(GRID_SPAN / step)))
+                    plane = pv.Plane(center=(ox, oy, oz), direction=normal,
+                                     i_size=GRID_SPAN, j_size=GRID_SPAN,
+                                     i_resolution=n, j_resolution=n)
+                    self.plotter.add_mesh(plane, style="wireframe", color=color,
+                                          line_width=width, pickable=False,
+                                          name=f"_grid_{axis}_{kind}")
+                except Exception:
+                    pass
+
     def _set_view(self, which):
-        """뷰 프리셋 — 카메라 방향만 바꾸고 화면 범위는 격자 기준 유지."""
+        """뷰 프리셋 — 카메라 방향만 바꾸고 화면 범위는 현재 격자 기준 유지."""
         try:
             {"iso": self.plotter.view_isometric,
              "front": self.plotter.view_yz,   # +X 에서 바라봄
              "side": self.plotter.view_xz,    # -Y 에서 바라봄
              "top": self.plotter.view_xy}[which]()
-            self.plotter.reset_camera(bounds=list(GRID_BOUNDS))
+            self.plotter.reset_camera(bounds=list(self._bounds))
         except Exception:
             pass
         self.plotter.render()
 
     def _fit_view(self):
-        """카메라를 고정 격자 영역에 맞춤(자동 scene fit 대신)."""
+        """카메라를 현재 격자 영역에 맞춤(자동 scene fit 대신)."""
         try:
-            self.plotter.reset_camera(bounds=list(GRID_BOUNDS))
+            self.plotter.reset_camera(bounds=list(self._bounds))
         except TypeError:
             # 구버전 호환: 경계 상자 기준 수동 설정
             self.plotter.reset_camera()
         try:
             self.plotter.view_isometric()
-            self.plotter.reset_camera(bounds=list(GRID_BOUNDS))
+            self.plotter.reset_camera(bounds=list(self._bounds))
         except Exception:
             pass
 
@@ -669,6 +710,8 @@ class Assembler(QtWidgets.QMainWindow):
             {s: self.loaded[s] for s in self.loaded if self.enabled.get(s)},
             self.mounts,
         )
+        # 격자를 조작 중인 파트 베이스로 이동
+        self._update_grids(world)
         # 미배치 슬롯 경고
         missing = [s for s in self.loaded if self.enabled.get(s) and s not in world]
         for slot, lst in self.actors.items():
