@@ -6,6 +6,42 @@
 
 앱 실행 중이면 왼쪽 **`🔄 모델 새로고침`** 버튼으로 재시작 없이 다시 스캔합니다.
 
+## 외부 3D 파일(CAD)에서 모델 만들기
+
+> **핵심:** 3D 파일에는 **형상만** 있고 **관절 정보가 없다.** 그래서 경로가 갈린다.
+
+| 입력 | 방법 | 관절 |
+|------|------|------|
+| **STL·OBJ·DAE·GLB·PLY·3MF** | `mesh2urdf` (아래) — 바로 됨 | ❌ 강체만 |
+| **STEP·IGES** | `sudo apt install freecad` 후 `mesh2urdf` (자동 테셀레이션) | ❌ 강체만 |
+| **SolidWorks** | [sw_urdf_exporter](https://github.com/ros/solidworks_urdf_exporter) (Windows/SolidWorks 내부) | ✅ 보존 |
+| **Fusion360** | [fusion2urdf](https://github.com/syuntoku14/fusion2urdf) 스크립트 | ✅ 보존 |
+| **Onshape** | [onshape-to-robot](https://github.com/Rhoban/onshape-to-robot) | ✅ 보존 |
+
+**관절이 있는 파트**는 STL/STEP 으로 뽑으면 관절이 사라진다 → 위 전용 익스포터를 쓰거나,
+부품별로 각각 `mesh2urdf` 한 뒤 xacro 로 joint 를 직접 엮어야 한다.
+
+### `mesh2urdf` — 강체 파트 자동 변환
+메시를 링크 1개 URDF 로 만들고 **관성(inertia)까지 계산**해 이 폴더에 바로 등록한다.
+```bash
+# 기본 (단위·관성·충돌메시 자동)
+ros2 run rda_robot_assembler mesh2urdf bracket.stl --slot sensor1
+
+# 이름·라벨·재질·원점 지정
+ros2 run rda_robot_assembler mesh2urdf part.step --slot endeffector \
+    --name tool_x --label "커스텀 툴 X" --density 7850 --origin bottom
+```
+자동 처리:
+- **단위**: CAD 는 보통 mm → 최대 치수가 10m 를 넘으면 mm 로 보고 ×0.001. `--scale 0.001` 로 강제 가능.
+- **관성**: `--density`(기본 2700 알루미늄 / 강철 7850 / 플라스틱 1200)로 계산.
+  메시가 닫혀있지 않으면(watertight=False) 볼록껍질로 근사하고 **경고**를 띄운다.
+- **충돌 메시**: 기본 볼록껍질(`--collision hull`). 원본을 그대로 쓰면 면수가 많아 자충돌 검사가 느려진다.
+  오목 형상이 중요하면 `--collision simplify --max-faces 2000`.
+- **원점**: `--origin keep`(기본, 원본 유지) / `center` / `bottom`(바닥을 z=0 — 위에 얹는 파트에 편함) / `com`.
+
+생성물: `<슬롯>/<name>.urdf` + `<name>.yaml` + `<슬롯>/meshes/<name>_{visual,collision}.stl`
+→ 조립기에서 **`🔄 모델 새로고침`** 하면 드롭다운에 뜬다.
+
 ## 두 가지 넣는 방법
 
 ### 1) 무설정 드롭 — URDF/xacro 파일만

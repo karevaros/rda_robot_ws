@@ -64,6 +64,17 @@ check_urdf /tmp/rda_robot.urdf
 - 크기·간격은 `app.py` 의 `GRID_SPAN`(기본 2m)·`GRID_MAJOR`·`GRID_MINOR`,
   선 색은 `GRID_MAJOR_COLOR`·`GRID_MINOR_COLOR` 로 조정한다.
 
+## 모델 추가 — 외부 3D 파일에서 변환
+`mesh2urdf` 로 외부 CAD/메시를 **강체 1링크 URDF**(관성 자동 계산)로 만들어 모델 폴더에 등록한다.
+```bash
+ros2 run rda_robot_assembler mesh2urdf bracket.stl --slot sensor1
+ros2 run rda_robot_assembler mesh2urdf part.step --slot endeffector --label "툴 X" --density 7850
+```
+- 입력: STL·OBJ·DAE·GLB·PLY·3MF (바로) / STEP·IGES (`sudo apt install freecad` 필요)
+- 단위(mm→m)·관성·충돌메시(볼록껍질)를 자동 처리. 변환 후 앱에서 `F5`(모델 새로고침).
+- **관절 있는 파트는 불가** — 메시에 관절 정보가 없다. SolidWorks/Fusion360/Onshape 전용
+  URDF 익스포터를 쓸 것. 자세한 표·옵션은 `rda_robot_description/config/models/README.md`.
+
 ## 알려진 사항
 - 센서 슬롯은 d405/d435i 전환 가능. 그 외 슬롯은 `config/models/<슬롯>/` 폴더에
   파일을 넣으면 드롭다운에 추가된다(`config/models/README.md` 참고).
