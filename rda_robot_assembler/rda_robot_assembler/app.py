@@ -42,6 +42,15 @@ GRID_BOUNDS = (-_H, _H, -_H, _H, 0.0, GRID_SPAN)
 # 1m 간격 눈금 개수(span/1 + 1)
 _NLAB = int(round(GRID_SPAN)) + 1
 
+# 바닥 격자: 주격자 1m + 보조격자 100mm(치수 감각용)
+GRID_MAJOR = 1.0    # m
+GRID_MINOR = 0.1    # m (=100mm)
+
+# 자충돌 시 표시: 충돌 파트는 빨강. 단 '지금 조작 중인 파트'가 상대 파트에 파묻혀
+# 안 보이는 걸 막기 위해, 충돌 상대 파트만 반투명으로 낮춘다.
+COLLISION_COLOR = "#ff2020"
+COLLISION_OPACITY = 0.30   # 충돌 중인 '비활성' 파트 불투명도
+
 
 def default_mounts():
     """초안 기본 결합값(비교표 초안 기준)."""
@@ -390,6 +399,11 @@ class Assembler(QtWidgets.QMainWindow):
         mv = QtWidgets.QVBoxLayout(mid)
         mv.setContentsMargins(0, 0, 0, 0)
         self.plotter = QtInteractor(mid)
+        # 반투명 파트가 겹칠 때 뒤쪽이 제대로 비쳐 보이게(순서 무관 투명 렌더)
+        try:
+            self.plotter.enable_depth_peeling(10)
+        except Exception:
+            pass
         mv.addWidget(self.plotter.interactor)
         return mid
 
@@ -585,16 +599,21 @@ class Assembler(QtWidgets.QMainWindow):
                 )
             except Exception:
                 pass
-            # 바닥 1m 셀 격자면(GRID_SPAN x GRID_SPAN) — 크기 감각용 레퍼런스
-            try:
-                ncell = max(1, int(round(GRID_SPAN)))
-                floor = pv.Plane(center=(0, 0, 0), direction=(0, 0, 1),
-                                 i_size=GRID_SPAN, j_size=GRID_SPAN,
-                                 i_resolution=ncell, j_resolution=ncell)
-                self.plotter.add_mesh(floor, style="wireframe", color="dimgray",
-                                      line_width=1, name="_floor_grid", pickable=False)
-            except Exception:
-                pass
+            # 바닥 격자 — 보조 100mm(옅게) + 주 1m(진하게). 치수 감각용 레퍼런스.
+            for name, step, color, width in [
+                ("_floor_grid_minor", GRID_MINOR, "#4a4a4a", 1),
+                ("_floor_grid_major", GRID_MAJOR, "dimgray", 2),
+            ]:
+                try:
+                    n = max(1, int(round(GRID_SPAN / step)))
+                    plane = pv.Plane(center=(0, 0, 0), direction=(0, 0, 1),
+                                     i_size=GRID_SPAN, j_size=GRID_SPAN,
+                                     i_resolution=n, j_resolution=n)
+                    self.plotter.add_mesh(plane, style="wireframe", color=color,
+                                          line_width=width, name=name,
+                                          pickable=False)
+                except Exception:
+                    pass
             for slot in reg.SLOTS:
                 if not self.enabled.get(slot) or slot not in self.loaded:
                     continue
@@ -686,10 +705,15 @@ class Assembler(QtWidgets.QMainWindow):
                 pairs.add(tuple(sorted((sa, sb))))
         self._report_collision(active, pairs)
         for slot, lst in self.actors.items():
-            c = "#ff2020" if slot in colliding_slots else SLOT_COLORS.get(slot, "#cccccc")
+            hit = slot in colliding_slots
+            c = COLLISION_COLOR if hit else SLOT_COLORS.get(slot, "#cccccc")
+            # 조작 중인 파트는 항상 불투명 — 충돌 상대만 반투명으로 비켜줘서
+            # 파묻힌 활성 파트가 들여다보이게 한다.
+            op = COLLISION_OPACITY if (hit and slot != self.active_slot) else 1.0
             for actor in lst:
                 try:
                     actor.prop.color = c
+                    actor.prop.opacity = op
                 except Exception:
                     pass
 

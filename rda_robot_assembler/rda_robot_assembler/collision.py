@@ -6,8 +6,18 @@
 
 무시(allowed collision)되는 쌍:
   ① 같은 파트에서 관절로 연결된 인접 링크(설계상 항상 접촉)
-  ② 파트 마운트 접합쌍(자식 anchor 링크 ↔ 부모 parent_frame 링크)
-  ③ 사용자가 '기준 보정'으로 등록한 현재 충돌쌍(모델 자체 겹침 보정)
+  ② 사용자가 '현재 겹침 무시'로 등록한 충돌쌍(모델 자체 겹침 보정)
+
+■ 마운트 접합쌍을 왜 무시하지 않는가 (2026-07-15 수정)
+  예전엔 '자식 anchor 링크 ↔ 부모 parent_frame 링크'를 무조건 무시했다. 그 탓에
+  팔 마운트를 모바일 플랫폼 안으로 100mm 가까이 파묻어도 경고가 전혀 뜨지 않는
+  사각지대가 있었다(사용자 신고).
+  침투깊이 임계값으로 완화해 보려 했으나, FCL 의 mesh-mesh 침투깊이는 접촉한
+  삼각형 하나의 값이라 실제 침투량과 무관하게 널뛴다(실측: 실제 8mm 침투 →
+  48.8mm 보고 / 실제 58mm 침투 → 21mm 보고). 임계값 방식은 신뢰할 수 없어 폐기.
+  대신 **실제 mesh 교차 자체를 신호로 사용**한다. 플랜지가 상판에 '얹힌' 정상
+  결합은 삼각형이 교차하지 않아 조용하고, 진짜로 파고들면 교차하므로 보고된다.
+  설계상 원래 겹치는 모델은 시작 시 자동 기준보정(②)이 걸러 준다.
 
 객체 이름 규약: "<slot>::<link>"
 """
@@ -65,21 +75,18 @@ class CollisionChecker:
             except Exception:
                 pass
 
-    def _structural_allowed(self, loaded, mounts):
-        """관절 인접쌍 + 마운트 접합쌍(항상 무시)."""
+    def _adjacent_allowed(self, loaded):
+        """관절로 연결된 인접 링크쌍 — 설계상 항상 접촉하므로 무조건 무시."""
         allow = set()
         for slot, part in loaded.items():
             for pair in getattr(part, "adjacent_links", set()):
                 a, b = tuple(pair)
                 allow.add(frozenset((self._name(slot, a), self._name(slot, b))))
-        for slot, mnt in mounts.items():
-            if slot not in loaded or mnt is None or mnt.parent_slot not in loaded:
-                continue
-            child_root = getattr(loaded[slot], "anchor", None) \
-                or getattr(loaded[slot], "root", None)
-            allow.add(frozenset((self._name(slot, child_root),
-                                 self._name(mnt.parent_slot, mnt.parent_frame))))
         return allow
+
+    def _structural_allowed(self, loaded, mounts=None):
+        """구조적으로 항상 무시하는 쌍 = 관절 인접쌍."""
+        return self._adjacent_allowed(loaded)
 
     def _colliding_names(self):
         """FCL 내부 충돌쌍을 frozenset 집합으로 정규화(버전별 tuple/frozenset 대응)."""
@@ -88,17 +95,20 @@ class CollisionChecker:
             return set()
         return {frozenset(p) for p in names}
 
-    def check(self, loaded, mounts):
+    def _report(self, loaded, extra_allowed):
+        """무시규칙 적용 후 남는 충돌쌍."""
+        allow = self._adjacent_allowed(loaded) | extra_allowed
+        return {p for p in self._colliding_names() if p not in allow}
+
+    def check(self, loaded, mounts=None):
         """무시쌍 제외한 실제 충돌 집합 반환: set of frozenset(nameA, nameB)."""
         if not self.enabled:
             return set()
-        allow = self._structural_allowed(loaded, mounts) | self.allowed
-        return {p for p in self._colliding_names() if p not in allow}
+        return self._report(loaded, self.allowed)
 
-    def calibrate(self, loaded, mounts):
-        """현재 충돌(구조적 무시 제외)을 기준으로 등록해 이후 무시. 등록 건수 반환."""
-        allow = self._structural_allowed(loaded, mounts)
-        new = {p for p in self._colliding_names() if p not in allow}
+    def calibrate(self, loaded, mounts=None):
+        """현재 충돌을 기준으로 등록해 이후 무시. 등록 건수 반환."""
+        new = self._report(loaded, set())
         self.allowed |= new
         return len(new)
 
