@@ -144,6 +144,12 @@ def mass_properties(mesh, density):
 
 
 def make_collision(mesh, mode, max_faces):
+    """충돌 메시 생성.
+
+    simplify 는 실패 시 조용히 볼록껍질로 떨어지면 안 된다 — 오목 형상을 지키려고
+    고른 모드인데 껍질이 나오면 거짓말이 된다(실제로 겪음: fast_simplification
+    미설치 → except 로 hull 반환 → hull 과 부피가 똑같이 나옴). 명확히 실패시킨다.
+    """
     if mode == "hull":
         return mesh.convex_hull
     if mode == "same":
@@ -153,8 +159,11 @@ def make_collision(mesh, mode, max_faces):
             return mesh
         try:
             return mesh.simplify_quadric_decimation(face_count=max_faces)
-        except Exception:
-            return mesh.convex_hull
+        except ModuleNotFoundError as e:
+            raise RuntimeError(
+                f"--collision simplify 에는 fast_simplification 패키지가 필요합니다 ({e}).\n"
+                "  설치:  python3 -m pip install --user fast_simplification\n"
+                "  (또는 --collision hull / same 을 쓰세요.)") from e
     raise ValueError(mode)
 
 
@@ -214,6 +223,18 @@ def convert(src, slot, name=None, label=None, scale=None, density=2700.0,
 
     col = make_collision(mesh, collision, max_faces)
     print(f"[충돌] mode={collision}: 면 {n_faces0} → {len(col.faces)}")
+    # 기본값(hull)이 이 파트에 안 맞으면 알려준다 — 오목 파트는 껍질이 크게 부풀어
+    # 실제로 안 닿는데 충돌로 잡힌다(실측: L자+구멍 브래킷 = 원본의 2.6배).
+    if collision == "hull" and mesh.is_watertight and mesh.volume > 0:
+        r = float(col.volume) / float(mesh.volume)
+        if r > 1.5:
+            print(f"[경고] 볼록껍질 부피가 원본의 {r:.1f}배 — 오목한 형상입니다. "
+                  f"충돌이 실제보다 크게 잡힙니다 → '--collision same' 을 고려하세요.")
+    # 감쇠가 목표에 못 미치면 조용히 넘어가지 않는다(CAD 테셀레이션은 잘 안 줄어든다).
+    if collision == "simplify" and len(col.faces) > max_faces * 1.5:
+        print(f"[경고] 목표 {max_faces}면을 못 맞췄습니다(실제 {len(col.faces)}면). "
+              f"CAD 테셀레이션은 감쇠가 막히는 경우가 많습니다 "
+              f"— '--collision same'(면 {n_faces0})과 큰 차이가 없습니다.")
 
     root = out_dir or models_dir()
     sd = os.path.join(root, slot)

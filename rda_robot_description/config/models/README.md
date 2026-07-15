@@ -35,8 +35,19 @@ ros2 run rda_robot_assembler mesh2urdf part.step --slot endeffector \
 - **단위**: CAD 는 보통 mm → 최대 치수가 10m 를 넘으면 mm 로 보고 ×0.001. `--scale 0.001` 로 강제 가능.
 - **관성**: `--density`(기본 2700 알루미늄 / 강철 7850 / 플라스틱 1200)로 계산.
   메시가 닫혀있지 않으면(watertight=False) 볼록껍질로 근사하고 **경고**를 띄운다.
-- **충돌 메시**: 기본 볼록껍질(`--collision hull`). 원본을 그대로 쓰면 면수가 많아 자충돌 검사가 느려진다.
-  오목 형상이 중요하면 `--collision simplify --max-faces 2000`.
+- **충돌 메시**: 기본 볼록껍질(`--collision hull`) — 빠르지만 **오목한 파트는 부풀어 오른다.**
+  실측(L자+구멍 브래킷): `hull` 부피가 원본의 **260%** → 실제로 안 닿는데 충돌로 잡힌다.
+  1.5배를 넘으면 변환기가 **경고**하니, 그때는 `--collision same` 을 쓸 것.
+
+  | 모드 | 면수 | 부피(원본 대비) | 쓸 때 |
+  |------|------|------------------|-------|
+  | `hull`(기본) | 16 | 260% | 볼록한 파트, 속도 우선 |
+  | `simplify` | 1030 | 87% | 오목 + 면수 줄이고 싶을 때 |
+  | `same` | 1036 | 100% | **오목한 파트 — 가장 정확** |
+
+  `simplify` 는 `pip install --user fast_simplification` 필요. 단 **CAD 테셀레이션은 감쇠가
+  잘 안 된다**(위 예: 목표 300면인데 1030면에서 멈춤 — 라이브러리 한계). 목표에 못 미치면
+  경고를 띄우며, 그 경우 `same` 과 실익 차이가 거의 없다.
 - **원점**: `--origin keep`(기본, 원본 유지) / `center` / `bottom`(바닥을 z=0 — 위에 얹는 파트에 편함) / `com`.
 
 생성물: `<슬롯>/<name>.urdf` + `<name>.yaml` + `<슬롯>/meshes/<name>_{visual,collision}.stl`
