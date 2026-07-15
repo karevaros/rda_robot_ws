@@ -150,6 +150,13 @@ class MountEditor(QtWidgets.QWidget):
         self._block = False
 
     def _reload_frames(self, select=None):
+        """부모 파트의 링크 목록으로 콤보 재구성.
+
+        select 가 그 목록에 없으면(= 부모 모델을 바꿔서 예전 프레임명이 남은 경우)
+        '(없음)' 항목으로 **그대로 보여준다**. 예전엔 findData 가 -1 이라 선택이
+        안 되고 콤보만 0번 항목을 보여줘서, 화면은 멀쩡한데 실제 mount 값은
+        옛 프레임인 채로 남는 거짓 표시가 됐다.
+        """
         self.parent_frame.blockSignals(True)
         self.parent_frame.clear()
         ps = self.parent_slot.currentData()
@@ -158,8 +165,10 @@ class MountEditor(QtWidgets.QWidget):
             self.parent_frame.addItem(fr, fr)
         if select is not None:
             i = self.parent_frame.findData(select)
-            if i >= 0:
-                self.parent_frame.setCurrentIndex(i)
+            if i < 0:
+                self.parent_frame.insertItem(0, f"{select}  ⚠ (부모에 없음)", select)
+                i = 0
+            self.parent_frame.setCurrentIndex(i)
         self.parent_frame.blockSignals(False)
 
     def _on_parent_slot(self):
@@ -729,9 +738,26 @@ class Assembler(QtWidgets.QMainWindow):
             if ps in world:
                 Fw = world[ps] @ self.loaded[ps].frames.get(mnt.parent_frame, np.eye(4))
                 self._draw_axis(Fw, "_attach_axis")
+        # 부모에 존재하지 않는 부착 프레임 경고.
+        # assembly.compute_placements 는 frames.get(name, eye(4)) 라 없는 프레임을
+        # 조용히 원점으로 대체한다 — 모델을 바꾸면 예전 프레임명(base_link 등)이
+        # 그대로 남아 파트가 소리 없이 엉뚱한 데 놓인다. 여기서 눈에 띄게 알린다.
+        bad_frame = []
+        for slot, mnt in self.mounts.items():
+            if not self.enabled.get(slot) or slot not in self.loaded or mnt is None:
+                continue
+            parent = self.loaded.get(mnt.parent_slot)
+            if parent is not None and mnt.parent_frame not in parent.link_names:
+                bad_frame.append(f"{reg.SLOT_LABELS.get(slot, slot)}→'{mnt.parent_frame}'")
+
+        warns = []
         if missing:
-            self._set_status("미배치(부모 확인 필요): " + ", ".join(missing), error=True)
-        elif self.lbl_status.text().startswith("미배치"):
+            warns.append("미배치(부모 확인 필요): " + ", ".join(missing))
+        if bad_frame:
+            warns.append("부착 프레임이 부모에 없음(원점으로 대체됨): " + ", ".join(bad_frame))
+        if warns:
+            self._set_status(" / ".join(warns), error=True)
+        elif self.lbl_status.text().startswith(("미배치", "부착 프레임")):
             self._set_status("")
 
         # ---- 자충돌 검사 & 하이라이트(충돌 파트=빨강) ----

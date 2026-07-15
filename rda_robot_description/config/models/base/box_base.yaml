@@ -1,0 +1,3 @@
+label: 테스트 박스 베이스 (600x400x100)
+file: box_base.urdf
+anchor: box_base_link
