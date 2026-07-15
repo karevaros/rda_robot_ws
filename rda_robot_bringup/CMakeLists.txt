@@ -9,8 +9,10 @@ endif()
 find_package(ament_cmake REQUIRED)
 
 # 파이썬 노드 설치
+# ※ symlink-install 시 소스 파일에 chmod +x 가 안 돼 있으면 ros2 run 이 못 찾음
 install(PROGRAMS
   scripts/self_collision_monitor.py
+  scripts/obstacle_publisher.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

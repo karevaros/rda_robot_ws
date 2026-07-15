@@ -18,6 +18,36 @@ from launch_ros.substitutions import FindPackageShare
 from launch_ros.parameter_descriptions import ParameterValue
 
 
+def _ground_offset(xacro_file, mounts_file):
+    """world -> base_link 의 z 오프셋을 URDF 에서 유도한다.
+
+    base_link 는 바닥이 아니다. Scout 는 base_footprint_joint 로
+    base_link -> base_footprint 를 z=-0.23479 에 두므로(바퀴 최저점 -0.2352),
+    base_link 를 world 원점에 그냥 붙이면 로봇이 바닥에 파묻힌다.
+
+    베이스 모델을 바꾸면 이 값도 달라지므로 상수로 박지 않고 URDF 에서 읽는다.
+    base_footprint 가 없는 모델(예: box_base)이면 0 을 쓰되 **경고**한다
+    (조용히 0 으로 떨어뜨리면 로봇이 파묻혀도 눈치채기 어렵다).
+    """
+    import subprocess
+    import xml.etree.ElementTree as ET
+    try:
+        xml = subprocess.check_output(
+            ["xacro", xacro_file, f"mounts_file:={mounts_file}"],
+            stderr=subprocess.DEVNULL, text=True, timeout=60)
+        root = ET.fromstring(xml)
+        for j in root.findall("joint"):
+            if j.find("child").get("link") == "base_footprint":
+                o = j.find("origin")
+                z = float((o.get("xyz") or "0 0 0").split()[2])
+                return -z, None       # base_footprint 를 z=0 으로
+        return 0.0, ("base_footprint 링크가 없어 world->base_link z=0 을 씁니다. "
+                     "베이스가 바닥에 파묻히거나 떠 보이면 obstacles.yaml 의 "
+                     "ground_plane 높이 또는 이 오프셋을 확인하세요.")
+    except Exception as e:
+        return 0.0, f"URDF 에서 바닥 오프셋을 못 읽어 z=0 을 씁니다 ({e})."
+
+
 def _launch_setup(context, *args, **kwargs):
     pkg = FindPackageShare("rda_robot_description")
     xacro_path = PathJoinSubstitution([pkg, "urdf", "rda_robot.urdf.xacro"])
@@ -47,13 +77,38 @@ def _launch_setup(context, *args, **kwargs):
                parameters=[{"zeros": zeros}] if zeros else [])
     rviz = Node(package="rviz2", executable="rviz2", output="screen",
                 arguments=["-d", rviz_path])
-    nodes = [rsp, jsp, rviz]
+    # 좌표계 통일: world 를 항상 발행한다(RViz Fixed Frame 이 world 이므로
+    # obstacles:=false 여도 있어야 함). 로봇 루트(base_link)를 world 에 고정.
+    # 모바일 베이스가 실제 주행하면 이 static TF 를 odom/localization 이 대체해야 함.
+    z, warn = _ground_offset(
+        os.path.expanduser(
+            "~/robot_ws/src/rda_robot_description/urdf/rda_robot.urdf.xacro"),
+        mounts_file)
+    if warn:
+        print(f"[rda_robot_display] ⚠ {warn}")
+    else:
+        print(f"[rda_robot_display] world->base_link z={z:.5f} "
+              f"(base_footprint 를 바닥 z=0 에 맞춤)")
+    world_tf = Node(package="tf2_ros", executable="static_transform_publisher",
+                    name="world_to_base_link",
+                    arguments=["--x", "0", "--y", "0", "--z", f"{z:.6f}",
+                               "--frame-id", "world",
+                               "--child-frame-id", "base_link"])
+    nodes = [rsp, jsp, rviz, world_tf]
 
     # 자충돌 모니터(기본 RViz 에서 움직임 시 충돌 감지) — collision:=false 로 끔.
     if LaunchConfiguration("collision").perform(context).lower() in ("1", "true", "yes"):
         nodes.append(Node(package="rda_robot_bringup",
                           executable="self_collision_monitor.py",
                           output="screen"))
+
+    # 장애물 환경(4주차) — obstacles:=false 로 끔.
+    if LaunchConfiguration("obstacles").perform(context).lower() in ("1", "true", "yes"):
+        nodes.append(Node(package="rda_robot_bringup",
+                          executable="obstacle_publisher.py",
+                          output="screen",
+                          parameters=[{"obstacles_file":
+                                       LaunchConfiguration("obstacles_file").perform(context)}]))
     return nodes
 
 
@@ -66,5 +121,14 @@ def generate_launch_description():
     collision_arg = DeclareLaunchArgument(
         "collision", default_value="true",
         description="자충돌 모니터 실행 여부(RViz 빨강 마커 표시)")
-    return LaunchDescription([mounts_arg, collision_arg,
+    default_obstacles = os.path.expanduser(
+        "~/robot_ws/src/rda_robot_description/config/obstacles.yaml")
+    obstacles_arg = DeclareLaunchArgument(
+        "obstacles", default_value="true",
+        description="장애물 환경 표시 여부(world TF + 장애물 마커)")
+    obstacles_file_arg = DeclareLaunchArgument(
+        "obstacles_file", default_value=default_obstacles,
+        description="장애물 정의 yaml 경로")
+    return LaunchDescription([mounts_arg, collision_arg, obstacles_arg,
+                              obstacles_file_arg,
                               OpaqueFunction(function=_launch_setup)])

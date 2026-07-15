@@ -29,8 +29,18 @@ Visualization Manager:
         Depth: 1
         Durability Policy: Volatile
         Reliability Policy: Reliable
+    - Class: rviz_default_plugins/MarkerArray
+      Name: Obstacles
+      Enabled: true
+      Topic:
+        Value: /obstacle_markers
+        Depth: 1
+        Durability Policy: Transient Local
+        Reliability Policy: Reliable
   Global Options:
-    Fixed Frame: base_link
+    # world = 바닥 z=0 기준. 장애물이 world 고정이라 Fixed Frame 도 world.
+    # (launch 가 world->base_link static TF 를 항상 발행한다)
+    Fixed Frame: world
     Frame Rate: 30
   Tools:
     - Class: rviz_default_plugins/MoveCamera
