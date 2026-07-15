@@ -5,6 +5,7 @@
 결과: mounts.yaml 저장 → rda_robot.urdf.xacro 가 읽어 통합.
 """
 import os
+import subprocess
 import sys
 import math
 import numpy as np
@@ -338,6 +339,8 @@ class Assembler(QtWidgets.QMainWindow):
                                    "등록해 둔 겹침 무시를 모두 해제")
         self.act_refresh = act("모델 새로고침", self._refresh_models, "F5",
                                "config/models/<슬롯>/ 폴더를 다시 스캔해 드롭다운 갱신")
+        self.act_open_models = act("모델 폴더 열기", self._open_models_dir, "Ctrl+M",
+                                   f"파일 관리자로 모델 폴더 열기:\n{reg.models_dir()}")
 
     def _build_menu(self):
         mb = self.menuBar()
@@ -356,7 +359,8 @@ class Assembler(QtWidgets.QMainWindow):
         m = mb.addMenu("도구(&T)")
         m.addAction(self.act_collision)
         m.addAction(self.act_calib); m.addAction(self.act_calib_clear)
-        m.addSeparator(); m.addAction(self.act_refresh)
+        m.addSeparator()
+        m.addAction(self.act_refresh); m.addAction(self.act_open_models)
 
     def _build_toolbar(self):
         tb = QtWidgets.QToolBar("기본 도구모음")
@@ -407,6 +411,10 @@ class Assembler(QtWidgets.QMainWindow):
         btn_refresh.setToolTip(self.act_refresh.toolTip())
         btn_refresh.clicked.connect(self._refresh_models)
         lv.addWidget(btn_refresh)
+        self.btn_open_models = QtWidgets.QPushButton("📂 모델 폴더 열기")
+        self.btn_open_models.setToolTip(self.act_open_models.toolTip())
+        self.btn_open_models.clicked.connect(self._open_models_dir)
+        lv.addWidget(self.btn_open_models)
         lv.addStretch(1)
         return left
 
@@ -508,6 +516,26 @@ class Assembler(QtWidgets.QMainWindow):
             self.models[slot] = combo.currentData()
         n = sum(len(v) for v in reg.SLOT_MODELS.values())
         self._set_status(f"모델 새로고침 완료 (총 {n}개)")
+
+    def _open_models_dir(self):
+        """모델 드롭 폴더를 파일 관리자로 연다(여기에 urdf/xacro/yaml 을 넣으면 F5 로 등록)."""
+        d = reg.models_dir()
+        try:
+            os.makedirs(d, exist_ok=True)   # RDA_MODELS_DIR 로 옮긴 경우 없을 수 있음
+        except Exception as e:
+            self._set_status(f"모델 폴더를 만들 수 없습니다: {e}", error=True)
+            return
+        if QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(d)):
+            self._set_status(f"모델 폴더 열기: {d}")
+            return
+        # Qt 가 실패하면(데스크톱 환경에 따라 다름) xdg-open 으로 재시도.
+        # 조용히 아무 일도 안 일어나면 안 되므로 결과를 반드시 알린다.
+        try:
+            subprocess.Popen(["xdg-open", d], start_new_session=True,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self._set_status(f"모델 폴더 열기: {d}")
+        except Exception as e:
+            self._set_status(f"폴더를 열지 못했습니다({e}) — 경로: {d}", error=True)
 
     def _on_model_changed(self, slot):
         self.models[slot] = self.slot_widgets[slot]["combo"].currentData()
