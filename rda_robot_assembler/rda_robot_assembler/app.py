@@ -870,6 +870,33 @@ class Assembler(QtWidgets.QMainWindow):
         with open(path) as f:
             d = yaml.safe_load(f) or {}
         mp = d.get("mounts", {})
+
+        # ── 모델 선택 복원 ────────────────────────────────────────────────
+        # 저장은 models 를 쓰는데(_save) 불러오기가 이걸 안 읽어서, 예전엔
+        # 결합 위치만 돌아오고 모델은 그대로였다. 반드시 mount/포즈보다 **먼저**
+        # 복원해야 한다 — 파트를 다시 로드해야 initial_pose 의 관절이 존재한다.
+        sel = dict(d.get("models") or {})
+        for slot, m in mp.items():          # 구버전 파일 호환(mounts.<slot>.model 만 있는 경우)
+            if m.get("model"):
+                sel.setdefault(slot, m["model"])
+        missing = []
+        for slot in reg.SLOTS:
+            mid = sel.get(slot)
+            if not mid:
+                continue
+            combo = self.slot_widgets[slot]["combo"]
+            idx = combo.findData(mid)
+            if idx < 0:
+                # 등록되지 않은 모델(폴더에서 빠졌거나 이름이 바뀜).
+                # 조용히 무시하면 화면 모델과 파일 내용이 어긋난 채로 남는다 → 경고.
+                missing.append(f"{slot}={mid}")
+                continue
+            self.models[slot] = mid
+            combo.blockSignals(True)        # 슬롯마다 _on_model_changed 가 도는 것 방지
+            combo.setCurrentIndex(idx)
+            combo.blockSignals(False)
+        self._reload_all_parts()
+
         for slot, m in mp.items():
             self.mounts[slot] = Mount(m.get("parent_slot"), m.get("parent_frame"),
                                       m.get("xyz", [0, 0, 0]), m.get("rpy", [0, 0, 0]))
@@ -883,7 +910,12 @@ class Assembler(QtWidgets.QMainWindow):
         self._select_slot(self.active_slot)
         self._refresh_view(full=True)
         self._set_dirty(False)
-        self._set_status(f"불러옴: {path}")
+        if missing:
+            self._set_status(
+                f"불러옴: {path} — ⚠ 등록되지 않은 모델은 건너뜀({', '.join(missing)}). "
+                "모델 폴더를 확인하고 F5(모델 새로고침) 후 다시 불러오세요.", error=True)
+        else:
+            self._set_status(f"불러옴: {path}")
 
     def _reset(self):
         self.mounts = default_mounts()
