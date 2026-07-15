@@ -1,0 +1,12 @@
+# IK 솔버 설정
+#
+# KDL 을 쓰는 이유: RB5-850e 는 손목 3축이 한 점에서 만나는 spherical wrist 라
+# 해석적 IK(IKFast)도 가능하지만, IKFast 는 모델별 컴파일이 필요해
+# 조립기로 팔을 갈아끼우면 매번 다시 만들어야 한다. KDL 은 URDF 만 있으면
+# 어떤 체인이든 동작하므로 모델 교체 구조와 맞는다.
+# (속도가 문제되면 6주차에 IKFast/TRAC-IK 검토)
+arm:
+  kinematics_solver: kdl_kinematics_plugin/KDLKinematicsPlugin
+  kinematics_solver_search_resolution: 0.005
+  kinematics_solver_timeout: 0.05
+  kinematics_solver_attempts: 3

@@ -1,0 +1,79 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+  # ※ MotionPlanning 은 Panel 이 아니라 Display 다(아래 Displays 에 있음).
+  #   Panels 에 넣으면 "class ... with base class type rviz_common::Panel does not
+  #   exist" 로 로드 실패한다. 패널 UI 는 Display 가 알아서 띄운다.
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Name: Grid
+      Enabled: true
+      Plane Cell Count: 10
+      Cell Size: 0.5
+    - Class: rviz_default_plugins/TF
+      Name: TF
+      Enabled: false
+      Marker Scale: 0.3
+    - Class: moveit_rviz_plugin/PlanningScene
+      Name: PlanningScene
+      Enabled: true
+      Move Group Namespace: ""
+      Planning Scene Topic: /monitored_planning_scene
+      Scene Geometry:
+        Scene Alpha: 0.9
+        Show Scene Geometry: true
+      Robot Alpha: 1
+    - Class: moveit_rviz_plugin/MotionPlanning
+      Name: MotionPlanning
+      Enabled: true
+      Move Group Namespace: ""
+      Planning Group: arm
+      Planning Scene Topic: /monitored_planning_scene
+      Robot Description: robot_description
+      Trajectory Topic: /display_planned_path
+      Planned Path:
+        Show Robot Visual: true
+        Show Trail: false
+        Loop Animation: false
+        Trajectory Topic: /display_planned_path
+      Scene Robot:
+        Show Robot Visual: true
+      Query:
+        Show Goal State: true
+        Show Start State: false
+    # 장애물 원본 마커(색/이름표) — planning scene 과 별개로 눈으로 확인용
+    - Class: rviz_default_plugins/MarkerArray
+      Name: Obstacles
+      Enabled: true
+      Topic:
+        Value: /obstacle_markers
+        Depth: 1
+        Durability Policy: Transient Local
+        Reliability Policy: Reliable
+  Global Options:
+    # world = 바닥 z=0
+    Fixed Frame: world
+    Frame Rate: 30
+  Tools:
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Interact
+  Value: true
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Distance: 3.5
+      Focal Point:
+        X: 0.3
+        Y: 0
+        Z: 0.6
+      Pitch: 0.4
+      Yaw: 0.8
+Window Geometry:
+  Height: 1000
+  Width: 1600
+  MotionPlanning:
+    collapsed: false
+  Displays:
+    collapsed: false

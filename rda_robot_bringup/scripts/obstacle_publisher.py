@@ -70,6 +70,9 @@ class ObstaclePublisher(Node):
 
         path = self.get_parameter("obstacles_file").value or default_yaml()
         self.path = path
+        self.spec = self.load()      # QoS depth 산정에 장애물 수가 필요 → 먼저 로드
+
+        # 마커는 MarkerArray 1개로 전부 보내므로 depth=1 로 충분
         latched = QoSProfile(
             depth=1,
             reliability=QoSReliabilityPolicy.RELIABLE,
@@ -82,14 +85,22 @@ class ObstaclePublisher(Node):
         self.want_collision = bool(self.get_parameter("publish_collision").value)
         self.cpub = None
         if self.want_collision and HAVE_MOVEIT:
-            self.cpub = self.create_publisher(CollisionObject, "collision_object", latched)
+            # depth 는 장애물 수보다 크게 잡는다(마커와 달리 장애물 1개당 메시지 1개).
+            # KEEP_LAST(depth=1) 이면 연달아 보낸 앞 메시지가 덮일 수 있어 위험하다
+            # — RELIABLE 도 "최신 depth 개"를 보장할 뿐 전부를 보장하진 않는다.
+            depth = max(20, len(self.spec.get("obstacles") or []) * 2)
+            self.cpub = self.create_publisher(
+                CollisionObject, "collision_object",
+                QoSProfile(depth=depth,
+                           reliability=QoSReliabilityPolicy.RELIABLE,
+                           durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+                           history=QoSHistoryPolicy.KEEP_LAST))
         elif self.want_collision and not HAVE_MOVEIT:
             self.get_logger().warn(
                 "moveit_msgs 를 import 할 수 없어 CollisionObject 발행을 건너뜁니다 "
                 "(RViz 마커만 발행). MoveIt 설치 후 다시 실행하세요."
             )
 
-        self.spec = self.load()
         self.publish_all()
         p = float(self.get_parameter("period").value)
         if p > 0:
@@ -184,6 +195,27 @@ class ObstaclePublisher(Node):
         arr.markers.extend(self._workspace_markers(frame, len(arr.markers)))
         self.mpub.publish(arr)
 
+        # MoveIt planning scene 로도 같은 장애물을 보낸다(단일 진실원 유지).
+        if self.cpub is not None:
+            n_pub = 0
+            for o in self.spec.get("obstacles", []):
+                co = CollisionObject()
+                co.header.frame_id = frame
+                co.header.stamp = self.get_clock().now().to_msg()
+                co.id = o["name"]
+                sp = SolidPrimitive()
+                sp.type = getattr(SolidPrimitive, SHAPES[o["type"]][1])
+                sp.dimensions = self._dims(o)
+                co.primitives.append(sp)
+                co.primitive_poses.append(self._pose(o))
+                co.operation = CollisionObject.ADD
+                self.cpub.publish(co)
+                n_pub += 1
+            self._pub_count = getattr(self, "_pub_count", 0) + 1
+            if self._pub_count <= 3 or self._pub_count % 30 == 0:
+                self.get_logger().info(
+                    f"CollisionObject {n_pub}개 발행 (#{self._pub_count}, frame={frame})")
+
     def _workspace_markers(self, frame, base_id):
         """작업 공간 경계를 와이어프레임으로 표시(면으로 그리면 안이 안 보임)."""
         ws = self.spec.get("workspace")
@@ -214,20 +246,6 @@ class ObstaclePublisher(Node):
                 pt.x, pt.y, pt.z = p
                 m.points.append(pt)
         return [m]
-
-        if self.cpub is not None:
-            for o in self.spec.get("obstacles", []):
-                co = CollisionObject()
-                co.header.frame_id = frame
-                co.header.stamp = self.get_clock().now().to_msg()
-                co.id = o["name"]
-                sp = SolidPrimitive()
-                sp.type = getattr(SolidPrimitive, SHAPES[o["type"]][1])
-                sp.dimensions = self._dims(o)
-                co.primitives.append(sp)
-                co.primitive_poses.append(self._pose(o))
-                co.operation = CollisionObject.ADD
-                self.cpub.publish(co)
 
 
 def main():

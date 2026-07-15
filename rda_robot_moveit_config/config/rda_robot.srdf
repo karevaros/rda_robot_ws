@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- 자동 생성: docs/scripts/gen_srdf.py — 직접 편집하지 말 것.
+     통합 URDF(rda_robot.urdf) 기준, 무작위 5000 샘플로 ACM 산출.
+     모델(mounts.yaml)을 바꾸면 반드시 재생성. -->
+<robot name="rda_robot">
+    <!-- 플래닝 그룹 -->
+    <group name="arm">
+        <chain base_link="link0" tip_link="tcp"/>
+    </group>
+    <group name="gripper">
+        <joint name="rg2_finger_joint1"/>
+    </group>
+    <end_effector name="rg2" parent_link="tcp" group="gripper" parent_group="arm"/>
+
+    <!-- 이름있는 자세 -->
+    <group_state name="home" group="arm">
+        <joint name="base" value="0"/>
+        <joint name="shoulder" value="0"/>
+        <joint name="elbow" value="0"/>
+        <joint name="wrist1" value="0"/>
+        <joint name="wrist2" value="0"/>
+        <joint name="wrist3" value="0"/>
+    </group_state>
+    <group_state name="open" group="gripper">
+        <joint name="rg2_finger_joint1" value="0"/>
+    </group_state>
+    <group_state name="close" group="gripper">
+        <joint name="rg2_finger_joint1" value="1.1800"/>
+    </group_state>
+
+    <!-- 충돌 무시 쌍 (Adjacent/Always/Never/Default) -->
+    <disable_collisions link1="base_link" link2="d435i_link" reason="Never"/>
+    <disable_collisions link1="base_link" link2="front_left_wheel_link" reason="Adjacent"/>
+    <disable_collisions link1="base_link" link2="front_right_wheel_link" reason="Adjacent"/>
+    <disable_collisions link1="base_link" link2="link0" reason="Adjacent"/>
+    <disable_collisions link1="base_link" link2="link1" reason="Never"/>
+    <disable_collisions link1="base_link" link2="rear_left_wheel_link" reason="Adjacent"/>
+    <disable_collisions link1="base_link" link2="rear_right_wheel_link" reason="Adjacent"/>
+    <disable_collisions link1="d405_link" link2="d435i_link" reason="Never"/>
+    <disable_collisions link1="d405_link" link2="link5" reason="Always"/>
+    <disable_collisions link1="d405_link" link2="link6" reason="Never"/>
+    <disable_collisions link1="d405_link" link2="rg2_hand" reason="Never"/>
+    <disable_collisions link1="d405_link" link2="rg2_leftfinger" reason="Never"/>
+    <disable_collisions link1="d405_link" link2="rg2_rightfinger" reason="Never"/>
+    <disable_collisions link1="d435i_link" link2="front_left_wheel_link" reason="Never"/>
+    <disable_collisions link1="d435i_link" link2="front_right_wheel_link" reason="Never"/>
+    <disable_collisions link1="d435i_link" link2="link0" reason="Never"/>
+    <disable_collisions link1="d435i_link" link2="link1" reason="Never"/>
+    <disable_collisions link1="d435i_link" link2="rear_left_wheel_link" reason="Never"/>
+    <disable_collisions link1="d435i_link" link2="rear_right_wheel_link" reason="Never"/>
+    <disable_collisions link1="front_left_wheel_link" link2="front_right_wheel_link" reason="Never"/>
+    <disable_collisions link1="front_left_wheel_link" link2="link0" reason="Never"/>
+    <disable_collisions link1="front_left_wheel_link" link2="link1" reason="Never"/>
+    <disable_collisions link1="front_left_wheel_link" link2="rear_left_wheel_link" reason="Never"/>
+    <disable_collisions link1="front_left_wheel_link" link2="rear_right_wheel_link" reason="Never"/>
+    <disable_collisions link1="front_right_wheel_link" link2="link0" reason="Never"/>
+    <disable_collisions link1="front_right_wheel_link" link2="link1" reason="Never"/>
+    <disable_collisions link1="front_right_wheel_link" link2="rear_left_wheel_link" reason="Never"/>
+    <disable_collisions link1="front_right_wheel_link" link2="rear_right_wheel_link" reason="Never"/>
+    <disable_collisions link1="link0" link2="link1" reason="Adjacent"/>
+    <disable_collisions link1="link0" link2="link2" reason="Never"/>
+    <disable_collisions link1="link0" link2="rear_left_wheel_link" reason="Never"/>
+    <disable_collisions link1="link0" link2="rear_right_wheel_link" reason="Never"/>
+    <disable_collisions link1="link1" link2="link2" reason="Adjacent"/>
+    <disable_collisions link1="link1" link2="rear_left_wheel_link" reason="Never"/>
+    <disable_collisions link1="link1" link2="rear_right_wheel_link" reason="Never"/>
+    <disable_collisions link1="link2" link2="link3" reason="Adjacent"/>
+    <disable_collisions link1="link3" link2="link4" reason="Adjacent"/>
+    <disable_collisions link1="link4" link2="link5" reason="Adjacent"/>
+    <disable_collisions link1="link4" link2="link6" reason="Never"/>
+    <disable_collisions link1="link4" link2="rg2_hand" reason="Never"/>
+    <disable_collisions link1="link4" link2="rg2_leftfinger" reason="Never"/>
+    <disable_collisions link1="link4" link2="rg2_rightfinger" reason="Never"/>
+    <disable_collisions link1="link5" link2="link6" reason="Adjacent"/>
+    <disable_collisions link1="link5" link2="rg2_hand" reason="Always"/>
+    <disable_collisions link1="link5" link2="rg2_leftfinger" reason="Never"/>
+    <disable_collisions link1="link5" link2="rg2_rightfinger" reason="Never"/>
+    <disable_collisions link1="link6" link2="rg2_hand" reason="Always"/>
+    <disable_collisions link1="link6" link2="rg2_leftfinger" reason="Always"/>
+    <disable_collisions link1="link6" link2="rg2_rightfinger" reason="Always"/>
+    <disable_collisions link1="rear_left_wheel_link" link2="rear_right_wheel_link" reason="Never"/>
+    <disable_collisions link1="rg2_hand" link2="rg2_leftfinger" reason="Adjacent"/>
+    <disable_collisions link1="rg2_hand" link2="rg2_rightfinger" reason="Adjacent"/>
+    <disable_collisions link1="rg2_leftfinger" link2="rg2_rightfinger" reason="Never"/>
+</robot>

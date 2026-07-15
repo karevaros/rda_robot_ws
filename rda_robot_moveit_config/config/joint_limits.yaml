@@ -1,0 +1,57 @@
+# MoveIt 관절 제한 — URDF 값을 덮어쓰거나 보강한다.
+#
+# ⚠ 왜 이 파일이 필요한가 (docs/기구학-분석.md 참조)
+#   벤더 URDF(rb5_850e/joint.yaml)와 벤더 moveit_config 는 **가속도 제한이 없다**
+#   (`has_acceleration_limits: false`). 가속도 제한이 없으면 MoveIt 의 궤적
+#   시간파라미터화(TOTG)가 동작하지 않는다 → 5주차(경로생성) 선행 필수 항목.
+#
+# 아래 가속도 값의 출처
+#   제조사 데이터시트에 축별 가속도 공개값이 없다. 따라서 **보수적 추정치**다.
+#   근거: 속도 제한 3.14 rad/s 를 정지→최대속도까지 약 0.5 s 에 도달한다고 보면
+#         a ≈ 3.14 / 0.5 ≈ 6.3 rad/s². 안전하게 그 절반인 3.0 rad/s² 를 쓴다.
+#         손목(wrist2·3)은 관성이 작아 5.0 까지 허용.
+#   ※ 추정치임을 명시해 둔다 — 실기 연동(6주차) 전 데이터시트/제어기 값으로 교체할 것.
+#     여기 값은 "안전하게 느린" 쪽이라 계획이 실패하기보다 굼뜨게 나온다.
+#
+# effort(토크)는 여기서 다루지 않는다. URDF 의 10 Nm 는 플레이스홀더이며
+# (실제 필요 정적토크 133 Nm) 기하 경로계획에는 쓰이지 않는다. 6주차 전 교체 필요.
+
+default_velocity_scaling_factor: 0.1
+default_acceleration_scaling_factor: 0.1
+
+joint_limits:
+  base:
+    has_velocity_limits: true
+    max_velocity: 3.14
+    has_acceleration_limits: true
+    max_acceleration: 3.0
+  shoulder:
+    has_velocity_limits: true
+    max_velocity: 3.14
+    has_acceleration_limits: true
+    max_acceleration: 3.0
+  elbow:
+    has_velocity_limits: true
+    max_velocity: 3.14
+    has_acceleration_limits: true
+    max_acceleration: 3.0
+  wrist1:
+    has_velocity_limits: true
+    max_velocity: 3.14
+    has_acceleration_limits: true
+    max_acceleration: 3.0
+  wrist2:
+    has_velocity_limits: true
+    max_velocity: 3.14
+    has_acceleration_limits: true
+    max_acceleration: 5.0
+  wrist3:
+    has_velocity_limits: true
+    max_velocity: 3.14
+    has_acceleration_limits: true
+    max_acceleration: 5.0
+  rg2_finger_joint1:
+    has_velocity_limits: true
+    max_velocity: 1.57
+    has_acceleration_limits: true
+    max_acceleration: 3.0
