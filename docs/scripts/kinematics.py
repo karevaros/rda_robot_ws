@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""통합 URDF에서 기구학 파라미터 추출 (링크 파라미터 · 관절 제한 · 작업영역)."""
+"""통합 URDF에서 기구학 파라미터 추출 (링크 파라미터 · 관절 제한 · 작업영역).
+
+사용:  kinematics.py <urdf> [tcp링크] [팔베이스링크]
+  tcp링크    : 팔 끝점 (기본 tcp). 내장 RB5 는 무접두라 tcp, 그 외 모델은 슬롯 접두사가
+               붙는다(예: arm__rb10_1300e → arm_tcp). compose_urdf 의 prefix 규칙 참조.
+  팔베이스링크: reach 반경의 기준 (기본 link0 / 접두사 모델은 arm_link0)
+"""
 import math
 import sys
 import xml.etree.ElementTree as ET
@@ -7,6 +13,8 @@ import xml.etree.ElementTree as ET
 import numpy as np
 
 URDF = sys.argv[1]
+TCP = sys.argv[2] if len(sys.argv) > 2 else "tcp"
+ARM_BASE = sys.argv[3] if len(sys.argv) > 3 else "link0"
 
 tree = ET.parse(URDF)
 root = tree.getroot()
@@ -75,7 +83,7 @@ for j in mimics:
 # ---- 팔 체인 링크 길이 (link0..link6/tcp) ----
 print("\n## 팔 체인 (연속 관절 원점 = 링크 오프셋)")
 by_child = {j["child"]: j for j in joints}
-chain, cur = [], "tcp"
+chain, cur = [], TCP
 while cur in by_child:
     j = by_child[cur]
     chain.append(j)
@@ -125,8 +133,9 @@ def axis_rot(axis, q):
     return T
 
 
-def fk(cfg, target="tcp"):
-    """base_link 기준 target 프레임 위치."""
+def fk(cfg, target=None):
+    """base_link 기준 target 프레임 위치(기본 = TCP)."""
+    target = target or TCP
     T = np.eye(4)
     ch, cur = [], target
     while cur in by_child:
@@ -142,7 +151,7 @@ def fk(cfg, target="tcp"):
 
 
 arm = [j for j in actuated if j["name"] in {c["name"] for c in chain}]
-print(f"\n## 작업영역 (base_link 기준, tcp, 팔 {len(arm)}축 몬테카를로)")
+print(f"\n## 작업영역 (base_link 기준, {TCP}, 팔 {len(arm)}축 몬테카를로)")
 rng = np.random.default_rng(0)
 pts = []
 N = 200000
@@ -150,11 +159,11 @@ for _ in range(N):
     cfg = {j["name"]: rng.uniform(j["lower"], j["upper"]) for j in arm}
     pts.append(fk(cfg)[:3, 3])
 pts = np.array(pts)
-base = fk({}, "link0")[:3, 3]
+base = fk({}, ARM_BASE)[:3, 3]
 r = np.linalg.norm(pts - base, axis=1)
-print(f"  팔 베이스(link0) 원점 = {[round(v,4) for v in base]} (base_link 기준)")
-print(f"  tcp 반경 r: min={r.min():.3f} max={r.max():.3f} m   (최대 reach ≈ {r.max():.3f} m)")
+print(f"  팔 베이스({ARM_BASE}) 원점 = {[round(v,4) for v in base]} (base_link 기준)")
+print(f"  {TCP} 반경 r: min={r.min():.3f} max={r.max():.3f} m   ({ARM_BASE} 기준 최대반경)")
 for i, ax in enumerate("XYZ"):
     print(f"  {ax}: [{pts[:,i].min():+.3f}, {pts[:,i].max():+.3f}] m")
-print(f"  홈포즈(전관절 0) tcp = {[round(v,4) for v in fk({})[:3,3]]}")
+print(f"  홈포즈(전관절 0) {TCP} = {[round(v,4) for v in fk({})[:3,3]]}")
 print(f"  샘플 {N}, 바닥 아래(z<0) 비율 = {(pts[:,2]<0).mean()*100:.1f}%")
