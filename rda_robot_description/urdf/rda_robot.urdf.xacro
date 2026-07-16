@@ -12,6 +12,14 @@
   ■ 새 모델 추가법: 해당 슬롯의 <xacro:if value="${...=='새id'}"> 블록을 복사해
     include(있으면)·mount joint·매크로 호출을 그 모델에 맞게 채운다.
     (각 모델은 매크로 인터페이스·루트 링크명이 달라 슬롯당 분기 블록이 필요하다.)
+    ★ 분기를 추가했으면 아래 SUPPORTED_* 목록에도 그 id 를 반드시 넣을 것.
+
+  ■ 지원 모델 한계(2026-07-16): 조립기 드롭다운에는 28종이 뜨지만, 통합 URDF 는 아래
+    SUPPORTED_* 에 있는 7종만 반영한다. 지원 밖 모델을 고르면 xacro 가 조용히 슬롯을
+    누락시켜 엉뚱한 곳(check_urdf/rsp)에서 터졌었다 → xacro.check_slot 으로 즉시 실패시킨다.
+    폴백(기본모델로 조용히 대체)은 의도적으로 넣지 않는다: 고르지도 않은 형상 위에서
+    도달권·SRDF·경로계획이 계산되는 게 기동 실패보다 위험하다.
+    근본 해결은 Python URDF 컴포저(작업중) — 완료되면 이 한계와 방어는 사라진다.
 
   주의: RB5 는 rb_6dof prefix 버그로 무접두(link0..6). 상세: docs/파트규약-비교.md
 -->
@@ -22,8 +30,28 @@
   <xacro:property name="M" value="${Y['mounts']}"/>
   <xacro:property name="SEL" value="${Y['models']}"/>
 
+  <!-- ============ 슬롯 모델 방어 — 분기 없는 모델이면 즉시 실패 ============ -->
+  <xacro:property name="SUPPORTED_BASE" value="${['scout_v2']}"/>
+  <xacro:property name="SUPPORTED_ARM" value="${['rb5_850e']}"/>
+  <xacro:property name="SUPPORTED_EE" value="${['onrobot_rg2']}"/>
+  <xacro:property name="SUPPORTED_SENSOR" value="${['d405', 'd435i']}"/>
+
+  <xacro:macro name="check_slot" params="slot name supported">
+    <xacro:if value="${name not in supported}">
+      ${xacro.fatal(
+        slot + " 슬롯: 모델 '" + str(name) + "' 는 통합 URDF 에 반영할 수 없습니다"
+        + " (해당 xacro:if 분기 없음)."
+        + "  ■ 이 슬롯이 지원하는 모델: " + ', '.join(supported)
+        + "  ■ 조치: config/mounts.yaml 에서 위 모델 중 하나로 바꾸거나,"
+        + " Python URDF 컴포저(작업중) 완료 후 재시도하세요."
+        + "  ※ 조립기 드롭다운의 28종이 곧 통합 URDF 지원 목록은 아닙니다."
+      )}
+    </xacro:if>
+  </xacro:macro>
+
   <!-- ============ ⓐ 베이스(모바일) — models.base 로 스위칭 ============ -->
   <xacro:property name="bname" value="${SEL['base']}"/>
+  <xacro:check_slot slot="base" name="${bname}" supported="${SUPPORTED_BASE}"/>
   <xacro:if value="${bname == 'scout_v2'}">
     <xacro:include filename="$(find scout_description)/urdf/scout_v2.xacro"/>
   </xacro:if>
@@ -36,6 +64,7 @@
   <!-- ============ ⓑ 로봇팔 — mounts.arm.model 로 스위칭 ============ -->
   <xacro:property name="am" value="${M['arm']}"/>
   <xacro:property name="aname" value="${am['model']}"/>
+  <xacro:check_slot slot="arm" name="${aname}" supported="${SUPPORTED_ARM}"/>
   <xacro:if value="${aname == 'rb5_850e'}">
     <xacro:include filename="$(find rbpodo_description)/robots/rb_6dof.xacro"/>
     <joint name="arm_mount_joint" type="fixed">
@@ -51,6 +80,7 @@
   <!-- ============ ⓒ 엔드이펙터 — mounts.endeffector.model 로 스위칭 ============ -->
   <xacro:property name="em" value="${M['endeffector']}"/>
   <xacro:property name="ename" value="${em['model']}"/>
+  <xacro:check_slot slot="endeffector" name="${ename}" supported="${SUPPORTED_EE}"/>
   <xacro:if value="${ename == 'onrobot_rg2'}">
     <xacro:include filename="$(find rda_robot_description)/urdf/parts/endeffector/onrobot_rg2_macro.xacro"/>
     <xacro:onrobot_rg2 parent="${em['parent_frame']}" prefix="">
@@ -67,6 +97,7 @@
   <xacro:macro name="mount_sensor" params="key">
     <xacro:property name="s" value="${M[key]}"/>
     <xacro:property name="sname" value="${s['model']}"/>
+    <xacro:check_slot slot="${key}" name="${sname}" supported="${SUPPORTED_SENSOR}"/>
     <xacro:if value="${sname == 'd405'}">
       <xacro:sensor_d405 parent="${s['parent_frame']}" name="${sname}" use_nominal_extrinsics="true">
         <origin xyz="${s['xyz'][0]} ${s['xyz'][1]} ${s['xyz'][2]}"
