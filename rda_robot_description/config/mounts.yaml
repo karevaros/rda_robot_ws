@@ -6,7 +6,7 @@ mounts:
     xyz:
     - 0.0
     - 0.0
-    - 0.11
+    - 0.115
     rpy:
     - 0.0
     - 0.0
@@ -41,7 +41,7 @@ mounts:
     parent_frame: base_link
     xyz:
     - 0.0
-    - -0.32
+    - -0.34
     - 0.6
     rpy:
     - 0.0
