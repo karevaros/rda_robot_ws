@@ -31,9 +31,13 @@
 (MiR100=humble 브랜치인데 catkin · AgileX Tracer/Scout Mini/Bunker=mesh 라이선스 없음 ·
 OnRobot RG2(ABC)=상류 트리 버그 · UR20/30=mesh 별도 제한 라이선스).
 
-**⚠ 통합 URDF 반영은 별도 작업:** 아래 "통합(최종) 로봇에 반영" 참조 — 폴더 드롭은
-조립기 드롭다운까지만 자동이고, `rda_robot.urdf.xacro` 에 슬롯별 `xacro:if` 분기를
-손으로 추가해야 통합 형상에 들어간다. 팔/그리퍼를 바꾸면 `gen_srdf.py` 재실행도 필요.
+**통합 URDF 반영은 자동이다(2026-07-16~).** 폴더에 드롭하면 조립기 드롭다운과 통합 URDF
+양쪽에 바로 들어간다 — Python 컴포저가 조립기와 **같은 모델 정의**를 읽기 때문. 재빌드도
+xacro 편집도 필요 없다. 단 **팔/그리퍼를 바꾸면 `gen_srdf.py` 재실행은 여전히 필요**하다
+(SRDF/ACM 은 링크 이름·형상에 묶여 있음).
+
+> 이전에는 `rda_robot.urdf.xacro` 에 슬롯별 `xacro:if` 분기를 손으로 추가해야 했고,
+> 안 하면 **에러 없이 그 슬롯이 통째로 빠졌다**(26종 중 21종이 그 상태였다).
 
 ---
 
@@ -131,7 +135,18 @@ export RDA_MODELS_DIR=~/my_models   # 하위에 base/ arm/ ... 를 두면 됨
 ```
 
 ## 통합(최종) 로봇에 반영
-조립기는 **설계·정렬 도구**입니다. 여기서 고른 모델·결합값은 `mounts.yaml` 로
-저장되지만, 최종 통합 URDF(`urdf/rda_robot.urdf.xacro`)의 base/arm/그리퍼는
-아직 별도 include 로 되어 있어, 실제 교체 시 그 파일도 함께 수정해야 합니다.
-(센서는 mounts.yaml 로 자동 스위칭됨.)
+조립기에서 고른 모델·결합값은 `mounts.yaml` 로 저장되고, **모든 슬롯이 그대로 통합
+URDF 에 반영**됩니다. launch 가 Python 컴포저를 호출해 조립기와 같은 정의로 조립하므로
+앱 화면과 RViz 형상이 일치합니다.
+
+```bash
+ros2 run rda_robot_assembler compose_urdf --mounts <mounts.yaml> -o /tmp/rda_robot.urdf
+check_urdf /tmp/rda_robot.urdf
+python3 src/docs/scripts/test_integrated_urdf.py     # 전 모델 조립 회귀
+```
+
+**링크 이름 규칙:** 모델 링크에는 기본으로 슬롯 접두사가 붙습니다(`arm_`, `sensor1_` …).
+서로 다른 모델이 흔히 같은 이름(`base_link`)을 써서 충돌하기 때문입니다. 내장
+Scout/RB5/RG2 는 하위 도구(gen_srdf·kinematics·moveit)가 의존하는 `base_link`·`link0`·
+`tcp`·`rg2_hand` 를 보존하려고 `prefix: ""` 로 예외 처리돼 있습니다. 모델 yaml 에서
+`prefix:` 로 직접 지정할 수도 있습니다.

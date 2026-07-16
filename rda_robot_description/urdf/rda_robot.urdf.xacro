@@ -1,5 +1,22 @@
 <?xml version="1.0"?>
 <!--
+  ⚠⚠ 사용 중단(2026-07-16). launch 는 더 이상 이 파일을 쓰지 않는다.
+      통합 URDF 는 Python 컴포저가 만든다:
+          ros2 run rda_robot_assembler compose_urdf --mounts <mounts.yaml>
+      (rda_robot_assembler/composer.py — 조립기와 같은 모델 정의를 공유)
+
+  이 파일을 되살려 쓰지 말 것. 두 가지 결함이 있다:
+    ① 슬롯별 xacro:if 분기가 있는 7종만 반영하고, 나머지 21종은 **에러 없이 슬롯을
+       통째로 누락**시킨다(아래 check_slot 방어는 그 누락을 즉시 실패로 바꾼 안전망일 뿐,
+       분기를 늘려주지는 않는다).
+    ② 아래 rb_6dof 호출이 벤더의 tcp_xyz="0 -0.0967 0" 을 넘기지 않아 매크로 기본값
+       '0 0 0' 이 적용된다 → **tcp 가 96.7mm 틀린 자리(link6 원점)에 생긴다.**
+       조립기는 벤더 standalone(robots/rb5_850e.urdf.xacro)을 쓰므로 정상이었고,
+       그래서 앱 화면과 RViz 형상이 서로 달랐다. 컴포저는 같은 소스를 써서 일치한다.
+  참고용으로만 남긴다.
+
+  ---- 이하 원본 주석 ----
+
   rda_robot — 4개 파트 통합 URDF (mounts.yaml 기반, 모델 자동 스위칭)
   구성: ⓐ베이스(모바일) + ⓑ로봇팔 + ⓒ엔드이펙터(그리퍼) + ⓓ센서1·2
 

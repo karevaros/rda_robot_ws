@@ -52,10 +52,15 @@ def _setup(context, *args, **kwargs):
 
     cfg = get_package_share_directory("rda_robot_moveit_config")
     mounts = LaunchConfiguration("mounts_file").perform(context)
-    xacro_file = os.path.join(DESC_SRC, "urdf", "rda_robot.urdf.xacro")
 
-    urdf_xml = subprocess.check_output(
-        ["xacro", xacro_file, f"mounts_file:={mounts}"], text=True)
+    # 통합 URDF = Python 컴포저(조립기와 같은 모델 정의). display launch 와 동일 경로.
+    try:
+        urdf_xml = subprocess.check_output(
+            ["ros2", "run", "rda_robot_assembler", "compose_urdf",
+             "--mounts", mounts],
+            text=True, stderr=subprocess.PIPE, timeout=180)
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError("통합 URDF 조립 실패:\n" + (e.stderr or "").strip())
     with open(os.path.join(cfg, "config", "rda_robot.srdf")) as f:
         srdf_xml = f.read()
 

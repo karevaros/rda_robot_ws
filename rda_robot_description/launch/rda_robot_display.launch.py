@@ -5,20 +5,45 @@ robot_state_publisher + joint_state_publisher_gui + rviz2 로 표시한다.
 mounts.yaml 의 initial_pose(관절 초기 포즈)는 joint_state_publisher 의
 zeros 파라미터로 전달되어 시작 포즈가 그 값이 된다.
 
+통합 URDF 는 **Python 컴포저**(`ros2 run rda_robot_assembler compose_urdf`)가 만든다.
+조립기와 같은 모델 정의를 읽으므로 앱 화면과 RViz 형상이 일치한다.
+(이전에는 rda_robot.urdf.xacro 를 썼는데, 슬롯별 xacro:if 분기가 있는 모델만 반영돼
+ 나머지 21종이 조용히 누락됐고, 벤더 tcp 오프셋 96.7mm 도 빠져 앱과 형상이 달랐다.)
+
 기본 mounts_file 은 소스 워크스페이스의 config/mounts.yaml → 앱 저장 후
 colcon 재빌드 없이 반영. 다른 파일:  mounts_file:=/경로/mounts.yaml
 """
 import os
+import subprocess
+import xml.etree.ElementTree as ET
+
 import yaml
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, OpaqueFunction
-from launch.substitutions import LaunchConfiguration, Command, FindExecutable, PathJoinSubstitution
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 from launch_ros.parameter_descriptions import ParameterValue
 
 
-def _ground_offset(xacro_file, mounts_file):
+def compose_urdf(mounts_file):
+    """mounts.yaml → 통합 URDF XML. 실패하면 이유를 그대로 보이고 중단한다.
+
+    subprocess(ros2 run)로 부르는 이유: assembler 가 이미 이 패키지(description)를
+    exec_depend 로 참조하므로, 반대 방향 의존을 선언하면 순환이 된다.
+    """
+    try:
+        return subprocess.check_output(
+            ["ros2", "run", "rda_robot_assembler", "compose_urdf",
+             "--mounts", mounts_file],
+            text=True, stderr=subprocess.PIPE, timeout=180)
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError("통합 URDF 조립 실패:\n" + (e.stderr or "").strip())
+    except FileNotFoundError:
+        raise RuntimeError("ros2 실행파일이 없습니다. 환경을 source 했는지 확인하세요.")
+
+
+def _ground_offset(urdf_xml):
     """world -> base_link 의 z 오프셋을 URDF 에서 유도한다.
 
     base_link 는 바닥이 아니다. Scout 는 base_footprint_joint 로
@@ -29,14 +54,8 @@ def _ground_offset(xacro_file, mounts_file):
     base_footprint 가 없는 모델(예: box_base)이면 0 을 쓰되 **경고**한다
     (조용히 0 으로 떨어뜨리면 로봇이 파묻혀도 눈치채기 어렵다).
     """
-    import subprocess
-    import xml.etree.ElementTree as ET
     try:
-        xml = subprocess.check_output(
-            ["xacro", xacro_file, f"mounts_file:={mounts_file}"],
-            stderr=subprocess.DEVNULL, text=True, timeout=60)
-        root = ET.fromstring(xml)
-        for j in root.findall("joint"):
+        for j in ET.fromstring(urdf_xml).findall("joint"):
             if j.find("child").get("link") == "base_footprint":
                 o = j.find("origin")
                 z = float((o.get("xyz") or "0 0 0").split()[2])
@@ -50,7 +69,6 @@ def _ground_offset(xacro_file, mounts_file):
 
 def _launch_setup(context, *args, **kwargs):
     pkg = FindPackageShare("rda_robot_description")
-    xacro_path = PathJoinSubstitution([pkg, "urdf", "rda_robot.urdf.xacro"])
     rviz_path = PathJoinSubstitution([pkg, "rviz", "rda_robot.rviz"])
     mounts_file = LaunchConfiguration("mounts_file").perform(context)
 
@@ -63,11 +81,9 @@ def _launch_setup(context, *args, **kwargs):
     except Exception:
         pass
 
-    robot_description = ParameterValue(
-        Command([FindExecutable(name="xacro"), " ", xacro_path,
-                 " mounts_file:=", mounts_file]),
-        value_type=str,
-    )
+    # 통합 URDF 는 한 번만 조립해 robot_description 과 바닥 오프셋에 함께 쓴다.
+    urdf_xml = compose_urdf(mounts_file)
+    robot_description = ParameterValue(urdf_xml, value_type=str)
 
     rsp = Node(package="robot_state_publisher", executable="robot_state_publisher",
                output="screen", parameters=[{"robot_description": robot_description}])
@@ -80,10 +96,7 @@ def _launch_setup(context, *args, **kwargs):
     # 좌표계 통일: world 를 항상 발행한다(RViz Fixed Frame 이 world 이므로
     # obstacles:=false 여도 있어야 함). 로봇 루트(base_link)를 world 에 고정.
     # 모바일 베이스가 실제 주행하면 이 static TF 를 odom/localization 이 대체해야 함.
-    z, warn = _ground_offset(
-        os.path.expanduser(
-            "~/robot_ws/src/rda_robot_description/urdf/rda_robot.urdf.xacro"),
-        mounts_file)
+    z, warn = _ground_offset(urdf_xml)
     if warn:
         print(f"[rda_robot_display] ⚠ {warn}")
     else:

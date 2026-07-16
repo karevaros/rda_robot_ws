@@ -21,6 +21,7 @@ setup(
         "console_scripts": [
             "assembler = rda_robot_assembler.app:main",
             "mesh2urdf = rda_robot_assembler.mesh2urdf:main",
+            "compose_urdf = rda_robot_assembler.composer:main",
         ],
     },
 )
