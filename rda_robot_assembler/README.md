@@ -1,11 +1,33 @@
 # RDA 로봇 어셈블러 (`rda_robot_assembler`)
 
-파트(베이스·로봇팔·엔드이펙터·센서1·센서2)를 3D로 보며 **결합 위치/각도**를 맞추는
-인터랙티브 조립 GUI. 설정 결과를 `mounts.yaml` 로 저장하면 `rda_robot.urdf.xacro` 가
-읽어 통합 URDF에 반영된다.
+파트(베이스·로봇팔·엔드이펙터·센서1·센서2)를 3D로 보며 **모델을 고르고 결합 위치/각도를
+맞추는** 인터랙티브 조립 GUI. 결과를 `mounts.yaml` 로 저장하면 **통합 URDF 에 그대로
+반영**된다(RViz2·MoveIt2).
 
-> 앱 표시 이름은 **RDA 로봇 어셈블러**. ROS 패키지명(`rda_robot_assembler`)과
-> 실행 명령(`ros2 run rda_robot_assembler assembler`)은 그대로 유지한다.
+이 패키지는 실행파일 3종을 제공한다:
+
+| 명령 | 역할 |
+|------|------|
+| `ros2 run rda_robot_assembler assembler` | 조립 GUI |
+| `ros2 run rda_robot_assembler compose_urdf` | **통합 URDF 컴포저** — `mounts.yaml` → 단일 URDF |
+| `ros2 run rda_robot_assembler mesh2urdf` | 외부 CAD/메시 → 강체 URDF 변환 |
+
+> 앱 표시 이름은 **RDA 로봇 어셈블러**. ROS 패키지명·실행 명령은 `rda_robot_assembler` 로 유지한다.
+
+## 조립기와 통합 URDF 가 같은 정의를 공유한다
+
+컴포저는 조립기와 **같은 모델 레지스트리(`part_registry`)·같은 모델 폴더**를 읽는다.
+따라서 앱 화면에서 본 형상이 곧 RViz/MoveIt 형상이다.
+
+```
+config/models/<슬롯>/*.yaml ─┬─▶ 조립기 GUI ──▶ mounts.yaml ──▶ compose_urdf ──▶ 통합 URDF
+     (정본 = 소스 트리)      └────────────────────────────────────┘
+```
+
+> 이전에는 통합 URDF 가 별도 xacro 였고 슬롯별 `xacro:if` 분기가 있는 모델만 반영했다.
+> 분기가 없으면 **에러 없이 그 슬롯이 통째로 빠졌고**(26종 중 21종이 그 상태), 팔의 tcp 도
+> 벤더 인자를 빠뜨려 96.7mm 어긋나 있었다 — 즉 **앱과 RViz 형상이 서로 달랐다.**
+> 컴포저가 같은 소스를 쓰면서 이 부류가 구조적으로 사라졌다. (2026-07-16)
 
 ## 화면 구성
 - **메뉴/툴바(상단)**: 파일(저장·불러오기·기본값) / 보기(축·뷰 프리셋) / 도구(자충돌·모델)
@@ -31,18 +53,50 @@
 # 의존(pip, rosdep 밖): 최초 1회
 python3 -m pip install --user pyvista pyvistaqt trimesh yourdfpy pycollada python-fcl
 # 실행
-~/robot_ws/src/rda_robot_assembler/run.sh
-# 또는 colcon build 후:
 ros2 run rda_robot_assembler assembler
+# 또는
+~/robot_ws/src/rda_robot_assembler/run.sh
 ```
 - PyQt5 / vtk / numpy / scipy / yaml 은 시스템에 이미 존재.
 
-## 결과 반영
-저장 위치: `rda_robot_description/config/mounts.yaml`
+## 결과 반영 — 앱 → RViz
+저장 위치: `rda_robot_description/config/mounts.yaml` (`Ctrl+S`)
+
 ```bash
-xacro $(ros2 pkg prefix rda_robot_description)/share/rda_robot_description/urdf/rda_robot.urdf.xacro > /tmp/rda_robot.urdf
+# 1) 바로 RViz 로 확인 — 재빌드 불필요
+ros2 launch rda_robot_description rda_robot_display.launch.py
+
+# 2) 통합 URDF 만 뽑아 검증
+ros2 run rda_robot_assembler compose_urdf \
+    --mounts ~/robot_ws/src/rda_robot_description/config/mounts.yaml -o /tmp/rda_robot.urdf
 check_urdf /tmp/rda_robot.urdf
+
+# 3) MoveIt 으로 경로계획까지
+ros2 launch rda_robot_moveit_config moveit_demo.launch.py
 ```
+> **팔/그리퍼를 바꿨다면** SRDF/ACM 재생성이 필요하다(링크명·형상에 묶임):
+> ```bash
+> python3 src/docs/scripts/gen_srdf.py /tmp/rda_robot.urdf \
+>         src/rda_robot_moveit_config/config/rda_robot.srdf 5000
+> ```
+
+## 모델 선택 — 26종
+슬롯별 드롭다운에서 고르고 저장하면 통합 형상이 바뀐다. 베이스 12 · 팔 6 · 엔드이펙터 6 ·
+센서 2. `config/models/<슬롯>/` 에 파일을 넣으면 자동 등록(`F5` 새로고침) —
+**코드 편집도 재빌드도 필요 없다.** 스키마·목록: `rda_robot_description/config/models/README.md`
+
+**링크 이름 규칙**: 통합 URDF 에서 모델 링크에는 기본으로 슬롯 접두사가 붙는다
+(`arm_base_link`·`sensor1_camera_link` …). 서로 다른 모델이 흔히 같은 `base_link` 를 써서
+충돌하기 때문. 내장 Scout/RB5/RG2 는 하위 도구(gen_srdf·kinematics·moveit)가 의존하는
+`base_link`·`link0`·`tcp`·`rg2_hand` 를 보존하려고 `prefix: ""` 로 예외 처리돼 있다.
+
+## 회귀 테스트
+```bash
+python3 src/docs/scripts/test_models.py            # 조립기가 모델을 로드하는가   (28/28)
+python3 src/docs/scripts/test_integrated_urdf.py   # 통합 URDF 에 반영되는가      (29/29)
+```
+> 두 개는 **다른 것을 본다.** 조립기 로드 통과가 통합 URDF 반영을 뜻하지 않는다 —
+> 그 착각으로 21종이 하루 동안 조용히 누락됐다.
 
 ## 자충돌 검사
 파트끼리 실제로 mesh 가 겹치면 3D에서 **빨강**으로 표시된다. 관절로 연결된 인접 링크처럼
@@ -76,8 +130,18 @@ ros2 run rda_robot_assembler mesh2urdf part.step --slot endeffector --label "툴
 - **관절 있는 파트는 불가** — 메시에 관절 정보가 없다. SolidWorks/Fusion360/Onshape 전용
   URDF 익스포터를 쓸 것. 자세한 표·옵션은 `rda_robot_description/config/models/README.md`.
 
+## 자충돌 검사는 2단계다
+| 단계 | 어디서 | 무엇을 | 언제 |
+|------|--------|--------|------|
+| 1단계 | **조립기**(`collision.py`) | 결합값이 파트를 파묻는지 — 정지 상태 배치 검사 | 조립 중 실시간 |
+| 2단계 | **RViz**(`self_collision_monitor.py`) | 관절을 움직였을 때 링크끼리 겹치는지 | `rda_robot_display.launch.py` |
+| 3단계 | **MoveIt**(SRDF/ACM) | 경로계획이 충돌을 회피 | `moveit_demo.launch.py` |
+
 ## 알려진 사항
-- 센서 슬롯은 d405/d435i 전환 가능. 그 외 슬롯은 `config/models/<슬롯>/` 폴더에
-  파일을 넣으면 드롭다운에 추가된다(`config/models/README.md` 참고).
-- 결합값(mount)은 도면 확정 전 육안 정렬용 — 정밀값은 실측 반영 필요.
+- 결합값(mount)은 도면 확정 전 **육안 정렬용 추정치** — 정밀값은 실측 반영 필요.
+  통합 로봇의 형상 자체가 아직 확정이 아니다.
 - 파트 렌더·충돌 검사는 visual mesh 기준(collision mesh 아님 — 보수적).
+- 컴포저의 re-root 는 안전조건을 검사한다: anchor 위쪽 조인트가 **fixed** 이고 **다른 자식이
+  없어야** 제거한다. 아니면 조용히 형상이 바뀌는 대신 **명확히 실패**한다.
+- 새 PC 에선 `bash src/docs/scripts/setup_vendor_models.sh` 를 먼저 — `vendor/` 가 gitignore 라
+  안 돌리면 드롭다운엔 뜨는데 **로드가 실패**한다.
