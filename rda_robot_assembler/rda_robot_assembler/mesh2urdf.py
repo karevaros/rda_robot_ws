@@ -36,9 +36,11 @@ import numpy as np
 import trimesh
 import yaml
 
+from rda_robot_assembler import paths as _paths
+
 SLOTS = ["base", "arm", "endeffector", "sensor1", "sensor2"]
 CAD_EXT = {".step", ".stp", ".iges", ".igs"}
-DEFAULT_MODELS_DIR = "~/robot_ws/src/rda_robot_description/config/models"
+# 모델 폴더 경로는 paths.py 가 단일 정본으로 해석한다(하드코딩 금지).
 
 # 단위 추정: 최대 치수가 이 값(m)을 넘으면 mm 로 그려진 것으로 본다.
 # 로봇 파트가 10m 를 넘을 일은 없고, mm 로 그린 1m 파트는 1000 이 된다.
@@ -46,7 +48,8 @@ MM_HEURISTIC_M = 10.0
 
 
 def models_dir():
-    return os.path.expanduser(os.environ.get("RDA_MODELS_DIR", DEFAULT_MODELS_DIR))
+    """모델 드롭 폴더(정본=소스 트리). 해석 규칙·근거는 paths.py 참조."""
+    return _paths.models_dir()
 
 
 def step_to_mesh(src, out_stl, deviation=0.1):
