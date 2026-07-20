@@ -1,0 +1,61 @@
+# 어셈블러 배경(환경) 정의 — 온실 (레일파이프 + 재배 거터)
+#
+# 출처: 사용자 STEP `docs/greenhouse_ref/chamdan2greenhause.stp` 실측.
+#   거터 상면 0.92m · 폭 0.24m · 피치 1.66m / 레일 게이지 0.5m.
+#   조립기에서 로봇을 조립할 때 온실 맥락을 보기 위한 **표시 전용 배경**이다
+#   (충돌·플래닝과 무관 — 그건 rda_robot_description/config/obstacles.yaml).
+#
+# 좌표 기준(frame): base = 로봇 베이스(base_link) 원점. 로봇 정면 = +X.
+# 새 배경을 넣으려면 이 폴더에 같은 형식의 *.yaml 을 추가하면 드롭다운에 자동 등록된다.
+#
+# 항목 형식:
+#   type: box(size [x,y,z]) | cylinder(radius,height) | sphere(radius)
+#   pose: {xyz: [center], rpy: [rad]}
+#   color: [r,g,b,a]  (0~1)
+
+label: 온실 (레일 + 거터)
+frame: base
+
+items:
+  # ── 재배 거터 (crop gutter) : 상면 0.92m, 폭 0.24m, Y 방향 6m ──────────────
+  - name: gutter_front
+    type: box
+    pose: {xyz: [0.83, 0.0, 0.86], rpy: [0.0, 0.0, 0.0]}
+    size: [0.24, 6.0, 0.12]
+    color: [0.20, 0.55, 0.25, 0.55]
+  - name: gutter_rear
+    type: box
+    pose: {xyz: [-0.83, 0.0, 0.86], rpy: [0.0, 0.0, 0.0]}
+    size: [0.24, 6.0, 0.12]
+    color: [0.20, 0.55, 0.25, 0.55]
+  - name: gutter_front2
+    type: box
+    pose: {xyz: [2.49, 0.0, 0.86], rpy: [0.0, 0.0, 0.0]}
+    size: [0.24, 6.0, 0.12]
+    color: [0.20, 0.55, 0.25, 0.35]
+
+  # ── 레일파이프 (buisrail) : 바닥 Y 방향 원통 쌍, 게이지 0.5m ────────────────
+  - name: rail_L0
+    type: cylinder
+    pose: {xyz: [-0.25, 0.0, 0.05], rpy: [1.5708, 0.0, 0.0]}
+    radius: 0.025
+    height: 6.0
+    color: [0.45, 0.45, 0.50, 0.85]
+  - name: rail_R0
+    type: cylinder
+    pose: {xyz: [0.25, 0.0, 0.05], rpy: [1.5708, 0.0, 0.0]}
+    radius: 0.025
+    height: 6.0
+    color: [0.45, 0.45, 0.50, 0.85]
+  - name: rail_L1
+    type: cylinder
+    pose: {xyz: [1.41, 0.0, 0.05], rpy: [1.5708, 0.0, 0.0]}
+    radius: 0.025
+    height: 6.0
+    color: [0.45, 0.45, 0.50, 0.45]
+  - name: rail_R1
+    type: cylinder
+    pose: {xyz: [1.91, 0.0, 0.05], rpy: [1.5708, 0.0, 0.0]}
+    radius: 0.025
+    height: 6.0
+    color: [0.45, 0.45, 0.50, 0.45]
