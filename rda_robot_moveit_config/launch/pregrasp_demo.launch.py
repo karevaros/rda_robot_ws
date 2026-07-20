@@ -114,6 +114,9 @@ def _setup(context, *args, **kwargs):
         "target_index": int(lc("target_index").perform(context)),
         "auto_reachable": lc("auto_reachable").perform(context).lower() in ("1", "true", "yes"),
         "loop": lc("loop").perform(context).lower() in ("1", "true", "yes"),
+        # 팔 프레임 — 팔 스왑 시 지정(예: UR10e=arm_base_link/arm_tool0). 기본=RB5 계약.
+        "base_link": lc("base_link").perform(context),
+        "ik_link": lc("ik_link").perform(context),
     }
     use_yaml = lc("use_yaml_target").perform(context).lower() in ("1", "true", "yes")
     if not use_yaml:
@@ -151,6 +154,10 @@ def generate_launch_description():
         DeclareLaunchArgument("base_y", default_value="auto"),
         DeclareLaunchArgument("base_yaw", default_value="auto",
                               description="world→base_link yaw[rad]. 'auto'=mounts.yaml base_placement.yaw_deg."),
+        DeclareLaunchArgument("base_link", default_value="link0",
+                              description="팔 루트 링크(접근방향 base TF). 팔 스왑 시 예: arm_base_link"),
+        DeclareLaunchArgument("ik_link", default_value="tcp",
+                              description="IK/파지 기준 링크(그리퍼 부착 플랜지). 팔 스왑 시 예: arm_tool0"),
         DeclareLaunchArgument("standoff", default_value="0.12",
                               description="pre-grasp 가 grasp 에서 뒤로 떨어진 거리(=직선 접근 이동거리)"),
         DeclareLaunchArgument("grasp_offset", default_value="0.13",

@@ -152,9 +152,34 @@ for a, b, n in sorted(kept, key=lambda t: -t[2])[:12]:
     print(f"  {a:<22}{b:<22}{n/N_SAMPLES*100:5.1f}% 샘플에서 충돌")
 
 # ── SRDF 출력 ─────────────────────────────────────────────────────────────
-ARM_CHAIN = ("link0", "tcp")
+# 팔/그리퍼 프레임을 compose 규약에서 자동 감지(모델 불문). 내장 RB5(prefix '')·
+# 라이브러리 팔(arm_ 접두사) 모두 대응. 실패 시 RB5 기본값(link0/tcp).
 GRIPPER_JOINT = "rg2_finger_joint1"
-EE_PARENT = "rg2_hand"
+EE_PARENT = "rg2_hand"          # 그리퍼 루트(EE=onrobot_rg2 고정)
+_jm = robot.joint_map
+_base = _jm["arm_mount_joint"].child if "arm_mount_joint" in _jm else "link0"
+_tip = next((j.parent for j in _jm.values() if j.child == EE_PARENT), "tcp")
+ARM_CHAIN = (_base, _tip)
+
+
+def _chain_joints(base, tip):
+    c2j = {j.child: jn for jn, j in _jm.items()}
+    path, link, guard = [], tip, 0
+    while link != base and guard < 1000:
+        jn = c2j.get(link)
+        if jn is None:
+            break
+        path.append(jn)
+        link = _jm[jn].parent
+        guard += 1
+    path.reverse()
+    return [n for n in path
+            if getattr(_jm[n], "type", "fixed") in ("revolute", "prismatic", "continuous")]
+
+
+ARM_JOINTS = _chain_joints(_base, _tip) or ["base", "shoulder", "elbow",
+                                           "wrist1", "wrist2", "wrist3"]
+print(f"팔 그룹 chain: {ARM_CHAIN[0]} → {ARM_CHAIN[1]}, 관절 {ARM_JOINTS}")
 
 L = []
 L.append('<?xml version="1.0" encoding="UTF-8"?>')
@@ -169,11 +194,11 @@ L.append("    </group>")
 L.append('    <group name="gripper">')
 L.append(f'        <joint name="{GRIPPER_JOINT}"/>')
 L.append("    </group>")
-L.append('    <end_effector name="rg2" parent_link="tcp" group="gripper" parent_group="arm"/>')
+L.append(f'    <end_effector name="rg2" parent_link="{ARM_CHAIN[1]}" group="gripper" parent_group="arm"/>')
 L.append("")
 L.append("    <!-- 이름있는 자세 -->")
 L.append('    <group_state name="home" group="arm">')
-for j in ("base", "shoulder", "elbow", "wrist1", "wrist2", "wrist3"):
+for j in ARM_JOINTS:
     L.append(f'        <joint name="{j}" value="0"/>')
 L.append("    </group_state>")
 L.append('    <group_state name="open" group="gripper">')
