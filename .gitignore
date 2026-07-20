@@ -8,3 +8,10 @@ __pycache__/
 
 # 외부 벤더 리포 clone (upstream 별도 관리, 우리 저장소엔 추출물만 편입)
 vendor/
+
+# AIHub 토마토 데이터 원본(대용량 461MB·재배포 제약) — 집계 수치(AIHUB_통계.md)만 커밋
+docs/crop_ref/097.*/
+docs/crop_ref/*.jpeg
+docs/crop_ref/*.jpg
+docs/crop_ref/*.zip
+docs/crop_ref/*.part0

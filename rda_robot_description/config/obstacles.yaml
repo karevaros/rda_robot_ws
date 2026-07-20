@@ -21,6 +21,10 @@
 #   target   : (예정) 집기 목표. 아직 미도입 — 작물(토마토) 추가 시 함께 도입.
 #
 # type: box(size xyz) | cylinder(radius,height) | sphere(radius)
+#
+# ★ 라이브 튜닝: 이 파일을 저장하면 obstacle_publisher 가 ~1초 내 자동으로 다시
+#   반영한다(RViz 재기동 불필요). 값을 바꿔가며 형태를 조절할 수 있다.
+#   (편집 중 문법이 깨진 채 저장돼도 이전 상태를 유지하고 경고만 낸다.)
 
 frame: world
 
@@ -97,3 +101,46 @@ obstacles:
     radius: 0.025
     height: 6.0
     color: [0.40, 0.40, 0.45, 0.55]
+
+# ── 작물(토마토, 대과) · 파라메트릭 전개 ──────────────────────────────────────
+# obstacle_publisher.py 의 expand_crops() 가 아래 템플릿+배치를 개체로 펼친다
+# (줄기=obstacle 회피 / 열매=target 집기목표). 손 나열 대신 파라미터만 관리.
+#
+# 치수 근거:
+#   · 줄기 반경 0.006m(=Ø11.5mm) ← AIHub 줄기두께 평균 1.15cm
+#   · 화방당 열매 6개 ← AIHub numberOfFruitPerTruss 평균 6.5
+#   · 대과 열매 반경 0.035m(=Ø70mm) ← 통상(추정, AIHub 는 열매 지름 cm 미제공)
+#   · 줄기 높이 2.2m·화방 수직간격 0.25m·주간 0.4m ← 통상(추정)
+#   · 줄 x=±0.83·거터 상면 0.92m ← 온실 STEP 실측
+crops:
+  # ▸ crop_tuner GUI 로 조절 가능한 값에는  @tune=<id>|<min>|<max>|<기본값>  마커가 붙어 있다.
+  #   GUI(ros2 run rda_robot_bringup crop_tuner.py)가 그 줄의 숫자만 바꿔 저장 → 라이브 반영.
+  #   '기본값으로 초기화' 버튼은 마커의 <기본값> 으로 되돌린다.
+  template:
+    # 줄기: 로그 곡선으로 +Y 방향 상승(사진 참고). 짧은 원통 마디로 근사.
+    stem:
+      radius: 0.006          # 줄기 반경 @tune=stem_radius|0.003|0.02|0.006
+      height: 2.2            # 유인 높이 @tune=stem_height|1.0|3.0|2.2
+      lean_y: 0.3           # +Y 곡선 편차 @tune=stem_lean_y|0.0|0.6|0.3
+      curve_k: 4           # 로그 곡률 @tune=stem_curve_k|0.5|10.0|4.0
+      segments: 6            # 곡선 마디 수 @tune=stem_segments|2|12|6
+    stem_color: [0.30, 0.50, 0.20, 0.95]
+    rachis_color: [0.35, 0.55, 0.25, 0.95]
+    fruit_color: [0.90, 0.20, 0.13, 0.97]
+    truss:
+      first_z: 0.35          # 첫 화방 높이 @tune=truss_first_z|0.1|1.2|0.35
+      spacing: 0.25          # 화방 수직간격 @tune=truss_spacing|0.1|0.6|0.25
+      count: 3               # 주당 화방 수 @tune=truss_count|1|8|3
+      fruits_per_truss: 4    # 화방당 열매 @tune=fruits_per_truss|1|6|4
+      fruit_radius: 0.035    # 대과 반경 @tune=fruit_radius|0.015|0.06|0.035
+      rachis_out: 0.06       # 클러스터 거리 @tune=rachis_out|0.0|0.3|0.06
+      cluster_gap: 0.85      # 뭉침 정도 @tune=cluster_gap|0.3|1.5|0.85
+      rachis_radius: 0.004   # 화방대 굵기
+  span:
+    y_min: -1.2
+    y_max: 1.2
+    spacing: 0.4             # 주간 간격 @tune=plant_spacing|0.2|0.8|0.4
+  rows:
+    # truss_side: 'left'(기본, 통로에서 볼 때 왼쪽=+Y) | 'right' | '+y' | '-y'
+    - {x: 0.83, gutter_top: 0.92}                         # 앞줄(작업 대상): 줄기+열매(왼쪽)
+    - {x: -0.83, gutter_top: 0.92, fruits_per_truss: 0}   # 뒷줄: 줄기만(맥락)
