@@ -72,7 +72,9 @@ class PregraspDemo(Node):
         self.declare_parameter("sample_phi_deg", [0.0, -20.0, 20.0, -40.0, 40.0])
         self.declare_parameter("sample_theta_deg", [0.0, -15.0, 15.0, -30.0])
         self.declare_parameter("sample_psi_deg", [0.0])
-        self.declare_parameter("gripper_close", 1.18)
+        # ⚠ RG2 실측(FK): 관절 1.18=벌림(open, 152mm) · 0=닫힘(close, 34mm). 값이 직관과 반대.
+        self.declare_parameter("gripper_open", 1.18)     # 파지 전 벌린 상태
+        self.declare_parameter("gripper_close", 0.35)    # 파지(대과 토마토 Ø70mm 물기)
         self.declare_parameter("plan_time", 5.0)
         # 데모 재생 시간(초) — 보기 좋게 각 구간을 늘림
         self.declare_parameter("dur_approach_plan", 3.5)  # home→pre-grasp
@@ -90,8 +92,10 @@ class PregraspDemo(Node):
         self.ik_link = gp("ik_link").value
         self.rate = float(gp("rate").value)
 
-        # ---- 현재 관절 상태(이 노드가 유일 발행자) : home + 그리퍼 open ----
-        self.cur = {j: 0.0 for j in self.ARM + self.FINGERS}
+        # ---- 현재 관절 상태(이 노드가 유일 발행자) : home + 그리퍼 벌림(open) ----
+        self.cur = {j: 0.0 for j in self.ARM}
+        _go = float(gp("gripper_open").value)
+        self.cur.update({f: _go for f in self.FINGERS})
 
         latched = QoSProfile(history=QoSHistoryPolicy.KEEP_LAST, depth=1,
                              reliability=QoSReliabilityPolicy.RELIABLE,
@@ -347,8 +351,9 @@ class PregraspDemo(Node):
          grasp_pose.orientation.z, grasp_pose.orientation.w) = map(float, quat)
 
         # ── ① home → pre-grasp (OMPL, 실패 시 관절보간) ──
+        gopen = float(self.get_parameter("gripper_open").value)
         q_home = {j: 0.0 for j in self.ARM}
-        self._set(dict(q_home, **{f: 0.0 for f in self.FINGERS}))  # 시작 = home+open
+        self._set(dict(q_home, **{f: gopen for f in self.FINGERS}))  # 시작 = home + 그리퍼 벌림
         self._publish_js()
         plan = self.plan_to(q_pre)
         if plan is not None:
@@ -384,11 +389,11 @@ class PregraspDemo(Node):
         self._set({j: q_grasp.get(j, self.cur[j]) for j in self.ARM})
         self._hold(float(self.get_parameter("pause").value))
 
-        # ── ③ 그리퍼 닫기 ──
+        # ── ③ 그리퍼 닫기(벌림 gopen → 닫힘 close) ──
         close = float(self.get_parameter("gripper_close").value)
         self.get_logger().info("③ 그리퍼 닫기(파지)")
         self._play_waypoints(self.FINGERS,
-                             [[0.0, 0.0], [close, close]],
+                             [[gopen, gopen], [close, close]],
                              float(self.get_parameter("dur_gripper").value))
 
         # ── ④ 후퇴 grasp→pre-grasp → home ──

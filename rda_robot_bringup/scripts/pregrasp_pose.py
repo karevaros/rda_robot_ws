@@ -93,11 +93,13 @@ def gaze_rotation(a, roll):
     a = _unit(a)
     y = -a                                                # tcp +Y 의 world 방향
     up = np.array([0.0, 0.0, 1.0])
-    x = np.cross(up, y)
+    # 손가락축(tcp X)은 수평, tcp Z(그리퍼 '위')는 world 위쪽을 향하게 한다.
+    #  x=cross(y,up) → z=cross(x,y) 가 +Z 위쪽. (반대로 cross(up,y) 면 z 가 아래 = 상하 뒤집힘)
+    x = np.cross(y, up)
     if np.linalg.norm(x) < 1e-6:                          # y 가 수직이면 X 로 대체
-        x = np.cross(np.array([1.0, 0.0, 0.0]), y)
+        x = np.cross(y, np.array([1.0, 0.0, 0.0]))
     x = _unit(x)
-    z = _unit(np.cross(x, y))                             # 우수좌표계 z=x×y
+    z = _unit(np.cross(x, y))                             # 우수좌표계 z=x×y (위쪽)
     R0 = np.column_stack([x, y, z])
     # 롤 = 접근축(tcp 로컬 Y) 둘레 회전 → 열 Y 불변
     Ry = np.array([[math.cos(roll), 0, math.sin(roll)],
