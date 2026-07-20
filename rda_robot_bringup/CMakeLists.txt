@@ -15,6 +15,7 @@ install(PROGRAMS
   scripts/obstacle_publisher.py
   scripts/crop_tuner.py
   scripts/pregrasp_pose.py
+  scripts/pregrasp_demo.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
