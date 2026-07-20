@@ -59,6 +59,8 @@ class PregraspDemo(Node):
         # ---- 파라미터 ----
         self.declare_parameter("target", [float("nan")] * 3)
         self.declare_parameter("target_index", 0)
+        self.declare_parameter("auto_reachable", True)   # 현 위치서 도달가능 열매 자동선택
+        self.declare_parameter("max_scan", 12)           # 자동선택 시 가까운 열매 몇개까지 시도
         self.declare_parameter("obstacles_file", "")
         self.declare_parameter("fruit_radius", 0.035)
         self.declare_parameter("standoff", 0.15)
@@ -247,11 +249,9 @@ class PregraspDemo(Node):
         return names, wp, float(res.fraction)
 
     # ══════════════════ 알고리즘: pre-grasp 자세 ══════════════════
-    def _target(self):
-        t = self.get_parameter("target").value
-        r = float(self.get_parameter("fruit_radius").value)
-        if t and len(t) == 3 and not any(math.isnan(float(v)) for v in t):
-            return "param_target", np.array([float(v) for v in t]), r
+    def _all_targets(self):
+        """obstacles.yaml 의 kind:target 열매 전부 [(name, xyz, r), ...]."""
+        r0 = float(self.get_parameter("fruit_radius").value)
         path = self.get_parameter("obstacles_file").value or self._op.default_yaml()
         import yaml
         data = yaml.safe_load(open(path)) or {}
@@ -259,9 +259,17 @@ class PregraspDemo(Node):
             self._op.expand_crops(data)
         except Exception:
             pass
-        tg = [(o["name"], np.array([float(v) for v in o["pose"]["xyz"]]),
-               float(o.get("radius", r)))
-              for o in data.get("obstacles", []) if o.get("kind") == "target"]
+        return [(o["name"], np.array([float(v) for v in o["pose"]["xyz"]]),
+                 float(o.get("radius", r0)))
+                for o in data.get("obstacles", []) if o.get("kind") == "target"]
+
+    def _target(self):
+        """단일 목표: param target 우선, 없으면 target_index 열매."""
+        t = self.get_parameter("target").value
+        r = float(self.get_parameter("fruit_radius").value)
+        if t and len(t) == 3 and not any(math.isnan(float(v)) for v in t):
+            return "param_target", np.array([float(v) for v in t]), r
+        tg = self._all_targets()
         if not tg:
             return None
         idx = max(0, min(int(self.get_parameter("target_index").value), len(tg) - 1))
@@ -319,19 +327,46 @@ class PregraspDemo(Node):
         return dict(c=c, a=a, p_pre=p_pre, quat=quat, q=q)
 
     # ══════════════════ 데모 시퀀스 ══════════════════
+    def _select_reachable(self):
+        """현재 로봇 위치(어셈블러 base_placement)에서 도달 가능한 열매를 가까운 것부터
+        찾아 (name, p_fruit, r, sol) 반환. 없으면 None."""
+        param_t = self.get_parameter("target").value
+        has_param = (param_t and len(param_t) == 3
+                     and not any(math.isnan(float(v)) for v in param_t))
+        if has_param or not self.get_parameter("auto_reachable").value:
+            tgt = self._target()
+            if tgt is None:
+                return None
+            sol = self.solve_pregrasp(tgt[1], tgt[2])
+            return (tgt[0], tgt[1], tgt[2], sol) if sol else (tgt[0], tgt[1], tgt[2], None)
+        # 자동: 전체 열매를 base(link0)로부터 가까운 순으로 정렬 → 앞 max_scan 개 시도
+        tg = self._all_targets()
+        if not tg:
+            return None
+        bxy = self._base_xy()
+        if bxy is not None:
+            tg.sort(key=lambda t: float(np.hypot(t[1][0] - bxy[0], t[1][1] - bxy[1])))
+        n = int(self.get_parameter("max_scan").value)
+        self.get_logger().info(f"도달 가능한 열매 탐색(가까운 {min(n, len(tg))}개, 전체 {len(tg)})…")
+        for name, p_fruit, r in tg[:n]:
+            sol = self.solve_pregrasp(p_fruit, r)
+            if sol is not None:
+                return name, p_fruit, r, sol
+        return tg[0][0], tg[0][1], tg[0][2], None      # 전부 실패 → 가장 가까운 것으로 안내
+
     def run(self):
-        tgt = self._target()
-        if tgt is None:
-            self.get_logger().error("목표 열매를 찾지 못함 — target/target_index 확인.")
+        sel = self._select_reachable()
+        if sel is None:
+            self.get_logger().error("목표 열매를 찾지 못함 — obstacles.yaml 의 kind:target 확인.")
             return False
-        name, p_fruit, r = tgt
+        name, p_fruit, r, sol = sel
         self.get_logger().info(f"목표 = {name} @ ({p_fruit[0]:.2f},{p_fruit[1]:.2f},"
                                f"{p_fruit[2]:.2f}) r={r:.3f}")
 
-        sol = self.solve_pregrasp(p_fruit, r)
         if sol is None:
             self.get_logger().error(
-                f"[{name}] pre-grasp 자세 없음(도달불가/충돌). base 배치·샘플범위 조정 필요.")
+                f"[{name}] 현재 로봇 위치에서 도달 가능한 열매가 없음(도달불가/충돌). "
+                "어셈블러(base_placement)로 로봇을 열매 앞으로 옮겨 저장하거나 base_x/base_y 로 조정.")
             self._publish_markers(p_fruit, r, None, None, reachable=False)
             self._hold(3.0)
             return False
