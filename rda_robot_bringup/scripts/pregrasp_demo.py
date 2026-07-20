@@ -33,7 +33,8 @@ from geometry_msgs.msg import Pose, PoseStamped, Point
 from sensor_msgs.msg import JointState
 from visualization_msgs.msg import Marker, MarkerArray
 
-from moveit_msgs.srv import GetPositionIK, GetMotionPlan, GetCartesianPath
+from moveit_msgs.srv import (GetPositionIK, GetMotionPlan, GetCartesianPath,
+                             GetPlanningScene)
 from moveit_msgs.msg import (PositionIKRequest, RobotState, MotionPlanRequest,
                              Constraints, JointConstraint, DisplayRobotState)
 
@@ -71,6 +72,8 @@ class PregraspDemo(Node):
         self.declare_parameter("group", "arm")
         self.declare_parameter("ik_link", "tcp")
         self.declare_parameter("ik_timeout", 0.1)
+        self.declare_parameter("min_scene_objects", 10)   # 배경 로드 확인 최소 collision object 수
+        self.declare_parameter("scene_wait", 15.0)         # 배경 로드 대기 한도(초)
         self.declare_parameter("sample_phi_deg", [0.0, -20.0, 20.0, -40.0, 40.0])
         self.declare_parameter("sample_theta_deg", [0.0, -15.0, 15.0, -30.0])
         self.declare_parameter("sample_psi_deg", [0.0])
@@ -114,13 +117,45 @@ class PregraspDemo(Node):
         self.ik = self.create_client(GetPositionIK, "compute_ik")
         self.plan = self.create_client(GetMotionPlan, "plan_kinematic_path")
         self.cart = self.create_client(GetCartesianPath, "compute_cartesian_path")
+        self.scene = self.create_client(GetPlanningScene, "get_planning_scene")
         for cli, nm in ((self.ik, "compute_ik"), (self.plan, "plan_kinematic_path"),
-                        (self.cart, "compute_cartesian_path")):
+                        (self.cart, "compute_cartesian_path"),
+                        (self.scene, "get_planning_scene")):
             self.get_logger().info(f"{nm} 대기중…")
             cli.wait_for_service()
         self.get_logger().info("MoveIt 서비스 연결됨.")
 
         self._op = _import_sibling("_obstacle_publisher", "obstacle_publisher.py")
+        # ★ 배경(온실 구조·줄기) 충돌체크 보장: 첫 모션 계획 전에 planning scene 에
+        #   장애물(CollisionObject)이 실제로 로드될 때까지 기다린다. (안 기다리면 첫
+        #   사이클이 빈 scene 에서 계획돼 배경을 안 피할 수 있다.)
+        self._wait_scene(min_objects=int(self.get_parameter("min_scene_objects").value),
+                         timeout=float(self.get_parameter("scene_wait").value))
+
+    def _scene_object_count(self):
+        """planning scene 의 world collision object 개수(배경 로드 확인용)."""
+        req = GetPlanningScene.Request()
+        req.components.components = 1023
+        res = self._call(self.scene, req, 2.0)
+        if res is None:
+            return -1
+        return len(res.scene.world.collision_objects)
+
+    def _wait_scene(self, min_objects, timeout):
+        import time
+        t0 = time.time()
+        n = -1
+        while rclpy.ok() and time.time() - t0 < timeout:
+            n = self._scene_object_count()
+            if n >= min_objects:
+                self.get_logger().info(f"배경 collision object {n}개 로드 확인 → 충돌체크 활성.")
+                return True
+            rclpy.spin_once(self, timeout_sec=0.1)
+            time.sleep(0.3)
+        self.get_logger().warn(
+            f"배경 collision object 대기 시간초과(현재 {n}개, 요구 {min_objects}). "
+            "충돌체크가 불완전할 수 있음 — obstacle_publisher/타이밍 확인.")
+        return False
 
     # ══════════════════ 유틸: 발행/재생 ══════════════════
     def _publish_js(self):
@@ -451,10 +486,15 @@ class PregraspDemo(Node):
                               [q_pre[j] for j in names]],
                              float(self.get_parameter("dur_retreat").value))
         self._set({j: q_pre[j] for j in self.ARM})
-        # home 복귀(그리퍼는 닫은 채로 '수확물' 이송 느낌)
-        self._play_waypoints(names,
-                             [[q_pre[j] for j in names], [0.0] * len(names)],
-                             float(self.get_parameter("dur_home").value))
+        # home 복귀 — 배경 충돌 피하도록 OMPL 계획(실패 시 관절보간). 그리퍼는 닫은 채('수확물' 이송)
+        hplan = self.plan_to(q_home)
+        if hplan is not None:
+            hn, hwp = hplan
+            self._play_waypoints(hn, hwp, float(self.get_parameter("dur_home").value))
+        else:
+            self._play_waypoints(names,
+                                 [[q_pre[j] for j in names], [0.0] * len(names)],
+                                 float(self.get_parameter("dur_home").value))
         self._set({j: 0.0 for j in self.ARM})
         self._hold(float(self.get_parameter("pause").value))
         self.get_logger().info(f"[{name}] 데모 1회 완료.")

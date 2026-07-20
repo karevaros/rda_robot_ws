@@ -128,7 +128,9 @@ crops:
     rachis_color: [0.35, 0.55, 0.25, 0.95]
     fruit_color: [0.90, 0.20, 0.13, 0.97]
     truss:
-      first_z: 0.35          # 첫 화방 높이 @tune=truss_first_z|0.1|1.2|0.35
+      first_z: 0.13          # 첫 화방 높이 @tune=truss_first_z|0.1|1.2|0.35
+      #  ↑ 레일 위(X=0) RB5 팔 도달권(link0서 tcp 최대 1.138m)에 최하단 화방을 넣으려 낮춤.
+      #    통로↔작물행 0.83m + 거터 0.92m 조합상 이 팔은 z≲1.07m 만 닿음(2026-07-20).
       spacing: 0.25          # 화방 수직간격 @tune=truss_spacing|0.1|0.6|0.25
       count: 3               # 주당 화방 수 @tune=truss_count|1|8|3
       fruits_per_truss: 4    # 화방당 열매 @tune=fruits_per_truss|1|6|4
