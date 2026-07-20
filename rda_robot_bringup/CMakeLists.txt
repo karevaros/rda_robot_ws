@@ -16,6 +16,7 @@ install(PROGRAMS
   scripts/crop_tuner.py
   scripts/pregrasp_pose.py
   scripts/pregrasp_demo.py
+  scripts/robot_introspect.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

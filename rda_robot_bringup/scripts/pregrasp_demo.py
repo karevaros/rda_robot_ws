@@ -51,7 +51,12 @@ def _import_sibling(mod_name, file_name):
 PG = _import_sibling("_pregrasp_pose", "pregrasp_pose.py")
 
 
+# robot_introspect(형제): SRDF/URDF 에서 관절·접근축 자동 유도(모델 불문)
+RI = _import_sibling("_robot_introspect", "robot_introspect.py")
+
+
 class PregraspDemo(Node):
+    # ↓ 폴백 기본값(RB5+RG2). __init__ 에서 SRDF/URDF introspection 으로 자동 대체됨.
     ARM = ["base", "shoulder", "elbow", "wrist1", "wrist2", "wrist3"]
     FINGERS = ["rg2_finger_joint1", "rg2_finger_joint2"]
 
@@ -72,6 +77,8 @@ class PregraspDemo(Node):
         self.declare_parameter("group", "arm")
         self.declare_parameter("ik_link", "tcp")
         self.declare_parameter("ik_timeout", 0.1)
+        self.declare_parameter("gripper_group", "gripper")  # SRDF 그리퍼 그룹명
+        self.declare_parameter("approach_axis", "auto")     # 'auto'=SRDF/URDF 자동감지 or "x,y,z"
         self.declare_parameter("min_scene_objects", 10)   # 배경 로드 확인 최소 collision object 수
         self.declare_parameter("scene_wait", 15.0)         # 배경 로드 대기 한도(초)
         self.declare_parameter("sample_phi_deg", [0.0, -20.0, 20.0, -40.0, 40.0])
@@ -126,11 +133,73 @@ class PregraspDemo(Node):
         self.get_logger().info("MoveIt 서비스 연결됨.")
 
         self._op = _import_sibling("_obstacle_publisher", "obstacle_publisher.py")
+        # ★ B: 팔/그리퍼 관절 이름 + A: 접근축을 SRDF/URDF 에서 자동 유도(모델 불문)
+        self._setup_model()
         # ★ 배경(온실 구조·줄기) 충돌체크 보장: 첫 모션 계획 전에 planning scene 에
         #   장애물(CollisionObject)이 실제로 로드될 때까지 기다린다. (안 기다리면 첫
         #   사이클이 빈 scene 에서 계획돼 배경을 안 피할 수 있다.)
         self._wait_scene(min_objects=int(self.get_parameter("min_scene_objects").value),
                          timeout=float(self.get_parameter("scene_wait").value))
+
+    def _get_str_param(self, node, param):
+        """다른 노드의 문자열 파라미터 조회(URDF/SRDF 획득용)."""
+        try:
+            from rcl_interfaces.srv import GetParameters
+            cli = self.create_client(GetParameters, f"/{node}/get_parameters")
+            if not cli.wait_for_service(timeout_sec=3.0):
+                return None
+            fut = cli.call_async(GetParameters.Request(names=[param]))
+            rclpy.spin_until_future_complete(self, fut, timeout_sec=3.0)
+            if fut.result() is None or not fut.result().values:
+                return None
+            return fut.result().values[0].string_value or None
+        except Exception:
+            return None
+
+    def _setup_model(self):
+        """B: 팔/그리퍼 관절 이름을 SRDF 그룹에서, A: 접근축을 URDF/SRDF 로 자동 유도.
+        실패하면 클래스 폴백(RB5+RG2) 유지. param 으로 덮어쓰기 가능."""
+        urdf = self._get_str_param("robot_state_publisher", "robot_description")
+        srdf = self._get_str_param("move_group", "robot_description_semantic")
+        info = None
+        if urdf and srdf:
+            try:
+                info = RI.playback_joints(srdf, urdf, self.group,
+                                          self.get_parameter("gripper_group").value)
+                if info["arm"]:
+                    self.ARM = info["arm"]
+                if info["gripper_all"]:
+                    self.FINGERS = info["gripper_all"]
+            except Exception as e:
+                self.get_logger().warn(f"관절 introspection 실패({e}) → 폴백 유지")
+        else:
+            self.get_logger().warn("URDF/SRDF 조회 실패 → 관절/접근축 폴백")
+        # A: 접근축
+        raw = str(self.get_parameter("approach_axis").value).strip().lower()
+        self.approach_axis = [0.0, -1.0, 0.0]
+        if raw not in ("", "auto"):
+            try:
+                v = [float(x) for x in raw.replace("[", "").replace("]", "").split(",")]
+                if len(v) == 3:
+                    self.approach_axis = v
+            except ValueError:
+                self.get_logger().warn(f"approach_axis 파싱 실패('{raw}') → auto")
+                raw = "auto"
+        if raw in ("", "auto") and info is not None:
+            try:
+                ax = RI.detect_approach_axis(srdf, info["joints"],
+                                             info["child_to_joint"], self.ik_link)
+                if ax:
+                    self.approach_axis = ax
+            except Exception as e:
+                self.get_logger().warn(f"접근축 자동감지 실패({e}) → 기본 −Y")
+        # 관절 이름이 바뀌었을 수 있으니 현재자세 dict 재구성(그리퍼는 벌림)
+        gopen = float(self.get_parameter("gripper_open").value)
+        self.cur = {j: 0.0 for j in self.ARM}
+        self.cur.update({f: gopen for f in self.FINGERS})
+        self.get_logger().info(
+            f"모델 자동설정 — arm{self.ARM} gripper{self.FINGERS} "
+            f"접근축(tcp){[round(v,3) for v in self.approach_axis]}")
 
     def _scene_object_count(self):
         """planning scene 의 world collision object 개수(배경 로드 확인용)."""
@@ -355,7 +424,7 @@ class PregraspDemo(Node):
         best = None
         for c in cands:
             a = PG.approach_dir(a0, c.phi, c.theta)
-            quat = PG.mat_to_quat(PG.gaze_rotation(a, c.psi))
+            quat = PG.mat_to_quat(PG.gaze_rotation(a, c.psi, self.approach_axis))
             p_grasp = p_fruit - a * goff
             p_pre = p_grasp - a * c.d                       # grasp 에서 standoff 뒤
             q = self.solve_ik(p_pre, quat, avoid=True)      # pre-grasp 도달?

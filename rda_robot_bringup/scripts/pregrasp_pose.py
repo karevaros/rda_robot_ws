@@ -52,6 +52,22 @@ except Exception as e:                                   # pragma: no cover
     _HAVE_MOVEIT = False
     _MOVEIT_ERR = e
 
+_RI = None
+
+
+def _import_ri():
+    """robot_introspect.py(형제 파일)를 동적 임포트(모델 introspection)."""
+    global _RI
+    if _RI is None:
+        import importlib.util
+        import os
+        p = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         "robot_introspect.py")
+        spec = importlib.util.spec_from_file_location("_robot_introspect", p)
+        _RI = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_RI)
+    return _RI
+
 
 # ───────────────────────── 순수 기하 (ROS 무관, 단위테스트 용이) ─────────────────────────
 def _unit(v):
@@ -73,6 +89,20 @@ def _rot_axis(axis, ang):
     ])
 
 
+def _rot_u_to_v(u, v):
+    """u 를 v 로 보내는 최소 회전(둘 다 단위벡터)."""
+    u, v = _unit(u), _unit(v)
+    c = float(np.dot(u, v))
+    if c > 1.0 - 1e-9:
+        return np.eye(3)
+    if c < -1.0 + 1e-9:                                   # 정반대 → 수직축 180°
+        perp = np.cross(u, np.array([1.0, 0.0, 0.0]))
+        if np.linalg.norm(perp) < 1e-6:
+            perp = np.cross(u, np.array([0.0, 1.0, 0.0]))
+        return _rot_axis(perp, math.pi)
+    return _rot_axis(np.cross(u, v), math.acos(max(-1.0, min(1.0, c))))
+
+
 def approach_dir(nominal, phi, theta):
     """명목 접근축(단위)에 방위각 φ(수직축 둘레)·고각 θ(수평 직교축 둘레) 적용."""
     a = _unit(nominal)
@@ -84,28 +114,33 @@ def approach_dir(nominal, phi, theta):
     return _unit(a)
 
 
-def gaze_rotation(a, roll):
+def gaze_rotation(a, roll, approach_axis=(0.0, -1.0, 0.0)):
     """접근방향 a 를 바라보는 TCP 회전행렬 R(=[x|y|z] 열, tcp→world).
 
-    제약: 그리퍼 접근축(tcp 로컬 −Y)이 a 와 정렬 ⇒ tcp 로컬 +Y 의 world 상 = −a.
-    나머지 자유도(접근축 둘레 롤)는 roll 로 지정. 기본 = 손가락축(tcp X) 수평.
+    제약: 그리퍼 **접근축(tcp 로컬, approach_axis)** 이 world 상 a 와 정렬.
+    나머지 자유도(접근축 둘레 롤)는 roll 로 지정.
+
+    구현: 먼저 접근축=−Y 기준의 gaze 프레임 G(그리퍼 손끝을 −Y 로 가정)를 만든 뒤,
+    실제 접근축을 −Y 로 보내는 상수회전 M 을 곱한다 → R=G·M 이면 R·approach_axis=a
+    가 (그리퍼 종류와 무관하게) 성립. RG2 는 approach_axis=(0,−1,0) → M=I(하위호환).
     """
     a = _unit(a)
-    y = -a                                                # tcp +Y 의 world 방향
+    y = -a                                                # (−Y 기준) tcp +Y 의 world 방향
     up = np.array([0.0, 0.0, 1.0])
-    # 손가락축(tcp X)은 수평, tcp Z(그리퍼 '위')는 world 위쪽을 향하게 한다.
-    #  x=cross(y,up) → z=cross(x,y) 가 +Z 위쪽. (반대로 cross(up,y) 면 z 가 아래 = 상하 뒤집힘)
+    # 손가락축(−Y 기준 tcp X)은 수평, tcp Z('위')는 world 위쪽.
     x = np.cross(y, up)
     if np.linalg.norm(x) < 1e-6:                          # y 가 수직이면 X 로 대체
         x = np.cross(y, np.array([1.0, 0.0, 0.0]))
     x = _unit(x)
     z = _unit(np.cross(x, y))                             # 우수좌표계 z=x×y (위쪽)
     R0 = np.column_stack([x, y, z])
-    # 롤 = 접근축(tcp 로컬 Y) 둘레 회전 → 열 Y 불변
-    Ry = np.array([[math.cos(roll), 0, math.sin(roll)],
+    Ry = np.array([[math.cos(roll), 0, math.sin(roll)],   # 롤 = 접근축 둘레 회전
                    [0, 1, 0],
                    [-math.sin(roll), 0, math.cos(roll)]])
-    return R0 @ Ry
+    G = R0 @ Ry
+    # 실제 그리퍼 접근축을 기준(−Y)으로 보내는 상수회전 M → 그리퍼 불문 일반화
+    M = _rot_u_to_v(np.asarray(approach_axis, float), np.array([0.0, -1.0, 0.0]))
+    return G @ M
 
 
 def mat_to_quat(R):
@@ -171,6 +206,9 @@ class PregraspPose(Node):
         self.declare_parameter("group", "arm")
         self.declare_parameter("ik_link", "tcp")
         self.declare_parameter("ik_timeout", 0.1)
+        # 그리퍼 접근축(tcp 로컬). 'auto'=URDF/SRDF 에서 손끝 방향 자동감지(모델 불문).
+        #  또는 "x,y,z" 로 직접 지정. RG2 는 auto→(0,-1,0).
+        self.declare_parameter("approach_axis", "auto")
         # 샘플링 그리드 (1차 기본 = 명목 중심 소량. 넓히면 도달률↑)
         self.declare_parameter("sample_phi_deg", [0.0, -20.0, 20.0, -40.0, 40.0])
         self.declare_parameter("sample_theta_deg", [0.0, -15.0, 15.0])
@@ -222,6 +260,9 @@ class PregraspPose(Node):
         self.get_logger().info("compute_ik 연결됨.")
 
         self._joint_limits = self._fetch_joint_limits()   # {name:(lo,hi)} best-effort
+        self.approach_axis = self._determine_approach_axis()
+        self.get_logger().info(
+            f"그리퍼 접근축(tcp 로컬) = {[round(v,3) for v in self.approach_axis]}")
         self.period = float(gp("period").value)
         # ※ solve_once 는 내부에서 동기 서비스(compute_ik)를 호출하므로 타이머 콜백이
         #   아니라 main 루프에서 직접 구동한다(콜백 안에서 spin 하면 충돌).
@@ -249,21 +290,51 @@ class PregraspPose(Node):
         self.marker_targets = tl
 
     # ---------- 관절 한계(관절중앙성 비용용) ----------
-    def _fetch_joint_limits(self):
-        """robot_state_publisher 의 robot_description 파라미터에서 revolute 한계 파싱(best-effort)."""
+    def _get_str_param(self, node, param):
+        """다른 노드의 문자열 파라미터를 GetParameters 로 조회(best-effort)."""
         try:
             from rcl_interfaces.srv import GetParameters
-            cli = self.create_client(GetParameters,
-                                     "/robot_state_publisher/get_parameters")
+            cli = self.create_client(GetParameters, f"/{node}/get_parameters")
             if not cli.wait_for_service(timeout_sec=3.0):
-                return {}
-            req = GetParameters.Request(names=["robot_description"])
-            fut = cli.call_async(req)
+                return None
+            fut = cli.call_async(GetParameters.Request(names=[param]))
             rclpy.spin_until_future_complete(self, fut, timeout_sec=3.0)
             if fut.result() is None or not fut.result().values:
-                return {}
-            xml = fut.result().values[0].string_value
+                return None
+            return fut.result().values[0].string_value or None
         except Exception:
+            return None
+
+    def _determine_approach_axis(self):
+        """그리퍼 접근축(tcp 로컬). param='auto' 면 URDF/SRDF 로 자동감지, 아니면 "x,y,z"."""
+        raw = str(self.get_parameter("approach_axis").value).strip().lower()
+        if raw not in ("", "auto"):
+            try:
+                v = [float(x) for x in raw.replace("[", "").replace("]", "").split(",")]
+                if len(v) == 3:
+                    return v
+            except ValueError:
+                pass
+            self.get_logger().warn(f"approach_axis 파싱 실패('{raw}') → auto 시도")
+        urdf = self._get_str_param("robot_state_publisher", "robot_description")
+        srdf = self._get_str_param("move_group", "robot_description_semantic")
+        if urdf and srdf:
+            try:
+                ri = _import_ri()
+                joints, c2j = ri.parse_urdf(urdf)
+                ax = ri.detect_approach_axis(srdf, joints, c2j, self.ik_link)
+                if ax:
+                    return ax
+            except Exception as e:
+                self.get_logger().warn(f"접근축 자동감지 실패({e}) → 기본 −Y")
+        else:
+            self.get_logger().warn("URDF/SRDF 조회 실패 → 접근축 기본 −Y")
+        return [0.0, -1.0, 0.0]
+
+    def _fetch_joint_limits(self):
+        """robot_state_publisher 의 robot_description 파라미터에서 revolute 한계 파싱(best-effort)."""
+        xml = self._get_str_param("robot_state_publisher", "robot_description")
+        if not xml:
             return {}
         import re
         lims = {}
@@ -427,7 +498,7 @@ class PregraspPose(Node):
         for c in cands:
             tried += 1
             a = approach_dir(a0, c.phi, c.theta)
-            R = gaze_rotation(a, c.psi)
+            R = gaze_rotation(a, c.psi, self.approach_axis)
             quat = mat_to_quat(R)
             p_pre = p_fruit - a * (c.d + r)               # 열매 '표면'에서 d 만큼
             js = self._call_ik(p_pre, quat)
@@ -498,7 +569,7 @@ class PregraspPose(Node):
             ar.color.r, ar.color.g, ar.color.b, ar.color.a = 0.1, 0.9, 0.9, 0.95
             arr.markers.append(ar)
             # TCP 좌표축 삼각대(대기점에서): X=빨강 손가락축, -Y=초록 접근축, Z=파랑
-            R = gaze_rotation(a, 0.0)      # 축 표시는 롤 무관 근사(방향성만)
+            R = gaze_rotation(a, 0.0, getattr(self, "approach_axis", (0.0, -1.0, 0.0)))
             axes = [(R[:, 0], (1.0, 0.0, 0.0), "x"),
                     (-R[:, 1], (0.0, 1.0, 0.0), "approach(-Y)"),
                     (R[:, 2], (0.0, 0.0, 1.0), "z")]
