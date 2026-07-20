@@ -291,9 +291,17 @@ class PregraspDemo(Node):
             return None
 
     def solve_pregrasp(self, p_fruit, r):
-        """pregrasp_pose 와 동일: 통로쪽 수평 명목 + 후보 샘플링 → IK/충돌 통과 최소비용.
-        반환: dict(q_pre arm+finger), a(접근방향), p_pre, quat  또는 None."""
+        """자연스러운 접근 기하 + 후보 샘플링.
+
+          · grasp 점  = p_fruit − a·grasp_offset  (TCP 가 열매 앞 grasp_offset 에서 파지)
+          · pre-grasp = grasp − a·standoff         (grasp 에서 standoff 만큼 뒤로)
+          → pre→grasp 직선이동 거리 = **정확히 standoff**. (사용자 요청 시퀀스)
+
+        **pre-grasp 와 grasp 둘 다** IK/충돌 통과해야 채택 → 직선 접근이 실제로 가능한
+        후보만 고른다(그래야 Cartesian 이 폴백 없이 곧게 들어간다).
+        반환: dict(q_pre, q_grasp, a, p_pre, p_grasp, quat, c) 또는 None."""
         d0 = float(self.get_parameter("standoff").value)
+        goff = float(self.get_parameter("grasp_offset").value)
         yaw = float(self.get_parameter("approach_yaw_deg").value)
         if not math.isnan(yaw):
             a0 = np.array([math.cos(math.radians(yaw)), math.sin(math.radians(yaw)), 0.0])
@@ -313,18 +321,22 @@ class PregraspDemo(Node):
         for c in cands:
             a = PG.approach_dir(a0, c.phi, c.theta)
             quat = PG.mat_to_quat(PG.gaze_rotation(a, c.psi))
-            p_pre = p_fruit - a * (c.d + r)
-            q = self.solve_ik(p_pre, quat, avoid=True)
+            p_grasp = p_fruit - a * goff
+            p_pre = p_grasp - a * c.d                       # grasp 에서 standoff 뒤
+            q = self.solve_ik(p_pre, quat, avoid=True)      # pre-grasp 도달?
             if q is None:
                 continue
+            qg = self.solve_ik(p_grasp, quat, avoid=True)   # grasp 도 도달? (직선 접근 보장)
+            if qg is None:
+                continue
             if best is None or c.prior < best[0]:
-                best = (c.prior, c, a, p_pre, quat, q)
-                if c.prior == 0.0:                     # 명목 통과면 즉시 채택
+                best = (c.prior, c, a, p_pre, p_grasp, quat, q, qg)
+                if c.prior == 0.0:
                     break
         if best is None:
             return None
-        _, c, a, p_pre, quat, q = best
-        return dict(c=c, a=a, p_pre=p_pre, quat=quat, q=q)
+        _, c, a, p_pre, p_grasp, quat, q, qg = best
+        return dict(c=c, a=a, p_pre=p_pre, p_grasp=p_grasp, quat=quat, q=q, q_grasp=qg)
 
     # ══════════════════ 데모 시퀀스 ══════════════════
     def _select_reachable(self):
@@ -345,7 +357,10 @@ class PregraspDemo(Node):
             return None
         bxy = self._base_xy()
         if bxy is not None:
-            tg.sort(key=lambda t: float(np.hypot(t[1][0] - bxy[0], t[1][1] - bxy[1])))
+            # link0(≈base xy, z 0.35) 로부터 **3D 거리**로 정렬 → 가장 낮고 가까운(도달 쉬운)
+            #  열매 우선. (수평거리만 쓰면 팔 한계인 높은 열매를 골라 접근이 어려움.)
+            l0 = np.array([bxy[0], bxy[1], 0.35])
+            tg.sort(key=lambda t: float(np.linalg.norm(t[1] - l0)))
         n = int(self.get_parameter("max_scan").value)
         self.get_logger().info(f"도달 가능한 열매 탐색(가까운 {min(n, len(tg))}개, 전체 {len(tg)})…")
         for name, p_fruit, r in tg[:n]:
@@ -370,16 +385,15 @@ class PregraspDemo(Node):
             self._publish_markers(p_fruit, r, None, None, reachable=False)
             self._hold(3.0)
             return False
-        q_pre, a, p_pre, quat = sol["q"], sol["a"], sol["p_pre"], sol["quat"]
+        q_pre, q_grasp_ik, a = sol["q"], sol["q_grasp"], sol["a"]
+        p_pre, p_grasp, quat = sol["p_pre"], sol["p_grasp"], sol["quat"]
+        d0 = float(self.get_parameter("standoff").value)
         self._publish_markers(p_fruit, r, p_pre, a, reachable=True)
         deg = math.degrees
         self.get_logger().info(
-            f"[{name}] pre-grasp 채택 φ={deg(sol['c'].phi):+.0f}° θ={deg(sol['c'].theta):+.0f}°"
-            f" → 데모 재생 시작.")
+            f"[{name}] pre-grasp 채택 φ={deg(sol['c'].phi):+.0f}° θ={deg(sol['c'].theta):+.0f}° "
+            f"(standoff {d0*100:.0f}cm 뒤 → 직선 접근) → 데모 재생 시작.")
 
-        # 파지점(grasp) TCP pose = 열매 중심 앞 grasp_offset, 같은 자세
-        goff = float(self.get_parameter("grasp_offset").value)
-        p_grasp = p_fruit - a * goff
         grasp_pose = Pose()
         grasp_pose.position.x, grasp_pose.position.y, grasp_pose.position.z = map(float, p_grasp)
         (grasp_pose.orientation.x, grasp_pose.orientation.y,
@@ -403,24 +417,22 @@ class PregraspDemo(Node):
         self._set({j: q_pre[j] for j in self.ARM})
         self._hold(float(self.get_parameter("pause").value))
 
-        # ── ② pre-grasp → grasp (Cartesian 직선, 실패 시 IK+관절보간) ──
+        # ── ② pre-grasp → grasp : standoff 거리만큼 직선 이동 (Cartesian) ──
+        #    grasp 는 선택 단계에서 이미 도달 검증됨 → Cartesian 이 곧게 들어간다.
         cart = self.cartesian_to(grasp_pose)
-        q_grasp = dict(q_pre)
-        if cart is not None and cart[2] > 0.5:
+        q_grasp = q_grasp_ik
+        if cart is not None and cart[2] > 0.9:
             names, wp, frac = cart
-            self.get_logger().info(f"② 직선 접근 Cartesian {len(wp)}점(fraction={frac:.2f}) 재생")
+            self.get_logger().info(f"② 직선 접근({d0*100:.0f}cm) Cartesian {len(wp)}점(fraction={frac:.2f}) 재생")
             self._play_waypoints(names, wp, float(self.get_parameter("dur_approach_line").value))
             q_grasp = {n: wp[-1][i] for i, n in enumerate(names)}
         else:
-            qg = self.solve_ik(p_grasp, quat, avoid=True) or self.solve_ik(p_grasp, quat, avoid=False)
-            if qg is not None:
-                self.get_logger().warn("② Cartesian 실패 → IK+관절보간 폴백")
-                names = self.ARM
-                wp = [[q_pre[j] for j in names], [qg[j] for j in names]]
-                self._play_waypoints(names, wp, float(self.get_parameter("dur_approach_line").value))
-                q_grasp = qg
-            else:
-                self.get_logger().warn("② 접근 IK 실패 → 접근 생략")
+            frac = cart[2] if cart is not None else 0.0
+            self.get_logger().info(f"② 직선 접근({d0*100:.0f}cm) — Cartesian fraction={frac:.2f}, "
+                                   "검증된 grasp 해로 직선 보간")
+            names = self.ARM
+            wp = [[q_pre[j] for j in names], [q_grasp_ik[j] for j in names]]
+            self._play_waypoints(names, wp, float(self.get_parameter("dur_approach_line").value))
         self._set({j: q_grasp.get(j, self.cur[j]) for j in self.ARM})
         self._hold(float(self.get_parameter("pause").value))
 
