@@ -13,6 +13,7 @@ find_package(ament_cmake REQUIRED)
 install(PROGRAMS
   scripts/self_collision_monitor.py
   scripts/obstacle_publisher.py
+  scripts/crop_tuner.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
