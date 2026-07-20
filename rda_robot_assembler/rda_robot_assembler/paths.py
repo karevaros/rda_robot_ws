@@ -70,6 +70,21 @@ def _from_share():
     return cand if os.path.isdir(cand) else None
 
 
+def environments_dir():
+    """배경(환경) 정의 폴더 = config/environments (models 와 같은 config 아래).
+
+    배경은 선택 기능이라 없어도 실패하지 않는다 — 폴더가 없으면 만들어 준다
+    (드롭 폴더로 쓰라고). 해석 근거는 models_dir 과 동일(소스 정본).
+    """
+    cand = os.path.join(os.path.dirname(models_dir()), "environments")
+    if not os.path.isdir(cand):
+        try:
+            os.makedirs(cand, exist_ok=True)
+        except OSError:
+            pass
+    return cand
+
+
 def models_dir():
     """모델 드롭 폴더(정본). 못 찾으면 RuntimeError."""
     global _cached

@@ -72,12 +72,17 @@ def _launch_setup(context, *args, **kwargs):
     rviz_path = PathJoinSubstitution([pkg, "rviz", "rda_robot.rviz"])
     mounts_file = LaunchConfiguration("mounts_file").perform(context)
 
-    # initial_pose 읽기(있으면 jsp zeros 로)
+    # initial_pose · base_placement 읽기(있으면 jsp zeros / 로봇 배치로)
     zeros = {}
+    base_place = {"x": 0.0, "y": 0.0, "z": 0.0, "yaw_deg": 0.0}
     try:
         with open(mounts_file) as f:
             d = yaml.safe_load(f) or {}
         zeros = {k: float(v) for k, v in (d.get("initial_pose") or {}).items()}
+        bp = d.get("base_placement") or {}
+        for k in base_place:
+            if k in bp:
+                base_place[k] = float(bp[k])
     except Exception:
         pass
 
@@ -102,9 +107,23 @@ def _launch_setup(context, *args, **kwargs):
     else:
         print(f"[rda_robot_display] world->base_link z={z:.5f} "
               f"(base_footprint 를 바닥 z=0 에 맞춤)")
+    # 배경 기준 로봇 배치: 어셈블러가 mounts.yaml 에 저장한 base_placement 를
+    #  world→base_link 에 반영한다(x/y/yaw + z 는 바닥오프셋에 더함). 그러면
+    #  고정된 온실(obstacles world 좌표) 안에서 로봇이 저장한 위치로 놓인다.
+    #  base_yaw 인자를 명시(기본 'auto' 아님)하면 저장된 yaw 를 덮어쓴다.
+    import math as _math
+    bx = base_place["x"]
+    by = base_place["y"]
+    bz = z + base_place["z"]
+    yaw_arg = LaunchConfiguration("base_yaw").perform(context).strip().lower()
+    if yaw_arg in ("", "auto"):
+        yaw = base_place["yaw_deg"] * _math.pi / 180.0
+    else:
+        yaw = float(yaw_arg)
     world_tf = Node(package="tf2_ros", executable="static_transform_publisher",
                     name="world_to_base_link",
-                    arguments=["--x", "0", "--y", "0", "--z", f"{z:.6f}",
+                    arguments=["--x", f"{bx:.6f}", "--y", f"{by:.6f}",
+                               "--z", f"{bz:.6f}", "--yaw", f"{yaw:.6f}",
                                "--frame-id", "world",
                                "--child-frame-id", "base_link"])
     nodes = [rsp, jsp, rviz, world_tf]
@@ -142,6 +161,10 @@ def generate_launch_description():
     obstacles_file_arg = DeclareLaunchArgument(
         "obstacles_file", default_value=default_obstacles,
         description="장애물 정의 yaml 경로")
+    base_yaw_arg = DeclareLaunchArgument(
+        "base_yaw", default_value="auto",
+        description="world→base_link yaw[rad]. 'auto'=mounts.yaml 의 base_placement 값 사용. "
+                    "숫자를 주면 그 값으로 덮어씀(예: -1.5708=시계 90°).")
     return LaunchDescription([mounts_arg, collision_arg, obstacles_arg,
-                              obstacles_file_arg,
+                              obstacles_file_arg, base_yaw_arg,
                               OpaqueFunction(function=_launch_setup)])

@@ -264,6 +264,10 @@ class Assembler(QtWidgets.QMainWindow):
         self._dirty = False       # 저장 후 변경 여부(제목 * 표시)
         self._grid_origin = None  # 현재 격자 기준점(파트 베이스) — None 이면 재생성
         self._bounds = GRID_BOUNDS   # 현재 격자 경계(카메라 맞춤용)
+        self.env_spec = None      # 현재 배경 정의(dict) — None 이면 배경 없음
+        self.env_actors = []      # 배경 액터들(비선택·표시전용)
+        self.base_offset = np.eye(4)   # 배경 기준 로봇 베이스 배치(world→base)
+        self.base_place = {"x": 0.0, "y": 0.0, "z": 0.0, "yaw": 0.0}  # UI 값
 
         self._build_ui()
         self._reload_all_parts()
@@ -274,6 +278,39 @@ class Assembler(QtWidgets.QMainWindow):
         self._calibrate_baseline(initial=True)
         self._set_dirty(False)
         self._set_status("파트 슬롯을 클릭해 결합 설정을 편집하세요.")
+        # 시작 시 배경 지정(선택): RDA_ASSEMBLER_ENV=<라벨|파일명 일부>. 없으면 '없음'.
+        self._preselect_environment(os.environ.get("RDA_ASSEMBLER_ENV"))
+        # 시작 시 배경 기준 로봇 배치(선택): RDA_ASSEMBLER_BASE="x,y,z,yaw°".
+        self._preset_base_place(os.environ.get("RDA_ASSEMBLER_BASE"))
+
+    def _preset_base_place(self, spec):
+        if not spec:
+            return
+        try:
+            vals = [float(v) for v in spec.replace(" ", "").split(",")]
+        except ValueError:
+            self._set_status(f"RDA_ASSEMBLER_BASE 형식 오류: {spec!r} (기대: x,y,z,yaw)")
+            return
+        for key, v in zip(("x", "y", "z", "yaw"), vals):
+            self.base_place[key] = v
+            sp = self.base_spins.get(key)
+            if sp is not None:
+                sp.blockSignals(True); sp.setValue(v); sp.blockSignals(False)
+        self.base_offset = self._base_matrix()
+        self._update_transforms()
+        self.plotter.render()
+
+    def _preselect_environment(self, want):
+        if not want:
+            return
+        want = want.lower()
+        for i in range(self.env_combo.count()):
+            data = self.env_combo.itemData(i) or ""
+            text = self.env_combo.itemText(i)
+            if want in text.lower() or want in os.path.basename(str(data)).lower():
+                self.env_combo.setCurrentIndex(i)
+                return
+        self._set_status(f"배경 '{want}' 을(를) 찾지 못했습니다.")
 
     # ---------- UI ----------
     def _build_ui(self):
@@ -378,6 +415,15 @@ class Assembler(QtWidgets.QMainWindow):
         tb.addAction(self.act_iso); tb.addAction(self.act_front)
         tb.addAction(self.act_side); tb.addAction(self.act_top)
         tb.addAction(self.act_fit)
+        tb.addSeparator()
+        # 배경(환경) 선택 — config/environments/*.yaml 을 스캔해 채운다.
+        tb.addWidget(QtWidgets.QLabel(" 배경: "))
+        self.env_combo = QtWidgets.QComboBox()
+        self.env_combo.setToolTip(
+            "3D 뷰에 표시할 배경(온실 등). config/environments/ 에 yaml 을 넣으면 자동 등록됩니다.")
+        self._populate_environments()
+        self.env_combo.currentIndexChanged.connect(self._on_env_changed)
+        tb.addWidget(self.env_combo)
         self.addToolBar(QtCore.Qt.TopToolBarArea, tb)
 
     def _build_left(self):
@@ -415,8 +461,60 @@ class Assembler(QtWidgets.QMainWindow):
         self.btn_open_models.setToolTip(self.act_open_models.toolTip())
         self.btn_open_models.clicked.connect(self._open_models_dir)
         lv.addWidget(self.btn_open_models)
+        lv.addWidget(self._build_base_placement())
         lv.addStretch(1)
         return left
+
+    def _build_base_placement(self):
+        """배경(환경) 기준 로봇 베이스 위치/방향 컨트롤."""
+        box = QtWidgets.QGroupBox("배경 기준 로봇 위치")
+        box.setToolTip("배경(온실) 안에서 로봇 베이스를 옮깁니다. 배경이 없어도 로봇만 이동합니다.")
+        form = QtWidgets.QFormLayout(box)
+        form.setContentsMargins(8, 4, 8, 8)
+        self.base_spins = {}
+        specs = [("x", "X", -10.0, 10.0, 0.05, " m", 3),
+                 ("y", "Y", -10.0, 10.0, 0.05, " m", 3),
+                 ("z", "Z", -2.0, 3.0, 0.05, " m", 3),
+                 ("yaw", "Yaw", -180.0, 180.0, 5.0, " °", 1)]
+        for key, label, lo, hi, step, suffix, dec in specs:
+            sp = QtWidgets.QDoubleSpinBox()
+            sp.setRange(lo, hi); sp.setSingleStep(step); sp.setDecimals(dec)
+            sp.setSuffix(suffix); sp.setValue(self.base_place[key])
+            sp.valueChanged.connect(lambda _v, k=key: self._on_base_place_changed(k))
+            form.addRow(label, sp)
+            self.base_spins[key] = sp
+        btn = QtWidgets.QPushButton("원점으로")
+        btn.setToolTip("로봇 베이스를 배경 원점(0,0,0·0°)으로 되돌립니다.")
+        btn.clicked.connect(self._reset_base_place)
+        form.addRow(btn)
+        return box
+
+    def _base_matrix(self):
+        """base_place(x,y,z,yaw°) → 4x4 (world→base). Z 축 yaw 회전 + 평행이동."""
+        p = self.base_place
+        a = p["yaw"] * math.pi / 180.0
+        c, s = math.cos(a), math.sin(a)
+        M = np.eye(4)
+        M[0, 0], M[0, 1] = c, -s
+        M[1, 0], M[1, 1] = s, c
+        M[0, 3], M[1, 3], M[2, 3] = p["x"], p["y"], p["z"]
+        return M
+
+    def _on_base_place_changed(self, key):
+        self.base_place[key] = self.base_spins[key].value()
+        self.base_offset = self._base_matrix()
+        self._update_transforms()
+        self.plotter.render()
+        self._set_dirty()
+
+    def _reset_base_place(self):
+        for k, sp in self.base_spins.items():
+            sp.blockSignals(True); sp.setValue(0.0); sp.blockSignals(False)
+            self.base_place[k] = 0.0
+        self.base_offset = np.eye(4)
+        self._update_transforms()
+        self.plotter.render()
+        self._set_dirty()
 
     def _build_center(self):
         mid = QtWidgets.QWidget()
@@ -634,16 +732,153 @@ class Assembler(QtWidgets.QMainWindow):
         if full:
             self.plotter.clear()
             self.actors = {}
+            self.env_actors = []       # clear() 가 배경 액터도 지웠다
             self._grid_origin = None   # clear() 가 격자도 지웠으니 재생성 강제
             self.plotter.add_axes()
             for slot in reg.SLOTS:
                 if not self.enabled.get(slot) or slot not in self.loaded:
                     continue
                 self._add_part_actors(slot)
+            self._render_environment()   # 배경을 파트 위에 다시 얹는다
         self._update_transforms()   # 여기서 격자도 파트 베이스로 따라 옮겨짐
         if full:
             self._fit_view()
         self.plotter.render()
+
+    # ---------- 배경(환경) ----------
+    def _populate_environments(self):
+        """config/environments/*.yaml 을 스캔해 배경 드롭다운을 채운다('없음' + 파일들)."""
+        self.env_combo.blockSignals(True)
+        self.env_combo.clear()
+        self.env_combo.addItem("없음", None)
+        try:
+            from rda_robot_assembler import paths as _paths
+            d = _paths.environments_dir()
+            files = sorted(f for f in os.listdir(d)
+                           if f.lower().endswith((".yaml", ".yml")))
+        except Exception as e:
+            files, d = [], None
+            print(f"[assembler] 배경 폴더 스캔 실패: {e}", file=sys.stderr)
+        for f in files:
+            path = os.path.join(d, f)
+            label = f
+            try:
+                with open(path) as fh:
+                    spec = yaml.safe_load(fh) or {}
+                label = spec.get("label") or os.path.splitext(f)[0]
+            except Exception:
+                pass
+            self.env_combo.addItem(label, path)
+        self.env_combo.blockSignals(False)
+
+    def _on_env_changed(self, _idx=None):
+        """드롭다운 선택 변경 → 배경 정의를 로드하고 다시 그린다."""
+        path = self.env_combo.currentData()
+        if path is None:
+            self.env_spec = None
+        else:
+            try:
+                with open(path) as fh:
+                    self.env_spec = yaml.safe_load(fh) or {}
+            except Exception as e:
+                self.env_spec = None
+                self._set_status(f"배경 로드 실패: {e}")
+        # 배경만 다시 그린다(파트 재빌드 없이): 기존 배경 액터 제거 후 재렌더.
+        self._render_environment()
+        # 카메라: 배경이 있으면 로봇+인접 배경이 보이게, 없으면 격자 기준.
+        try:
+            self.plotter.view_isometric()
+            self.plotter.reset_camera(
+                bounds=self._env_fit_bounds() if self.env_spec else list(self._bounds))
+        except Exception:
+            pass
+        self.plotter.render()
+        name = self.env_combo.currentText()
+        self._set_status(f"배경: {name}" if self.env_spec else "배경을 껐습니다.")
+
+    def _clear_environment(self):
+        for a in self.env_actors:
+            try:
+                self.plotter.remove_actor(a, render=False)
+            except Exception:
+                pass
+        self.env_actors = []
+
+    def _render_environment(self):
+        """self.env_spec(있으면)의 primitive 들을 표시전용 메시로 그린다."""
+        self._clear_environment()
+        self._env_bounds = None
+        if not self.env_spec:
+            return
+        items = self.env_spec.get("items") or self.env_spec.get("obstacles") or []
+        bx = [1e9, -1e9, 1e9, -1e9, 1e9, -1e9]
+        for i, it in enumerate(items):
+            mesh, color, opacity = self._env_mesh(it)
+            if mesh is None:
+                continue
+            try:
+                a = self.plotter.add_mesh(
+                    mesh, color=color, opacity=opacity, pickable=False,
+                    name=f"_env_{i}", specular=0.2, smooth_shading=True)
+                self.env_actors.append(a)
+                b = mesh.bounds
+                for k, op in ((0, min), (1, max), (2, min), (3, max), (4, min), (5, max)):
+                    bx[k] = op(bx[k], b[k])
+            except Exception as e:
+                print(f"[assembler] 배경 항목 렌더 실패({it.get('name','?')}): {e}",
+                      file=sys.stderr)
+        if self.env_actors:
+            self._env_bounds = bx
+
+    def _env_fit_bounds(self):
+        """배경이 있을 때 카메라 맞춤용 경계. 긴 배경(예: 6m 거터)은 원점 ±2.5m 로
+        클램프해 로봇이 구석에 밀리지 않게 한다. 로봇 주변도 최소 포함."""
+        if not getattr(self, "_env_bounds", None):
+            return list(self._bounds)
+        C = 2.5   # 원점 기준 최대 반경(m)
+        e = self._env_bounds
+        merged = [
+            max(e[0], -C), min(e[1], C),
+            max(e[2], -C), min(e[3], C),
+            min(e[4], 0.0), min(max(e[5], 1.5), 3.0),
+        ]
+        # 로봇 근처(±0.6)도 항상 포함
+        return [min(merged[0], -0.6), max(merged[1], 0.6),
+                min(merged[2], -0.6), max(merged[3], 0.6),
+                merged[4], merged[5]]
+
+    def _env_mesh(self, it):
+        """배경 항목 dict → (pv.PolyData, color[str/tuple], opacity). 실패 시 (None,..)."""
+        t = it.get("type")
+        pz = it.get("pose") or {}
+        xyz = [float(v) for v in pz.get("xyz", [0, 0, 0])]
+        rpy = [float(v) for v in pz.get("rpy", [0, 0, 0])]
+        rgba = it.get("color", [0.6, 0.6, 0.6, 0.6])
+        color = tuple(float(v) for v in rgba[:3])
+        opacity = float(rgba[3]) if len(rgba) > 3 else 0.6
+        try:
+            if t == "box":
+                sx, sy, sz = (float(v) for v in it["size"])
+                mesh = pv.Cube(x_length=sx, y_length=sy, z_length=sz)
+            elif t == "cylinder":
+                mesh = pv.Cylinder(radius=float(it["radius"]),
+                                   height=float(it["height"]),
+                                   direction=(0, 0, 1), resolution=24)
+            elif t == "sphere":
+                mesh = pv.Sphere(radius=float(it["radius"]))
+            else:
+                return None, color, opacity
+        except (KeyError, TypeError, ValueError) as e:
+            print(f"[assembler] 배경 항목 형상 오류({it.get('name','?')}): {e}",
+                  file=sys.stderr)
+            return None, color, opacity
+        # 자세 적용: 회전(rpy, ZYX) 후 평행이동. pyvista 는 도 단위이므로 환산.
+        if any(rpy):
+            mesh = mesh.rotate_x(rpy[0] * DEG, inplace=False)
+            mesh = mesh.rotate_y(rpy[1] * DEG, inplace=False)
+            mesh = mesh.rotate_z(rpy[2] * DEG, inplace=False)
+        mesh = mesh.translate(xyz, inplace=False)
+        return mesh, color, opacity
 
     # ---------- 격자 ----------
     def _grid_anchor(self, world):
@@ -747,6 +982,10 @@ class Assembler(QtWidgets.QMainWindow):
             {s: self.loaded[s] for s in self.loaded if self.enabled.get(s)},
             self.mounts,
         )
+        # 배경 기준 로봇 베이스 배치: 전 슬롯에 오프셋을 곱해 로봇 전체를 옮긴다
+        # (배경은 고정, 로봇만 이동 = 온실 안 로봇 위치 변경).
+        if not np.allclose(self.base_offset, np.eye(4)):
+            world = {s: self.base_offset @ W for s, W in world.items()}
         # 격자를 조작 중인 파트 베이스로 이동
         self._update_grids(world)
         # 미배치 슬롯 경고
@@ -852,12 +1091,19 @@ class Assembler(QtWidgets.QMainWindow):
                 continue
             for jn, v in getattr(part, "joint_pose", {}).items():
                 ipose[jn] = round(float(v), 6)
+        # 배경 기준 로봇 베이스 배치(있을 때만 기록 — 원점이면 생략해 파일을 깔끔히).
+        out = {"mounts": data, "models": self.models, "initial_pose": ipose}
+        if any(abs(self.base_place[k]) > 1e-9 for k in ("x", "y", "z", "yaw")):
+            out["base_placement"] = {
+                "x": round(self.base_place["x"], 5),
+                "y": round(self.base_place["y"], 5),
+                "z": round(self.base_place["z"], 5),
+                "yaw_deg": round(self.base_place["yaw"], 3),
+            }
         path = self._mounts_path()
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w") as f:
-            yaml.safe_dump({"mounts": data, "models": self.models,
-                            "initial_pose": ipose}, f,
-                           allow_unicode=True, sort_keys=False)
+            yaml.safe_dump(out, f, allow_unicode=True, sort_keys=False)
         self._set_dirty(False)
         self._set_status(f"저장됨: {path}")
         self.statusBar().showMessage("mounts.yaml 저장 완료", 4000)
@@ -907,6 +1153,17 @@ class Assembler(QtWidgets.QMainWindow):
             if pose:
                 self.joint_pose[slot] = pose
                 part.set_joint_pose(pose)
+        # 배경 기준 로봇 베이스 배치 복원(없으면 원점).
+        bp = d.get("base_placement") or {}
+        vals = {"x": float(bp.get("x", 0.0)), "y": float(bp.get("y", 0.0)),
+                "z": float(bp.get("z", 0.0)), "yaw": float(bp.get("yaw_deg", 0.0))}
+        for k, v in vals.items():
+            self.base_place[k] = v
+            sp = self.base_spins.get(k)
+            if sp is not None:
+                sp.blockSignals(True); sp.setValue(v); sp.blockSignals(False)
+        self.base_offset = self._base_matrix()
+
         self._select_slot(self.active_slot)
         self._refresh_view(full=True)
         self._set_dirty(False)

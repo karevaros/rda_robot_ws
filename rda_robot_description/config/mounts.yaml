@@ -61,3 +61,8 @@ initial_pose:
   wrist2: 0.0
   wrist3: 0.0
   rg2_finger_joint1: 0.0
+base_placement:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+  yaw_deg: -90.0
