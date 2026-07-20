@@ -15,3 +15,8 @@ docs/crop_ref/*.jpeg
 docs/crop_ref/*.jpg
 docs/crop_ref/*.zip
 docs/crop_ref/*.part0
+
+# 온실 참조 CAD/이미지/추출데이터 — 로컬 참조용, 저장소엔 분석 스크립트(.py)만 커밋
+docs/greenhouse_ref/*.stp
+docs/greenhouse_ref/*.png
+docs/greenhouse_ref/*.csv
