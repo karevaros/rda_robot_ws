@@ -488,13 +488,14 @@ class PregraspDemo(Node):
         return dict(c=c, a=a, p_pre=p_pre, p_grasp=p_grasp, quat=quat, q=q, q_grasp=qg)
 
     # ══════════════════ 5주차 2차: 접근 궤적 생성(줄기 회피) ══════════════════
-    def plan_approach(self, name, grasp_pose, q_pre, q_grasp_ik):
+    def plan_approach(self, name, grasp_pose, q_pre, q_grasp_ik, retries=1):
         """pre-grasp → grasp 접근 궤적을 생성한다(줄기 회피). 반환 (names, wp, method, checked).
 
         · 목표 화방대(수확 대상 줄기)는 열매가 거기 매달려 불가피 → 처음부터 ACM 충돌 제외.
         · 주 줄기·다른 화방대·거터·레일은 장애물 유지(진짜 회피 대상).
         우선순위: ① 직선 Cartesian(경로 개방 시) → ② OMPL 회피(장애물 막으면 경유점 자동
-        생성해 우회) → ③ 최후 무검증 보간(경고). ①②는 avoid_collisions 라 충돌free 보장."""
+        생성해 우회, 좁은 공간이라 `retries` 회 재시도) → ③ Cartesian 부분경로(충돌검증·매끈)
+        → ④ 최후 무검증 보간(경고). ①②③은 avoid_collisions 라 충돌free."""
         # 수확 대상 줄기(목표 화방대) 충돌 제외
         self._allow_collision(self._stalk_of(name))
         # ① 직선 Cartesian (열매까지 곧게 들어갈 수 있으면 최선)
@@ -505,16 +506,25 @@ class PregraspDemo(Node):
                 f"② 접근=직선 Cartesian {len(wp)}점(fraction={frac:.2f}) — 주 줄기 등 경로상 장애물 없음")
             return n, wp, f"cartesian(frac={frac:.2f})", True
         frac0 = cart[2] if cart is not None else 0.0
-        # ② OMPL 로 grasp 자세까지 충돌회피 계획(주 줄기·다른 화방대 우회, 경유점 자동생성)
+        # ② OMPL 로 grasp 자세까지 충돌회피 계획(좁은 공간 → 여러 번 재시도해 매끈한 경로 확보)
         self.get_logger().info(
             f"② 직선 접근 부분차단(fraction={frac0:.2f}, 주 줄기/구조가 경로 막음) "
-            "→ OMPL 회피 궤적 생성(줄기 회피 경유점)")
-        plan = self.plan_to(q_grasp_ik)
-        if plan is not None:
-            n, wp = plan
-            self.get_logger().info(f"② 접근=OMPL 회피 {len(wp)}점 궤적(줄기 우회, 충돌free)")
-            return n, wp, f"ompl-avoid({len(wp)}pt)", True
-        # ③ 최후: 무검증 보간
+            f"→ OMPL 회피 궤적 생성(줄기 회피 경유점, 최대 {max(1, retries)}회 시도)")
+        for k in range(max(1, retries)):
+            plan = self.plan_to(q_grasp_ik)
+            if plan is not None:
+                n, wp = plan
+                self.get_logger().info(
+                    f"② 접근=OMPL 회피 {len(wp)}점 궤적(줄기 우회, 충돌free)"
+                    + (f" [{k + 1}번째 시도 성공]" if k else ""))
+                return n, wp, f"ompl-avoid({len(wp)}pt)", True
+        # ③ Cartesian 부분경로 폴백 — grasp 직전까지 충돌free·매끈(2점 스냅 방지)
+        if cart is not None and frac0 >= 0.5:
+            n, wp, _ = cart
+            self.get_logger().info(
+                f"② 접근=Cartesian 부분경로 {len(wp)}점(fraction={frac0:.2f}, grasp 근처까지 매끈·충돌free)")
+            return n, wp, f"cartesian-partial(frac={frac0:.2f})", True
+        # ④ 최후: 무검증 보간
         self.get_logger().warn("② 접근 계획 실패(도달권/공간 부족) → 무검증 관절보간 폴백(충돌 가능)")
         return (self.ARM,
                 [[q_pre[j] for j in self.ARM], [q_grasp_ik[j] for j in self.ARM]],
@@ -582,15 +592,55 @@ class PregraspDemo(Node):
             self.get_logger().info("    수확 대상 후보: " + ", ".join(n for n, _, _, _ in reach))
         return reach
 
+    def _precompute(self, name, sol):
+        """목표 열매에 대한 전체 데모 궤적(①home→pre ②접근 ④home복귀)을 한 번만 계획해 캐시.
+        base·목표가 고정이라 매 루프 재계획할 필요가 없다 → 이후 반복은 재생만(버퍼링/튐 제거).
+        계획 중 self.cur 를 가상 시작상태로 바꿔가며 각 구간을 계획한 뒤 home 으로 복원."""
+        q_pre, q_grasp_ik = sol["q"], sol["q_grasp"]
+        p_grasp, quat = sol["p_grasp"], sol["quat"]
+        gopen = float(self.get_parameter("gripper_open").value)
+        close = float(self.get_parameter("gripper_close").value)
+        q_home = {j: 0.0 for j in self.ARM}
+        grasp_pose = Pose()
+        grasp_pose.position.x, grasp_pose.position.y, grasp_pose.position.z = map(float, p_grasp)
+        (grasp_pose.orientation.x, grasp_pose.orientation.y,
+         grasp_pose.orientation.z, grasp_pose.orientation.w) = map(float, quat)
+
+        # ① home → pre-grasp (시작 = home)
+        self.cur = {j: 0.0 for j in self.ARM}
+        self.cur.update({f: gopen for f in self.FINGERS})
+        plan = self.plan_to(q_pre)
+        pre = plan if plan is not None else (
+            self.ARM, [[0.0] * len(self.ARM), [q_pre[j] for j in self.ARM]])
+        self.get_logger().info(f"① home→pre-grasp 계획 {len(pre[1])}점")
+
+        # ② pre-grasp → grasp 접근(줄기 회피) — 시작 = q_pre, OMPL 우회 여러 번 재시도
+        self._set({j: q_pre[j] for j in self.ARM})
+        app_n, app_wp, method, checked = self.plan_approach(
+            name, grasp_pose, q_pre, q_grasp_ik, retries=6)
+        q_grasp = ({n: app_wp[-1][i] for i, n in enumerate(app_n)}
+                   if app_wp else dict(q_grasp_ik))
+
+        # ④ home 복귀 (시작 = q_pre, 후퇴=접근 역재생으로 q_pre 도달 후)
+        self._set({j: q_pre.get(j, 0.0) for j in self.ARM})
+        home = self.plan_to(q_home)
+
+        # self.cur 복원(재생은 home+벌림에서 시작)
+        self.cur = {j: 0.0 for j in self.ARM}
+        self.cur.update({f: gopen for f in self.FINGERS})
+        return dict(pre=pre, app=(app_n, app_wp, method, checked),
+                    q_pre=q_pre, q_grasp=q_grasp, q_home=q_home,
+                    gopen=gopen, close=close, home=home)
+
     def run(self):
-        sel = self._select_reachable()
+        # 목표 선택·전체 궤적 계획은 최초 1회만(base·목표 고정) → 캐시. 이후 반복은 재생만.
+        if getattr(self, "_sel_cache", None) is None:
+            self._sel_cache = self._select_reachable()
+        sel = self._sel_cache
         if sel is None:
             self.get_logger().error("목표 열매를 찾지 못함 — obstacles.yaml 의 kind:target 확인.")
             return False
         name, p_fruit, r, sol = sel
-        self.get_logger().info(f"목표 = {name} @ ({p_fruit[0]:.2f},{p_fruit[1]:.2f},"
-                               f"{p_fruit[2]:.2f}) r={r:.3f}")
-
         if sol is None:
             self.get_logger().error(
                 f"[{name}] 현재 로봇 위치에서 도달 가능한 열매가 없음(도달불가/충돌). "
@@ -598,75 +648,62 @@ class PregraspDemo(Node):
             self._publish_markers(p_fruit, r, None, None, reachable=False)
             self._hold(3.0)
             return False
-        q_pre, q_grasp_ik, a = sol["q"], sol["q_grasp"], sol["a"]
-        p_pre, p_grasp, quat = sol["p_pre"], sol["p_grasp"], sol["quat"]
-        d0 = float(self.get_parameter("standoff").value)
-        self._publish_markers(p_fruit, r, p_pre, a, reachable=True)
-        deg = math.degrees
-        self.get_logger().info(
-            f"[{name}] pre-grasp 채택 φ={deg(sol['c'].phi):+.0f}° θ={deg(sol['c'].theta):+.0f}° "
-            f"(standoff {d0*100:.0f}cm 뒤 → 직선 접근) → 데모 재생 시작.")
 
-        grasp_pose = Pose()
-        grasp_pose.position.x, grasp_pose.position.y, grasp_pose.position.z = map(float, p_grasp)
-        (grasp_pose.orientation.x, grasp_pose.orientation.y,
-         grasp_pose.orientation.z, grasp_pose.orientation.w) = map(float, quat)
+        if getattr(self, "_plan_cache", None) is None:
+            d0 = float(self.get_parameter("standoff").value)
+            deg = math.degrees
+            self.get_logger().info(
+                f"목표 = {name} @ ({p_fruit[0]:.2f},{p_fruit[1]:.2f},{p_fruit[2]:.2f}) r={r:.3f} · "
+                f"pre-grasp φ={deg(sol['c'].phi):+.0f}° θ={deg(sol['c'].theta):+.0f}° "
+                f"(standoff {d0*100:.0f}cm)")
+            self.get_logger().info("전체 궤적 계획 중(최초 1회, 몇 초 소요)…")
+            self._plan_cache = self._precompute(name, sol)
+            _, _, method, checked = self._plan_cache["app"]
+            self.get_logger().info(
+                f"계획 완료 → 접근 방식={method}" + ("" if checked else " ⚠충돌검증 안됨")
+                + ". 이후 반복은 이 궤적을 매끈하게 재생만 함(재계획 없음).")
+        c = self._plan_cache
+        self._publish_markers(p_fruit, r, sol["p_pre"], sol["a"], reachable=True)
 
-        # ── ① home → pre-grasp (OMPL, 실패 시 관절보간) ──
-        gopen = float(self.get_parameter("gripper_open").value)
-        q_home = {j: 0.0 for j in self.ARM}
-        self._set(dict(q_home, **{f: gopen for f in self.FINGERS}))  # 시작 = home + 그리퍼 벌림
+        gopen, close = c["gopen"], c["close"]
+        q_pre, q_grasp, q_home = c["q_pre"], c["q_grasp"], c["q_home"]
+        app_n, app_wp, _, _ = c["app"]
+
+        # 시작 = home + 그리퍼 벌림
+        self.cur = {j: 0.0 for j in self.ARM}
+        self.cur.update({f: gopen for f in self.FINGERS})
         self._publish_js()
-        plan = self.plan_to(q_pre)
-        if plan is not None:
-            names, wp = plan
-            self.get_logger().info(f"① home→pre-grasp OMPL 계획 {len(wp)}점 재생")
-            self._play_waypoints(names, wp, float(self.get_parameter("dur_approach_plan").value))
-        else:
-            self.get_logger().warn("① OMPL 실패 → 관절보간 폴백")
-            names = self.ARM
-            wp = [[q_home[j] for j in names], [q_pre[j] for j in names]]
-            self._play_waypoints(names, wp, float(self.get_parameter("dur_approach_plan").value))
+
+        # ── ① home → pre-grasp ──
+        pn, pwp = c["pre"]
+        self._play_waypoints(pn, pwp, float(self.get_parameter("dur_approach_plan").value))
         self._set({j: q_pre[j] for j in self.ARM})
         self._hold(float(self.get_parameter("pause").value))
 
-        # ── ② pre-grasp → grasp : 접근 궤적 생성(줄기 회피) [5주차 2차] ──
-        #    수확 대상 줄기(목표 화방대)만 통과 허용, 주 줄기·구조는 회피. 직선 우선,
-        #    막히면 OMPL 이 경유점을 만들어 우회한다. grasp 끝점은 선택 단계서 이미 도달검증.
-        app_names, app_wp, method, checked = self.plan_approach(name, grasp_pose, q_pre, q_grasp_ik)
-        self.get_logger().info(f"② 접근 궤적 채택: {method}"
-                               + ("" if checked else "  ⚠충돌검증 안됨"))
-        self._play_waypoints(app_names, app_wp, float(self.get_parameter("dur_approach_line").value))
-        q_grasp = {n: app_wp[-1][i] for i, n in enumerate(app_names)} if app_wp else dict(q_grasp_ik)
+        # ── ② pre-grasp → grasp : 줄기 회피 접근 궤적 재생 [5주차 2차] ──
+        self._play_waypoints(app_n, app_wp, float(self.get_parameter("dur_approach_line").value))
         self._set({j: q_grasp.get(j, self.cur[j]) for j in self.ARM})
         self._hold(float(self.get_parameter("pause").value))
 
-        # ── ③ 그리퍼 닫기(벌림 gopen → 닫힘 close) ──
-        close = float(self.get_parameter("gripper_close").value)
-        self.get_logger().info("③ 그리퍼 닫기(파지)")
+        # ── ③ 그리퍼 닫기(벌림 → 닫힘) ──
         self._play_waypoints(self.FINGERS,
-                             [[gopen, gopen], [close, close]],
+                             [[gopen] * len(self.FINGERS), [close] * len(self.FINGERS)],
                              float(self.get_parameter("dur_gripper").value))
 
-        # ── ④ 후퇴 grasp→pre-grasp → home ──
-        #    접근 궤적을 그대로 역재생 → 들어온 충돌free 경로로 안전하게 빠진다
-        #    (OMPL 로 곡선접근한 경우 직선후퇴는 줄기를 스칠 수 있으므로).
-        self.get_logger().info(f"④ 후퇴(접근 궤적 역재생 {len(app_wp)}점) → home")
-        self._play_waypoints(app_names, list(reversed(app_wp)),
+        # ── ④ 후퇴(접근 궤적 역재생 → 충돌free 경로로 안전 이탈) → home ──
+        self._play_waypoints(app_n, list(reversed(app_wp)),
                              float(self.get_parameter("dur_retreat").value))
         self._set({j: q_pre.get(j, self.cur[j]) for j in self.ARM})
-        # home 복귀 — 배경 충돌 피하도록 OMPL 계획(실패 시 관절보간). 그리퍼는 닫은 채('수확물' 이송)
-        hplan = self.plan_to(q_home)
-        if hplan is not None:
-            hn, hwp = hplan
+        if c["home"] is not None:
+            hn, hwp = c["home"]
             self._play_waypoints(hn, hwp, float(self.get_parameter("dur_home").value))
         else:
-            self._play_waypoints(names,
-                                 [[q_pre[j] for j in names], [0.0] * len(names)],
+            self._play_waypoints(self.ARM,
+                                 [[q_pre[j] for j in self.ARM], [0.0] * len(self.ARM)],
                                  float(self.get_parameter("dur_home").value))
         self._set({j: 0.0 for j in self.ARM})
         self._hold(float(self.get_parameter("pause").value))
-        self.get_logger().info(f"[{name}] 데모 1회 완료.")
+        self.get_logger().info(f"[{name}] 데모 1회 완료(재생).")
         return True
 
 
