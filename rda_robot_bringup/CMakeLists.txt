@@ -17,6 +17,7 @@ install(PROGRAMS
   scripts/pregrasp_pose.py
   scripts/pregrasp_demo.py
   scripts/robot_introspect.py
+  scripts/gen_gazebo_world.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
