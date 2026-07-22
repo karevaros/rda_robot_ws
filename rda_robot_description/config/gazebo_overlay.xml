@@ -1,0 +1,44 @@
+<!-- ===================================================================
+     Gazebo Classic 오버레이 (Stage 1) — gazebo_sim.launch.py 가 통합 URDF 의
+     </robot> 앞에 자동 주입한다. 통합 URDF(compose_urdf 산출물)는 손대지 않음.
+
+     · 로봇 = static: perception 카메라 플랫폼이라 물리 구동 불필요 → 관성 누락(base_link·
+       link0) 무해, 팔이 중력에 흐트러지지 않고 스폰 자세 유지.
+     · D435i(eye-to-hand) depth 카메라 → PointCloud2 + depth 이미지 + camera_info.
+       센서는 sensor2_camera_link 에 부착(메시 있는 본체라 SDF 변환 시 살아남음; Gazebo 는
+       링크 로컬 +X 로 바라봄 = RealSense camera_link 의 렌즈 방향). 출력 frame_id =
+       depth optical frame(ROS 광학 규약, Z-forward).
+     ================================================================ -->
+
+<gazebo>
+  <static>true</static>
+</gazebo>
+
+<gazebo reference="sensor2_camera_link">
+  <sensor name="d435i_depth" type="depth">
+    <always_on>true</always_on>
+    <update_rate>15.0</update_rate>
+    <visualize>true</visualize>
+    <camera name="d435i">
+      <horizontal_fov>1.5009</horizontal_fov>   <!-- D435 depth ~86° -->
+      <image>
+        <width>640</width>
+        <height>480</height>
+        <format>R8G8B8</format>
+      </image>
+      <clip>
+        <near>0.1</near>
+        <far>10.0</far>
+      </clip>
+    </camera>
+    <plugin name="d435i_camera" filename="libgazebo_ros_camera.so">
+      <ros>
+        <namespace>/d435i</namespace>
+      </ros>
+      <camera_name>depth</camera_name>
+      <frame_name>sensor2_camera_depth_optical_frame</frame_name>
+      <min_depth>0.1</min_depth>
+      <max_depth>10.0</max_depth>
+    </plugin>
+  </sensor>
+</gazebo>
