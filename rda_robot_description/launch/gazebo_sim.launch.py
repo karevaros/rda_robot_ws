@@ -65,6 +65,30 @@ def _inject_overlay(urdf_xml, overlay_file):
     return urdf_xml[:idx] + "\n" + overlay + "\n" + urdf_xml[idx:]
 
 
+def _add_missing_inertials(urdf_xml):
+    """visual/collision 은 있는데 inertial 이 없는 링크에 기본 관성을 넣는다.
+
+    Gazebo(sdformat)의 URDF→SDF 변환은 **무질량 중간 링크에서 운동학 체인을 끊고 그
+    위 링크(팔·EE·카메라)를 통째로 드롭**한다. 통합 URDF 는 link0(팔 루트)에 관성이
+    없어, Gazebo 에선 팔 이상이 전부 사라졌다(로봇 하반부 base 만 보임). 여기서 누락
+    링크에 형식적 관성을 채워 체인을 잇는다(로봇은 static 이라 물리값은 무의미)."""
+    root = ET.fromstring(urdf_xml)
+    added = []
+    for link in root.findall("link"):
+        if link.find("inertial") is None and (link.find("visual") is not None
+                                              or link.find("collision") is not None):
+            ine = ET.SubElement(link, "inertial")
+            ET.SubElement(ine, "mass").set("value", "0.1")
+            inertia = ET.SubElement(ine, "inertia")
+            for k, v in (("ixx", "0.001"), ("ixy", "0"), ("ixz", "0"),
+                         ("iyy", "0.001"), ("iyz", "0"), ("izz", "0.001")):
+                inertia.set(k, v)
+            added.append(link.get("name"))
+    if added:
+        print(f"[gazebo_sim] 관성 보완(체인 유지): {', '.join(added)}")
+    return ET.tostring(root, encoding="unicode")
+
+
 def gen_world(obstacles_yaml):
     """obstacles.yaml → Gazebo SDF 월드(온실 구조+작물). gen_gazebo_world.py 재사용.
     좌표·형상이 RViz/MoveIt 장면(obstacle_publisher)과 단일 진실원으로 정합."""
@@ -96,7 +120,7 @@ def _setup(context, *args, **kwargs):
     mounts_file = LaunchConfiguration("mounts_file").perform(context)
     overlay = os.path.join(desc, "config", "gazebo_overlay.xml")
 
-    urdf_xml = _inject_overlay(compose_urdf(mounts_file), overlay)
+    urdf_xml = _inject_overlay(_add_missing_inertials(compose_urdf(mounts_file)), overlay)
     z = _ground_offset(urdf_xml)
     robot_description = ParameterValue(urdf_xml, value_type=str)
     gui = LaunchConfiguration("gui").perform(context).lower() in ("1", "true", "yes")
