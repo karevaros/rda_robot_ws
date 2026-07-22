@@ -117,6 +117,7 @@ def _setup(context, *args, **kwargs):
         # 팔 프레임 — 팔 스왑 시 지정(예: UR10e=arm_base_link/arm_tool0). 기본=RB5 계약.
         "base_link": lc("base_link").perform(context),
         "ik_link": lc("ik_link").perform(context),
+        "scan_all": lc("scan_all").perform(context).lower() in ("1", "true", "yes"),
     }
     use_yaml = lc("use_yaml_target").perform(context).lower() in ("1", "true", "yes")
     if not use_yaml:
@@ -126,7 +127,8 @@ def _setup(context, *args, **kwargs):
                 output="screen", parameters=[demo_params])
 
     nodes = [rsp, move_group, world_tf, obstacles, demo]
-    if lc("rviz").perform(context).lower() in ("1", "true", "yes"):
+    scanning = lc("scan_all").perform(context).lower() in ("1", "true", "yes")
+    if not scanning and lc("rviz").perform(context).lower() in ("1", "true", "yes"):
         rviz_cfg = os.path.join(cfg, "config", "pregrasp_demo.rviz")
         if not os.path.exists(rviz_cfg):
             rviz_cfg = os.path.join(cfg, "config", "moveit.rviz")
@@ -163,6 +165,8 @@ def generate_launch_description():
         DeclareLaunchArgument("grasp_offset", default_value="0.13",
                               description="파지 시 TCP 가 열매 중심 앞에 멈추는 거리(손끝이 열매 표면에 닿게)"),
         DeclareLaunchArgument("loop", default_value="true"),
+        DeclareLaunchArgument("scan_all", default_value="false",
+                              description="true=데모 대신 전체 열매 도달 리포트 후 종료(RViz 자동 off)"),
         DeclareLaunchArgument("rviz", default_value="true"),
         OpaqueFunction(function=_setup),
     ])

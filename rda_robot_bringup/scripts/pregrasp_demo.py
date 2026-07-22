@@ -34,9 +34,10 @@ from sensor_msgs.msg import JointState
 from visualization_msgs.msg import Marker, MarkerArray
 
 from moveit_msgs.srv import (GetPositionIK, GetMotionPlan, GetCartesianPath,
-                             GetPlanningScene)
+                             GetPlanningScene, ApplyPlanningScene)
 from moveit_msgs.msg import (PositionIKRequest, RobotState, MotionPlanRequest,
-                             Constraints, JointConstraint, DisplayRobotState)
+                             Constraints, JointConstraint, DisplayRobotState,
+                             PlanningScene)
 
 
 def _import_sibling(mod_name, file_name):
@@ -67,6 +68,7 @@ class PregraspDemo(Node):
         self.declare_parameter("target_index", 0)
         self.declare_parameter("auto_reachable", True)   # 현 위치서 도달가능 열매 자동선택
         self.declare_parameter("max_scan", 12)           # 자동선택 시 가까운 열매 몇개까지 시도
+        self.declare_parameter("scan_all", False)        # True=데모 대신 전체 열매 도달 리포트 후 종료
         self.declare_parameter("obstacles_file", "")
         self.declare_parameter("fruit_radius", 0.035)
         self.declare_parameter("standoff", 0.15)
@@ -125,6 +127,7 @@ class PregraspDemo(Node):
         self.plan = self.create_client(GetMotionPlan, "plan_kinematic_path")
         self.cart = self.create_client(GetCartesianPath, "compute_cartesian_path")
         self.scene = self.create_client(GetPlanningScene, "get_planning_scene")
+        self.apply_scene = self.create_client(ApplyPlanningScene, "apply_planning_scene")
         for cli, nm in ((self.ik, "compute_ik"), (self.plan, "plan_kinematic_path"),
                         (self.cart, "compute_cartesian_path"),
                         (self.scene, "get_planning_scene")):
@@ -352,6 +355,48 @@ class PregraspDemo(Node):
         names, wp = self._traj_to_waypts(res.solution.joint_trajectory)
         return names, wp, float(res.fraction)
 
+    # ── 5주차 2차: 목표 화방대(수확 대상 줄기) 충돌 허용 ──────────────────
+    @staticmethod
+    def _stalk_of(fruit_name):
+        """열매 이름 fruit_r{ri}_p{pi}_t{ti}_f{fi} → 그 화방대 rachis_r{ri}_p{pi}_t{ti}.
+        열매는 자기 화방대(줄기 곁가지)에 매달려 있어, 그 화방대는 접근 시 불가피하게
+        스친다 → '수확 대상 줄기'로 보고 접근 궤적에서만 충돌 제외. (주 줄기·다른 화방대는
+        장애물 유지 → 진짜 회피.) 파싱 실패 시 None."""
+        import re
+        m = re.match(r"fruit_(r\d+_p\d+_t\d+)_f\d+$", str(fruit_name))
+        return f"rachis_{m.group(1)}" if m else None
+
+    def _allow_collision(self, obj_name):
+        """planning scene ACM 에서 obj_name 을 '모든 링크와 충돌 무시'로 표시(default entry).
+        obstacle_publisher 는 CollisionObject 만 재발행하고 ACM 은 안 건드리므로 유지된다.
+        현재 ACM 을 받아 default_entry 에 추가 후 되돌려 적용(diff)."""
+        if obj_name is None or self.apply_scene is None:
+            return False
+        if not self.apply_scene.wait_for_service(timeout_sec=2.0):
+            self.get_logger().warn("apply_planning_scene 서비스 없음 → 화방대 충돌 허용 생략")
+            return False
+        req = GetPlanningScene.Request()
+        req.components.components = 2          # ALLOWED_COLLISION_MATRIX
+        res = self._call(self.scene, req, 2.0)
+        if res is None:
+            return False
+        acm = res.scene.allowed_collision_matrix
+        if obj_name in acm.default_entry_names:
+            i = list(acm.default_entry_names).index(obj_name)
+            acm.default_entry_values[i] = True
+        else:
+            acm.default_entry_names.append(obj_name)
+            acm.default_entry_values.append(True)
+        ps = PlanningScene()
+        ps.is_diff = True
+        ps.allowed_collision_matrix = acm
+        areq = ApplyPlanningScene.Request(scene=ps)
+        ares = self._call(self.apply_scene, areq, 2.0)
+        ok = ares is not None and ares.success
+        if ok:
+            self.get_logger().info(f"ACM: '{obj_name}' 충돌 허용(수확 대상 줄기) — 접근 궤적에서 제외.")
+        return ok
+
     # ══════════════════ 알고리즘: pre-grasp 자세 ══════════════════
     def _all_targets(self):
         """obstacles.yaml 의 kind:target 열매 전부 [(name, xyz, r), ...]."""
@@ -442,6 +487,39 @@ class PregraspDemo(Node):
         _, c, a, p_pre, p_grasp, quat, q, qg = best
         return dict(c=c, a=a, p_pre=p_pre, p_grasp=p_grasp, quat=quat, q=q, q_grasp=qg)
 
+    # ══════════════════ 5주차 2차: 접근 궤적 생성(줄기 회피) ══════════════════
+    def plan_approach(self, name, grasp_pose, q_pre, q_grasp_ik):
+        """pre-grasp → grasp 접근 궤적을 생성한다(줄기 회피). 반환 (names, wp, method, checked).
+
+        · 목표 화방대(수확 대상 줄기)는 열매가 거기 매달려 불가피 → 처음부터 ACM 충돌 제외.
+        · 주 줄기·다른 화방대·거터·레일은 장애물 유지(진짜 회피 대상).
+        우선순위: ① 직선 Cartesian(경로 개방 시) → ② OMPL 회피(장애물 막으면 경유점 자동
+        생성해 우회) → ③ 최후 무검증 보간(경고). ①②는 avoid_collisions 라 충돌free 보장."""
+        # 수확 대상 줄기(목표 화방대) 충돌 제외
+        self._allow_collision(self._stalk_of(name))
+        # ① 직선 Cartesian (열매까지 곧게 들어갈 수 있으면 최선)
+        cart = self.cartesian_to(grasp_pose)
+        if cart is not None and cart[2] >= 0.99:
+            n, wp, frac = cart
+            self.get_logger().info(
+                f"② 접근=직선 Cartesian {len(wp)}점(fraction={frac:.2f}) — 주 줄기 등 경로상 장애물 없음")
+            return n, wp, f"cartesian(frac={frac:.2f})", True
+        frac0 = cart[2] if cart is not None else 0.0
+        # ② OMPL 로 grasp 자세까지 충돌회피 계획(주 줄기·다른 화방대 우회, 경유점 자동생성)
+        self.get_logger().info(
+            f"② 직선 접근 부분차단(fraction={frac0:.2f}, 주 줄기/구조가 경로 막음) "
+            "→ OMPL 회피 궤적 생성(줄기 회피 경유점)")
+        plan = self.plan_to(q_grasp_ik)
+        if plan is not None:
+            n, wp = plan
+            self.get_logger().info(f"② 접근=OMPL 회피 {len(wp)}점 궤적(줄기 우회, 충돌free)")
+            return n, wp, f"ompl-avoid({len(wp)}pt)", True
+        # ③ 최후: 무검증 보간
+        self.get_logger().warn("② 접근 계획 실패(도달권/공간 부족) → 무검증 관절보간 폴백(충돌 가능)")
+        return (self.ARM,
+                [[q_pre[j] for j in self.ARM], [q_grasp_ik[j] for j in self.ARM]],
+                "interp(unchecked)", False)
+
     # ══════════════════ 데모 시퀀스 ══════════════════
     def _select_reachable(self):
         """현재 로봇 위치(어셈블러 base_placement)에서 도달 가능한 열매를 가까운 것부터
@@ -472,6 +550,37 @@ class PregraspDemo(Node):
             if sol is not None:
                 return name, p_fruit, r, sol
         return tg[0][0], tg[0][1], tg[0][2], None      # 전부 실패 → 가장 가까운 것으로 안내
+
+    def scan_all(self):
+        """전체 kind:target 열매를 실제 IK 파이프라인(solve_pregrasp = pre+grasp 둘 다
+        avoid_collisions IK)으로 훑어 **도달 가능 열매 목록**을 리포트한다. 데모는 재생하지 않음.
+        '토마토 모델을 팔 도달권에 맞추는' 작업의 근거 수치(닿는 실열매 집합)를 뽑는 용도."""
+        tg = self._all_targets()
+        if not tg:
+            self.get_logger().error("kind:target 열매가 없음 — obstacles.yaml 확인.")
+            return
+        bxy = self._base_xy()
+        l0 = np.array([bxy[0], bxy[1], 0.35]) if bxy is not None else np.array([0.0, 0.0, 0.35])
+        tg.sort(key=lambda t: float(np.linalg.norm(t[1] - l0)))
+        self.get_logger().info(f"=== 도달 스캔 시작: 전체 {len(tg)}개 열매 (base link0 xy={l0[:2]}) ===")
+        reach = []
+        for name, p, r in tg:
+            d = float(np.linalg.norm(p - l0))
+            sol = self.solve_pregrasp(p, r)
+            ok = sol is not None
+            if ok:
+                reach.append((name, p, d, sol))
+            self.get_logger().info(
+                f"  [{'O' if ok else 'X'}] {name:22s} ({p[0]:+.2f},{p[1]:+.2f},{p[2]:.2f}) "
+                f"link0거리 {d:.3f}m" + (f"  φ={math.degrees(sol['c'].phi):+.0f}°" if ok else ""))
+        self.get_logger().info(f"=== 도달 가능 {len(reach)}/{len(tg)}개 ===")
+        if reach:
+            zs = [p[2] for _, p, _, _ in reach]
+            ds = [d for _, _, d, _ in reach]
+            self.get_logger().info(
+                f"    도달 열매 z {min(zs):.2f}~{max(zs):.2f}m · link0거리 {min(ds):.2f}~{max(ds):.2f}m")
+            self.get_logger().info("    수확 대상 후보: " + ", ".join(n for n, _, _, _ in reach))
+        return reach
 
     def run(self):
         sel = self._select_reachable()
@@ -521,22 +630,14 @@ class PregraspDemo(Node):
         self._set({j: q_pre[j] for j in self.ARM})
         self._hold(float(self.get_parameter("pause").value))
 
-        # ── ② pre-grasp → grasp : standoff 거리만큼 직선 이동 (Cartesian) ──
-        #    grasp 는 선택 단계에서 이미 도달 검증됨 → Cartesian 이 곧게 들어간다.
-        cart = self.cartesian_to(grasp_pose)
-        q_grasp = q_grasp_ik
-        if cart is not None and cart[2] > 0.9:
-            names, wp, frac = cart
-            self.get_logger().info(f"② 직선 접근({d0*100:.0f}cm) Cartesian {len(wp)}점(fraction={frac:.2f}) 재생")
-            self._play_waypoints(names, wp, float(self.get_parameter("dur_approach_line").value))
-            q_grasp = {n: wp[-1][i] for i, n in enumerate(names)}
-        else:
-            frac = cart[2] if cart is not None else 0.0
-            self.get_logger().info(f"② 직선 접근({d0*100:.0f}cm) — Cartesian fraction={frac:.2f}, "
-                                   "검증된 grasp 해로 직선 보간")
-            names = self.ARM
-            wp = [[q_pre[j] for j in names], [q_grasp_ik[j] for j in names]]
-            self._play_waypoints(names, wp, float(self.get_parameter("dur_approach_line").value))
+        # ── ② pre-grasp → grasp : 접근 궤적 생성(줄기 회피) [5주차 2차] ──
+        #    수확 대상 줄기(목표 화방대)만 통과 허용, 주 줄기·구조는 회피. 직선 우선,
+        #    막히면 OMPL 이 경유점을 만들어 우회한다. grasp 끝점은 선택 단계서 이미 도달검증.
+        app_names, app_wp, method, checked = self.plan_approach(name, grasp_pose, q_pre, q_grasp_ik)
+        self.get_logger().info(f"② 접근 궤적 채택: {method}"
+                               + ("" if checked else "  ⚠충돌검증 안됨"))
+        self._play_waypoints(app_names, app_wp, float(self.get_parameter("dur_approach_line").value))
+        q_grasp = {n: app_wp[-1][i] for i, n in enumerate(app_names)} if app_wp else dict(q_grasp_ik)
         self._set({j: q_grasp.get(j, self.cur[j]) for j in self.ARM})
         self._hold(float(self.get_parameter("pause").value))
 
@@ -548,13 +649,12 @@ class PregraspDemo(Node):
                              float(self.get_parameter("dur_gripper").value))
 
         # ── ④ 후퇴 grasp→pre-grasp → home ──
-        self.get_logger().info("④ 후퇴 → home")
-        names = self.ARM
-        self._play_waypoints(names,
-                             [[q_grasp.get(j, q_pre[j]) for j in names],
-                              [q_pre[j] for j in names]],
+        #    접근 궤적을 그대로 역재생 → 들어온 충돌free 경로로 안전하게 빠진다
+        #    (OMPL 로 곡선접근한 경우 직선후퇴는 줄기를 스칠 수 있으므로).
+        self.get_logger().info(f"④ 후퇴(접근 궤적 역재생 {len(app_wp)}점) → home")
+        self._play_waypoints(app_names, list(reversed(app_wp)),
                              float(self.get_parameter("dur_retreat").value))
-        self._set({j: q_pre[j] for j in self.ARM})
+        self._set({j: q_pre.get(j, self.cur[j]) for j in self.ARM})
         # home 복귀 — 배경 충돌 피하도록 OMPL 계획(실패 시 관절보간). 그리퍼는 닫은 채('수확물' 이송)
         hplan = self.plan_to(q_home)
         if hplan is not None:
@@ -578,6 +678,11 @@ def main():
         rclpy.shutdown()
         return
     try:
+        if node.get_parameter("scan_all").value:
+            node.scan_all()
+            node.destroy_node()
+            rclpy.shutdown()
+            return
         while rclpy.ok():
             ok = node.run()
             if not node.get_parameter("loop").value:
