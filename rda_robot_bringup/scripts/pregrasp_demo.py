@@ -69,6 +69,7 @@ class PregraspDemo(Node):
         self.declare_parameter("auto_reachable", True)   # 현 위치서 도달가능 열매 자동선택
         self.declare_parameter("max_scan", 12)           # 자동선택 시 가까운 열매 몇개까지 시도
         self.declare_parameter("scan_all", False)        # True=데모 대신 전체 열매 도달 리포트 후 종료
+        self.declare_parameter("diag_straight", False)   # True=선택 열매의 접근각별 직선 fraction 진단 후 종료
         self.declare_parameter("obstacles_file", "")
         self.declare_parameter("fruit_radius", 0.035)
         self.declare_parameter("standoff", 0.15)
@@ -487,6 +488,112 @@ class PregraspDemo(Node):
         _, c, a, p_pre, p_grasp, quat, q, qg = best
         return dict(c=c, a=a, p_pre=p_pre, p_grasp=p_grasp, quat=quat, q=q, q_grasp=qg)
 
+    def _diag_straight(self):
+        """[진단] 선택된 도달 열매에 대해 넓은 접근각 격자를 훑어, 각 후보의 pre/grasp IK
+        통과 여부 + **직선 Cartesian fraction** 을 실측 보고한다. '집기 전 직선이동'이
+        어떤 각도에서 가능한지(=fraction≈1.0 후보 존재 여부) 판정용. 데모는 재생 안 함."""
+        sel = self._select_reachable()
+        if sel is None or sel[3] is None:
+            self.get_logger().error("진단: 도달 가능한 열매가 없음."); return
+        name, p_fruit, r, sol = sel
+        self._allow_collision(self._stalk_of(name))     # 수확 대상 줄기 제외(직선 판정 공정)
+        goff = float(self.get_parameter("grasp_offset").value)
+        d0 = float(self.get_parameter("standoff").value)
+        bxy = self._base_xy()
+        hv = (p_fruit[:2] - bxy) if bxy is not None else np.array([1.0, 0.0])
+        a0 = PG._unit(np.array([hv[0], hv[1], 0.0]))
+        phis = [0, -10, 10, -20, 20, -30, 30, -40, 40]
+        thetas = [0, -15, 15, -30, 30]
+        self.get_logger().info(f"=== 직선접근 진단: {name} @({p_fruit[0]:.2f},{p_fruit[1]:.2f},"
+                               f"{p_fruit[2]:.2f}) · standoff {d0*100:.0f}cm ===")
+        rows = []
+        for phd in phis:
+            for thd in thetas:
+                a = PG.approach_dir(a0, math.radians(phd), math.radians(thd))
+                quat = PG.mat_to_quat(PG.gaze_rotation(a, 0.0, self.approach_axis))
+                p_grasp = p_fruit - a * goff
+                p_pre = p_grasp - a * d0
+                q = self.solve_ik(p_pre, quat, avoid=True)
+                if q is None:
+                    continue
+                qg = self.solve_ik(p_grasp, quat, avoid=True)
+                if qg is None:
+                    continue
+                self._set(q)                              # 시작 = pre-grasp
+                gp_pose = Pose()
+                gp_pose.position.x, gp_pose.position.y, gp_pose.position.z = map(float, p_grasp)
+                (gp_pose.orientation.x, gp_pose.orientation.y,
+                 gp_pose.orientation.z, gp_pose.orientation.w) = map(float, quat)
+                cart = self.cartesian_to(gp_pose)
+                frac = cart[2] if cart is not None else 0.0
+                rows.append((frac, phd, thd))
+        rows.sort(reverse=True)
+        for frac, phd, thd in rows[:12]:
+            self.get_logger().info(f"  φ={phd:+3d}° θ={thd:+3d}° → 직선 fraction={frac:.2f}"
+                                   + ("  ★거의 직선" if frac >= 0.95 else
+                                      "  (부분)" if frac >= 0.5 else ""))
+        if rows:
+            best = rows[0]
+            self.get_logger().info(
+                f"=== 최고 직선 fraction={best[0]:.2f} @ φ={best[1]:+d}° θ={best[2]:+d}° "
+                + ("→ 직선 파지 가능(그 각도 채택하면 됨)" if best[0] >= 0.95
+                   else "→ 완전 직선은 불가(열매가 좁은 포켓). 부분직선+미세우회가 최선") + " ===")
+        else:
+            self.get_logger().info("=== IK 통과 후보 없음 ===")
+
+    def _best_straight_candidate(self, name, p_fruit, r, thr=0.99):
+        """'집기 전 직선이동'이 되는 접근각을 찾는다: 넓은 각도 격자에서 pre/grasp IK 통과 +
+        **직선 Cartesian fraction 최대**인 후보 선택. fraction≥thr 이면 그 sol(dict) 반환
+        → ②가 완전 직선 접근. 아니면 None(→기존 OMPL 우회 폴백). solve_pregrasp 는 엔드포인트
+        IK 만 보므로 직선 경로가 막히는 각도를 고를 수 있다 → 여기서 직선 경로까지 검증해 교정.
+        수확 대상 줄기(목표 화방대)는 ACM 제외 후 판정."""
+        from types import SimpleNamespace
+        self._allow_collision(self._stalk_of(name))
+        goff = float(self.get_parameter("grasp_offset").value)
+        d0 = float(self.get_parameter("standoff").value)
+        bxy = self._base_xy()
+        hv = (p_fruit[:2] - bxy) if bxy is not None else np.array([1.0, 0.0])
+        a0 = PG._unit(np.array([hv[0], hv[1], 0.0]))
+        phis = [0, -10, 10, -20, 20, -30, 30, -40, 40]
+        thetas = [0, 15, 30, -15, -30]        # +θ = 위에서 접근(매달린 열매에 유리)
+        best = None                            # (key, frac, sol)
+        for phd in phis:
+            for thd in thetas:
+                a = PG.approach_dir(a0, math.radians(phd), math.radians(thd))
+                quat = PG.mat_to_quat(PG.gaze_rotation(a, 0.0, self.approach_axis))
+                p_grasp = p_fruit - a * goff
+                p_pre = p_grasp - a * d0
+                q = self.solve_ik(p_pre, quat, avoid=True)
+                if q is None:
+                    continue
+                qg = self.solve_ik(p_grasp, quat, avoid=True)
+                if qg is None:
+                    continue
+                self._set(q)
+                gp_pose = Pose()
+                gp_pose.position.x, gp_pose.position.y, gp_pose.position.z = map(float, p_grasp)
+                (gp_pose.orientation.x, gp_pose.orientation.y,
+                 gp_pose.orientation.z, gp_pose.orientation.w) = map(float, quat)
+                cart = self.cartesian_to(gp_pose)
+                frac = cart[2] if cart is not None else 0.0
+                prior = abs(phd) + abs(thd)          # nominal(수평) 근접 — tie-break
+                key = (round(frac, 3), -prior)
+                if best is None or key > best[0]:
+                    c = SimpleNamespace(phi=math.radians(phd), theta=math.radians(thd),
+                                        psi=0.0, d=d0, prior=prior)
+                    best = (key, frac, dict(c=c, a=a, p_pre=p_pre, p_grasp=p_grasp,
+                                            quat=quat, q=q, q_grasp=qg))
+        if best is not None and best[1] >= thr:
+            c = best[2]["c"]
+            self.get_logger().info(
+                f"직선접근 각도 채택: φ={math.degrees(c.phi):+.0f}° θ={math.degrees(c.theta):+.0f}° "
+                f"→ 직선 Cartesian fraction={best[1]:.2f}(집기 전 곧게 접근)")
+            return best[2]
+        if best is not None:
+            self.get_logger().info(
+                f"완전 직선 각도 없음(최고 fraction={best[1]:.2f}) → OMPL 우회로 접근")
+        return None
+
     # ══════════════════ 5주차 2차: 접근 궤적 생성(줄기 회피) ══════════════════
     def plan_approach(self, name, grasp_pose, q_pre, q_grasp_ik, retries=1):
         """pre-grasp → grasp 접근 궤적을 생성한다(줄기 회피). 반환 (names, wp, method, checked).
@@ -592,10 +699,16 @@ class PregraspDemo(Node):
             self.get_logger().info("    수확 대상 후보: " + ", ".join(n for n, _, _, _ in reach))
         return reach
 
-    def _precompute(self, name, sol):
+    def _precompute(self, name, p_fruit, r, sol):
         """목표 열매에 대한 전체 데모 궤적(①home→pre ②접근 ④home복귀)을 한 번만 계획해 캐시.
         base·목표가 고정이라 매 루프 재계획할 필요가 없다 → 이후 반복은 재생만(버퍼링/튐 제거).
-        계획 중 self.cur 를 가상 시작상태로 바꿔가며 각 구간을 계획한 뒤 home 으로 복원."""
+        계획 중 self.cur 를 가상 시작상태로 바꿔가며 각 구간을 계획한 뒤 home 으로 복원.
+
+        ★ '집기 전 직선이동' 우선: 먼저 직선 Cartesian 이 뚫리는 접근각을 찾아(있으면) 그 자세로
+        교체 → ②가 완전 직선. 없으면 원래 sol(OMPL 우회)."""
+        straight = self._best_straight_candidate(name, p_fruit, r)
+        if straight is not None:
+            sol = straight
         q_pre, q_grasp_ik = sol["q"], sol["q_grasp"]
         p_grasp, quat = sol["p_grasp"], sol["quat"]
         gopen = float(self.get_parameter("gripper_open").value)
@@ -630,7 +743,7 @@ class PregraspDemo(Node):
         self.cur.update({f: gopen for f in self.FINGERS})
         return dict(pre=pre, app=(app_n, app_wp, method, checked),
                     q_pre=q_pre, q_grasp=q_grasp, q_home=q_home,
-                    gopen=gopen, close=close, home=home)
+                    gopen=gopen, close=close, home=home, sol=sol)
 
     def run(self):
         # 목표 선택·전체 궤적 계획은 최초 1회만(base·목표 고정) → 캐시. 이후 반복은 재생만.
@@ -657,13 +770,14 @@ class PregraspDemo(Node):
                 f"pre-grasp φ={deg(sol['c'].phi):+.0f}° θ={deg(sol['c'].theta):+.0f}° "
                 f"(standoff {d0*100:.0f}cm)")
             self.get_logger().info("전체 궤적 계획 중(최초 1회, 몇 초 소요)…")
-            self._plan_cache = self._precompute(name, sol)
+            self._plan_cache = self._precompute(name, p_fruit, r, sol)
             _, _, method, checked = self._plan_cache["app"]
             self.get_logger().info(
                 f"계획 완료 → 접근 방식={method}" + ("" if checked else " ⚠충돌검증 안됨")
                 + ". 이후 반복은 이 궤적을 매끈하게 재생만 함(재계획 없음).")
         c = self._plan_cache
-        self._publish_markers(p_fruit, r, sol["p_pre"], sol["a"], reachable=True)
+        c_sol = c.get("sol", sol)
+        self._publish_markers(p_fruit, r, c_sol["p_pre"], c_sol["a"], reachable=True)
 
         gopen, close = c["gopen"], c["close"]
         q_pre, q_grasp, q_home = c["q_pre"], c["q_grasp"], c["q_home"]
@@ -717,6 +831,11 @@ def main():
     try:
         if node.get_parameter("scan_all").value:
             node.scan_all()
+            node.destroy_node()
+            rclpy.shutdown()
+            return
+        if node.get_parameter("diag_straight").value:
+            node._diag_straight()
             node.destroy_node()
             rclpy.shutdown()
             return

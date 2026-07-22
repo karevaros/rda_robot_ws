@@ -118,6 +118,7 @@ def _setup(context, *args, **kwargs):
         "base_link": lc("base_link").perform(context),
         "ik_link": lc("ik_link").perform(context),
         "scan_all": lc("scan_all").perform(context).lower() in ("1", "true", "yes"),
+        "diag_straight": lc("diag_straight").perform(context).lower() in ("1", "true", "yes"),
     }
     use_yaml = lc("use_yaml_target").perform(context).lower() in ("1", "true", "yes")
     if not use_yaml:
@@ -127,7 +128,8 @@ def _setup(context, *args, **kwargs):
                 output="screen", parameters=[demo_params])
 
     nodes = [rsp, move_group, world_tf, obstacles, demo]
-    scanning = lc("scan_all").perform(context).lower() in ("1", "true", "yes")
+    scanning = lc("scan_all").perform(context).lower() in ("1", "true", "yes") \
+        or lc("diag_straight").perform(context).lower() in ("1", "true", "yes")
     if not scanning and lc("rviz").perform(context).lower() in ("1", "true", "yes"):
         rviz_cfg = os.path.join(cfg, "config", "pregrasp_demo.rviz")
         if not os.path.exists(rviz_cfg):
@@ -167,6 +169,8 @@ def generate_launch_description():
         DeclareLaunchArgument("loop", default_value="true"),
         DeclareLaunchArgument("scan_all", default_value="false",
                               description="true=데모 대신 전체 열매 도달 리포트 후 종료(RViz 자동 off)"),
+        DeclareLaunchArgument("diag_straight", default_value="false",
+                              description="true=선택 열매의 접근각별 직선 Cartesian fraction 진단 후 종료"),
         DeclareLaunchArgument("rviz", default_value="true"),
         OpaqueFunction(function=_setup),
     ])
