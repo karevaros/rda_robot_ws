@@ -9,7 +9,7 @@ ROS2 Humble 기반 **농업 로봇 통합 제어** 워크스페이스 (기계연
 |--------|------|
 | `rda_robot_description` | 모델 라이브러리(`config/models/`), 파트 편입물(RG2), mesh, 결합설정(`config/mounts.yaml`), 표시 launch/rviz |
 | `rda_robot_assembler` | **RDA 로봇 어셈블러** — 조립 GUI + **통합 URDF 컴포저**(`compose_urdf`) + `mesh2urdf` |
-| `rda_robot_bringup` | 자충돌 모니터, 장애물 발행(`obstacle_publisher.py`), 집기 데모(`pregrasp_demo.py`), Gazebo 월드 생성(`gen_gazebo_world.py`) |
+| `rda_robot_bringup` | 자충돌 모니터, 장애물 발행(`obstacle_publisher.py`), 집기 데모(`pregrasp_demo.py`), Gazebo 월드 생성(`gen_gazebo_world.py`), 열매 인지(`fruit_detector.py`) |
 | `rda_robot_moveit_config` | MoveIt2 설정(SRDF/ACM/OMPL/3D센서) + `moveit_demo`·`pregrasp_demo`·`perception_demo` launch |
 | `rda_robot_msgs` | (예정) 메시지 정의 |
 
@@ -112,6 +112,7 @@ ros2 launch rda_robot_moveit_config pregrasp_demo.launch.py
 
 | 인자 | 뜻 |
 |------|-----|
+| `target_source:=perception` | 목표를 **카메라 인지 결과**(`/detected_fruits`)에서 가져옴(기본 `yaml`) |
 | `scan_all:=true` | 데모 대신 **전체 열매 도달 리포트** 출력 후 종료 |
 | `diag_straight:=true` | 선택 열매의 접근각별 직선 Cartesian fraction 진단 |
 | `target:="[x,y,z]" use_yaml_target:=false` | 좌표를 직접 지정 |
@@ -140,6 +141,19 @@ D435i(eye-to-hand)와 D405(eye-in-hand)의 depth 클라우드를 MoveIt `PointCl
 | `/d435i/depth/points` · `/d405/depth/points` | 포인트클라우드(각 640×480) |
 | `/d435i/depth/image_raw` · `/d405/depth/image_raw` | 컬러 이미지(RGB, 클라우드와 1:1 정렬) |
 | `/monitored_planning_scene` | 옥토맵이 실린 planning scene |
+| `/detected_fruits` | **인지된 열매**(MarkerArray, world 좌표 구 — 중심·지름) |
+
+같이 뜨는 `fruit_detector` 가 클라우드의 빨간 영역을 3D 구로 만들어 `/detected_fruits`
+로 낸다(`detect:=false` 로 끌 수 있음). 한 화방의 열매는 중심간격 6cm·반경 3.5cm 로
+**서로 파고들어** 한 덩어리로 보이므로, 반경 사전지식 RANSAC + 반경고정 최소제곱으로
+개별 열매를 분리한다. 실측 정확도: 중심오차 중앙값 **1.6cm** · 반경오차 **+0.1cm** ·
+센서에 보이는 열매 기준 재현율 **92%**(25개 중 23개).
+
+그 결과를 집기 데모의 목표로 바로 쓸 수 있다:
+```bash
+ros2 launch rda_robot_moveit_config pregrasp_demo.launch.py target_source:=perception
+#   yaml 이름표(fruit_r0_p3_t0_f2) 대신 센싱 결과(det_13 …)를 목표로 삼는다.
+```
 
 확인:
 ```bash
