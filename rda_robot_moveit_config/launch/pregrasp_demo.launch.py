@@ -122,6 +122,12 @@ def _setup(context, *args, **kwargs):
         "target_source": lc("target_source").perform(context),
         "targets_topic": lc("targets_topic").perform(context),
         "diag_straight": lc("diag_straight").perform(context).lower() in ("1", "true", "yes"),
+        "bench": lc("bench").perform(context).lower() in ("1", "true", "yes"),
+        "bench_n": int(lc("bench_n").perform(context)),
+        "ik_timeout": float(lc("ik_timeout").perform(context)),
+        # 빈 리스트는 launch 가 타입을 못 정해 오류 → 빈 문자열 1개로 표현(노드에서 걸러냄)
+        "bench_targets": ([t.strip() for t in lc("bench_targets").perform(context).split(",")
+                           if t.strip()] or [""]),
     }
     use_yaml = lc("use_yaml_target").perform(context).lower() in ("1", "true", "yes")
     if not use_yaml:
@@ -131,8 +137,8 @@ def _setup(context, *args, **kwargs):
                 output="screen", parameters=[demo_params])
 
     nodes = [rsp, move_group, world_tf, obstacles, demo]
-    scanning = lc("scan_all").perform(context).lower() in ("1", "true", "yes") \
-        or lc("diag_straight").perform(context).lower() in ("1", "true", "yes")
+    scanning = any(lc(a).perform(context).lower() in ("1", "true", "yes")
+                   for a in ("scan_all", "diag_straight", "bench"))
     if not scanning and lc("rviz").perform(context).lower() in ("1", "true", "yes"):
         rviz_cfg = os.path.join(cfg, "config", "pregrasp_demo.rviz")
         if not os.path.exists(rviz_cfg):
@@ -174,6 +180,14 @@ def generate_launch_description():
                               description="true=데모 대신 전체 열매 도달 리포트 후 종료(RViz 자동 off)"),
         DeclareLaunchArgument("diag_straight", default_value="false",
                               description="true=선택 열매의 접근각별 직선 Cartesian fraction 진단 후 종료"),
+        DeclareLaunchArgument("bench", default_value="false",
+                              description="true=조건별 비교실험(제안/각도탐색없음/선택ACM없음/전작물무시) 후 종료"),
+        DeclareLaunchArgument("bench_n", default_value="8",
+                              description="비교실험 표본 열매 수(0=도달 가능 전부)"),
+        DeclareLaunchArgument("ik_timeout", default_value="0.1",
+                              description="IK 1회 허용 시간[s]. 비교실험처럼 장면 갱신이 잦을 때는 0.5 권장"),
+        DeclareLaunchArgument("bench_targets", default_value="",
+                              description="비교실험 표본을 이름으로 고정(쉼표 구분). 빈값=자동 선택"),
         DeclareLaunchArgument("target_source", default_value="yaml",
                               description="집기 목표 출처: yaml(obstacles.yaml kind:target) "
                                           "또는 perception(/detected_fruits, Stage 4)"),

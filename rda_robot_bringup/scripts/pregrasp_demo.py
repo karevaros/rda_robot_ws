@@ -34,10 +34,10 @@ from sensor_msgs.msg import JointState
 from visualization_msgs.msg import Marker, MarkerArray
 
 from moveit_msgs.srv import (GetPositionIK, GetMotionPlan, GetCartesianPath,
-                             GetPlanningScene, ApplyPlanningScene)
+                             GetPlanningScene, ApplyPlanningScene, GetStateValidity)
 from moveit_msgs.msg import (PositionIKRequest, RobotState, MotionPlanRequest,
                              Constraints, JointConstraint, DisplayRobotState,
-                             PlanningScene)
+                             PlanningScene, PlanningSceneComponents)
 
 
 def _import_sibling(mod_name, file_name):
@@ -70,6 +70,11 @@ class PregraspDemo(Node):
         self.declare_parameter("max_scan", 12)           # 자동선택 시 가까운 열매 몇개까지 시도
         self.declare_parameter("scan_all", False)        # True=데모 대신 전체 열매 도달 리포트 후 종료
         self.declare_parameter("diag_straight", False)   # True=선택 열매의 접근각별 직선 fraction 진단 후 종료
+        self.declare_parameter("bench", False)           # True=조건별 비교실험(ablation) 후 종료
+        self.declare_parameter("bench_n", 8)             # 비교실험 표본 열매 수(0=도달 가능 전부)
+        # 표본 고정용(재현성): 열매 이름을 직접 주면 그 열매들만 쓴다. IK 가 확률적이라
+        # 매 실행마다 '도달 가능' 집합이 조금씩 달라지므로, 조건 간 비교는 같은 표본에서 해야 한다.
+        self.declare_parameter("bench_targets", [""])
         self.declare_parameter("obstacles_file", "")
         # Stage 4: 목표 출처 — 'yaml'(설계값) 또는 'perception'(카메라 인지 결과)
         self.declare_parameter("target_source", "yaml")
@@ -140,6 +145,9 @@ class PregraspDemo(Node):
             cli.wait_for_service()
         self.get_logger().info("MoveIt 서비스 연결됨.")
 
+        self._sv = self.create_client(GetStateValidity, "check_state_validity")
+        if not self._sv.wait_for_service(timeout_sec=3.0):
+            self._sv = None
         self._op = _import_sibling("_obstacle_publisher", "obstacle_publisher.py")
         # ★ B: 팔/그리퍼 관절 이름 + A: 접근축을 SRDF/URDF 에서 자동 유도(모델 불문)
         self._setup_model()
@@ -381,7 +389,9 @@ class PregraspDemo(Node):
             self.get_logger().warn("apply_planning_scene 서비스 없음 → 화방대 충돌 허용 생략")
             return False
         req = GetPlanningScene.Request()
-        req.components.components = 2          # ALLOWED_COLLISION_MATRIX
+        # ⚠ 상수 주의: ACM = 128(ALLOWED_COLLISION_MATRIX). 2 는 ROBOT_STATE 라
+        #   빈 ACM 이 돌아오고, 그걸 diff 로 되돌리면 **아무 효과가 없다**(조용한 무효).
+        req.components.components = PlanningSceneComponents.ALLOWED_COLLISION_MATRIX
         res = self._call(self.scene, req, 2.0)
         if res is None:
             return False
@@ -744,6 +754,201 @@ class PregraspDemo(Node):
             self.get_logger().info("    수확 대상 후보: " + ", ".join(n for n, _, _, _ in reach))
         return reach
 
+    # ══════════════════ 비교 실험(ablation) ══════════════════
+    def _crop_objects(self):
+        """장면의 작물 객체 이름(줄기·화방대·열매) 목록. ACM 일괄 조작용."""
+        import yaml
+        path = self.get_parameter("obstacles_file").value or self._op.default_yaml()
+        data = yaml.safe_load(open(path)) or {}
+        try:
+            self._op.expand_crops(data)
+        except Exception:
+            pass
+        return [o["name"] for o in data.get("obstacles", [])
+                if str(o.get("name", "")).startswith(("stem_", "rachis_", "fruit_"))]
+
+    def _set_allow(self, names, value):
+        """ACM default entry 를 한 번의 diff 로 일괄 설정(True=충돌 무시)."""
+        if not names or self.apply_scene is None:
+            return False
+        req = GetPlanningScene.Request()
+        req.components.components = PlanningSceneComponents.ALLOWED_COLLISION_MATRIX
+        res = self._call(self.scene, req, 3.0)
+        if res is None:
+            return False
+        acm = res.scene.allowed_collision_matrix
+        idx = {n: i for i, n in enumerate(acm.default_entry_names)}
+        for n in names:
+            if n in idx:
+                acm.default_entry_values[idx[n]] = bool(value)
+            else:
+                acm.default_entry_names.append(n)
+                acm.default_entry_values.append(bool(value))
+        ps = PlanningScene()
+        ps.is_diff = True
+        ps.allowed_collision_matrix = acm
+        return self._call(self.apply_scene, ApplyPlanningScene.Request(scene=ps), 3.0) is not None
+
+    def _invalid_waypoints(self, names, wp, sample=1):
+        """궤적 웨이포인트를 **현재 ACM 기준**으로 검사해 충돌 상태 개수를 센다.
+        조건 C(전 작물 무시)로 만든 궤적이 실제로는 얼마나 위험한지 정량화하는 지표."""
+        if self._sv is None:
+            return None
+        bad = 0
+        for i, q in enumerate(wp):
+            if i % max(1, sample):
+                continue
+            req = GetStateValidity.Request()
+            req.group_name = self.group
+            js = JointState()
+            # ⚠ 그리퍼 관절까지 명시해야 계획 당시와 같은 형상으로 검사된다.
+            #   (팔 관절만 주면 손가락이 scene monitor 의 기본값으로 남아 다른 결과가 나온다.)
+            js.name = list(names) + list(self.FINGERS)
+            js.position = ([float(v) for v in q]
+                           + [float(self.cur.get(f, 0.0)) for f in self.FINGERS])
+            req.robot_state.joint_state = js
+            req.robot_state.is_diff = True
+            res = self._call(self._sv, req, 3.0)
+            if res is not None and not res.valid:
+                bad += 1
+        return bad
+
+    BENCH_CONDS = ("proposed", "no_search", "no_acm", "no_search_no_acm", "ignore_all")
+
+    def _bench_one(self, name, p_fruit, r, cond):
+        """한 열매·한 조건을 평가해 dict 리포트. cond ∈ BENCH_CONDS"""
+        crops = self._bench_crops
+        stalk = self._stalk_of(name)
+        home = {j: 0.0 for j in self.ARM}
+        self._set(home)
+        # ── 조건별 ACM 설정 ──
+        self._set_allow(crops, False)                       # 기준: 전 작물 장애물
+        if cond in ("proposed", "no_search") and stalk:
+            self._set_allow([stalk], True)                  # 수확 대상 줄기만 해제
+        elif cond == "ignore_all":
+            self._set_allow(crops, True)                    # 전 작물 무시
+        # cond ∈ {no_acm, no_search_no_acm} → 아무것도 해제하지 않음
+
+        t0 = time.time()
+        sol = self.solve_pregrasp(p_fruit, r)
+        if sol is None:
+            return dict(name=name, cond=cond, ik=False, frac=None, method="IK 실패",
+                        n=0, bad=None, t=time.time() - t0)
+        if cond not in ("no_search", "no_search_no_acm"):
+            st = self._best_straight_candidate(name, p_fruit, r)
+            if st is not None:
+                sol = st
+        # 접근 구간 평가
+        self._set(sol["q"])
+        gp = Pose()
+        gp.position.x, gp.position.y, gp.position.z = map(float, sol["p_grasp"])
+        (gp.orientation.x, gp.orientation.y,
+         gp.orientation.z, gp.orientation.w) = map(float, sol["quat"])
+        cart = self.cartesian_to(gp)
+        frac = cart[2] if cart is not None else 0.0
+        names_j, wp, method, checked = self.plan_approach(
+            name, gp, sol["q"], sol["q_grasp"], retries=6)
+        t = time.time() - t0
+        # ── 안전성 재검증: 항상 '전 작물 장애물 + 수확 대상 줄기만 해제' 기준으로 ──
+        self._set_allow(crops, False)
+        if stalk:
+            self._set_allow([stalk], True)
+        bad = self._invalid_waypoints(names_j, wp)
+        self._set(home)
+        return dict(name=name, cond=cond, ik=True, frac=frac, method=method,
+                    n=len(wp), bad=bad, t=t)
+
+    def bench_compare(self):
+        """§비교실험: 도달 가능 열매마다 4개 조건을 돌려 표로 출력한다.
+
+          proposed   = 제안(수확 대상 줄기만 ACM 해제 + 직선 접근각 탐색)
+          no_search  = 직선 접근각 탐색 제거(명목 후보 격자만)
+          no_acm     = 선택적 해제 없음(전 작물 장애물)
+          ignore_all = 전 작물 충돌 무시(순진한 완화)
+        """
+        self._bench_crops = self._crop_objects()
+        self.get_logger().info(f"작물 객체 {len(self._bench_crops)}개를 ACM 조작 대상으로 잡음")
+        # ★ 장면이 **전부** 로드될 때까지 기다린다. _wait_scene 은 최소 개수만 보므로,
+        #   부분 로드 상태에서 재면 장애물이 덜 실린 채로 IK 가 통과해 결과가 실행마다 달라진다
+        #   (실제로 같은 표본이 8/8 ↔ 3/8 로 흔들렸다). 개수가 안정될 때까지 대기.
+        prev, stable = -1, 0
+        for _ in range(60):
+            req = GetPlanningScene.Request()
+            req.components.components = PlanningSceneComponents.WORLD_OBJECT_NAMES
+            res = self._call(self.scene, req, 3.0)
+            n = len(res.scene.world.collision_objects) if res else 0
+            stable = stable + 1 if n == prev and n > 0 else 0
+            prev = n
+            if stable >= 3:
+                break
+            time.sleep(1.0)
+        self.get_logger().info(f"장면 안정화: collision object {prev}개")
+        tg = self._all_targets()
+        bxy = self._base_xy()
+        l0 = np.array([bxy[0], bxy[1], 0.35]) if bxy is not None else np.array([0.0, 0.0, 0.35])
+        tg.sort(key=lambda t: float(np.linalg.norm(t[1] - l0)))
+        nmax = int(self.get_parameter("bench_n").value)
+        fixed = [t for t in (self.get_parameter("bench_targets").value or []) if t]
+        if fixed:
+            byname = {nm: (nm, p, r) for nm, p, r in tg}
+            picked = [byname[n] for n in fixed if n in byname]
+            self.get_logger().info(f"표본 고정: {len(picked)}개 (bench_targets)")
+            missing = [n for n in fixed if n not in byname]
+            if missing:
+                self.get_logger().warn(f"표본에 없는 이름: {missing}")
+            return self._bench_run(picked)
+        # 제안 조건에서 도달 가능한 열매만 표본으로
+        picked = []
+        for nm, p, r in tg:
+            self._set_allow(self._bench_crops, False)
+            st = self._stalk_of(nm)
+            if st:
+                self._set_allow([st], True)
+            self._set({j: 0.0 for j in self.ARM})
+            if self.solve_pregrasp(p, r) is not None:
+                picked.append((nm, p, r))
+            if nmax and len(picked) >= nmax:
+                break
+        return self._bench_run(picked)
+
+    def _bench_run(self, picked):
+        self.get_logger().info(f"=== 비교실험 표본 {len(picked)}개 열매 ===")
+        rows = []
+        for nm, p, r in picked:
+            for cond in self.BENCH_CONDS:
+                res = self._bench_one(nm, p, r, cond)
+                rows.append(res)
+                self.get_logger().info(
+                    f"  {nm:22s} {cond:10s} IK={'O' if res['ik'] else 'X'} "
+                    f"frac={('%.2f' % res['frac']) if res['frac'] is not None else '  - '} "
+                    f"method={res['method']:24s} pts={res['n']:3d} "
+                    f"충돌wp={res['bad'] if res['bad'] is not None else '-'} "
+                    f"t={res['t']:.1f}s")
+        # ── 요약 ──
+        self.get_logger().info("=== 비교실험 요약 ===")
+        for cond in self.BENCH_CONDS:
+            rs = [x for x in rows if x["cond"] == cond]
+            if not rs:
+                continue
+            ik = sum(1 for x in rs if x["ik"])
+            fr = [x["frac"] for x in rs if x["frac"] is not None]
+            straight = sum(1 for x in rs if x["method"].startswith("cartesian("))
+            unver = sum(1 for x in rs if "interp" in x["method"])
+            bad = [x["bad"] for x in rs if x["bad"] is not None]
+            badsum = sum(bad) if bad else 0
+            badcnt = sum(1 for b in bad if b > 0)
+            self.get_logger().info(
+                f"  {cond:10s} IK성공 {ik}/{len(rs)} · 직선fraction 평균 "
+                f"{(sum(fr)/len(fr) if fr else 0):.2f} · 완전직선 {straight}/{len(rs)} · "
+                f"무검증보간 {unver}/{len(rs)} · 충돌궤적 {badcnt}/{len(rs)}(총 {badsum}wp) · "
+                f"평균 {sum(x['t'] for x in rs)/len(rs):.1f}s")
+        import json
+        out = "/tmp/bench_approach.json"
+        with open(out, "w") as f:
+            json.dump(rows, f, ensure_ascii=False, indent=1)
+        self.get_logger().info(f"원자료 저장: {out}")
+        return rows
+
     def _precompute(self, name, p_fruit, r, sol):
         """목표 열매에 대한 전체 데모 궤적(①home→pre ②접근 ④home복귀)을 한 번만 계획해 캐시.
         base·목표가 고정이라 매 루프 재계획할 필요가 없다 → 이후 반복은 재생만(버퍼링/튐 제거).
@@ -876,6 +1081,11 @@ def main():
     try:
         if node.get_parameter("scan_all").value:
             node.scan_all()
+            node.destroy_node()
+            rclpy.shutdown()
+            return
+        if node.get_parameter("bench").value:
+            node.bench_compare()
             node.destroy_node()
             rclpy.shutdown()
             return
