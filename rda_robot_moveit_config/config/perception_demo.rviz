@@ -1,0 +1,98 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+    Property Tree Widget:
+      Expanded:
+        - /RobotModel1
+        - /DepthCloud1
+        - /PlanningScene1
+      Splitter Ratio: 0.5
+  - Class: rviz_common/Views
+    Name: Views
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Name: Grid
+      Cell Size: 1
+      Plane Cell Count: 20
+      Color: 160; 160; 164
+      Enabled: true
+    - Class: rviz_default_plugins/RobotModel
+      Name: RobotModel
+      Description Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        Reliability Policy: Reliable
+        Value: /robot_description
+      Enabled: true
+      Visual Enabled: true
+      Collision Enabled: false
+      Alpha: 1
+    # Gazebo D435i 원본 포인트클라우드(센서가 보는 것 그대로).
+    - Class: rviz_default_plugins/PointCloud2
+      Name: DepthCloud
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+        Value: /d435i/depth/points
+      Style: Points
+      Size (Pixels): 2
+      Color Transformer: AxisColor
+      Axis: Z
+      Decay Time: 0
+      Enabled: true
+    # ★ 센싱 결과가 planning scene 의 옥토맵(충돌객체)으로 들어온 모습.
+    #   Scene Geometry 의 Voxel Rendering=Occupied Voxels 로 복셀이 보인다.
+    - Class: moveit_rviz_plugin/PlanningScene
+      Name: PlanningScene
+      Enabled: true
+      Move Group Namespace: ""
+      Planning Scene Topic: /monitored_planning_scene
+      Robot Description: robot_description
+      Scene Geometry:
+        Scene Alpha: 0.9
+        Scene Color: 50; 230; 50
+        Scene Display Time: 0.2
+        Show Scene Geometry: true
+        Voxel Coloring: Z-Axis
+        Voxel Rendering: Occupied Voxels
+      Scene Robot:
+        Show Robot Collision: false
+        Show Robot Visual: false
+        Robot Alpha: 0.5
+    - Class: rviz_default_plugins/TF
+      Name: TF
+      Enabled: false
+      Marker Scale: 0.3
+      Show Names: true
+  Global Options:
+    Background Color: 48; 48; 48
+    Fixed Frame: world
+    Frame Rate: 30
+  Tools:
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+    - Class: rviz_default_plugins/FocusCamera
+    - Class: rviz_default_plugins/Measure
+  Value: true
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Name: Current View
+      Distance: 3.5
+      Focal Point:
+        X: 0.4
+        Y: -0.4
+        Z: 0.9
+      Pitch: 0.35
+      Yaw: 2.2
+      Target Frame: world
+Window Geometry:
+  Displays:
+    collapsed: false
+  Height: 840
+  Width: 1200
+  QMainWindow State: ""

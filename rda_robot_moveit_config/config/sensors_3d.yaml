@@ -1,0 +1,28 @@
+# 3D 센서 → MoveIt 옥토맵 (5주차 perception 통합 · Stage 3)
+#
+# Gazebo D435i(eye-to-hand) 가 발행하는 depth 포인트클라우드를 move_group 의
+# OccupancyMapMonitor 가 받아 **octomap = planning scene 충돌객체**로 바꾼다.
+# → 카메라가 본 것만으로 장애물이 생기므로, obstacles.yaml(명명 객체) 없이도
+#   충돌 회피가 성립한다(실환경 이행의 핵심 단계).
+#
+# 파라미터 이름 규칙: move_group 이 `sensors`(이름 목록)를 읽고, 각 이름을
+# 접두사로 `<이름>.sensor_plugin` … 을 읽는다(MoveIt2 humble).
+#
+# ⚠ 로봇 자신은 자동으로 옥토맵에서 제거된다(self-filter, URDF collision + padding).
+#   padding 이 너무 작으면 로봇 표면이 장애물로 남아 계획이 즉시 실패한다.
+sensors:
+  - d435i_cloud
+
+d435i_cloud:
+  sensor_plugin: occupancy_map_monitor/PointCloudOctomapUpdater
+  point_cloud_topic: /d435i/depth/points
+  # D435i 유효거리(실기 0.3~3m) + 온실 작물행이 카메라 앞 0.4~1.5m 에 있음.
+  max_range: 3.0
+  point_subsample: 1
+  # 로봇 자기 몸 제거 여유(m). 2cm 면 베이스(Scout) 범퍼 부근에 자기 몸 복셀이 남는다
+  # — collision mesh 가 visual 보다 성겨서 self-filter 가 덜 먹기 때문. 5cm 로 키우면
+  # 사라진다(작물행은 카메라 앞 0.4m 이상이라 지워지지 않음).
+  padding_offset: 0.05
+  padding_scale: 1.0
+  max_update_rate: 1.0
+  filtered_cloud_topic: /d435i/filtered_cloud
