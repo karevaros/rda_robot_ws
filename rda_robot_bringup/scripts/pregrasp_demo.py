@@ -71,6 +71,10 @@ class PregraspDemo(Node):
         self.declare_parameter("scan_all", False)        # True=데모 대신 전체 열매 도달 리포트 후 종료
         self.declare_parameter("diag_straight", False)   # True=선택 열매의 접근각별 직선 fraction 진단 후 종료
         self.declare_parameter("obstacles_file", "")
+        # Stage 4: 목표 출처 — 'yaml'(설계값) 또는 'perception'(카메라 인지 결과)
+        self.declare_parameter("target_source", "yaml")
+        self.declare_parameter("targets_topic", "detected_fruits")
+        self.declare_parameter("targets_wait", 20.0)   # 첫 인지 결과 대기 한도[s]
         self.declare_parameter("fruit_radius", 0.035)
         self.declare_parameter("standoff", 0.15)
         self.declare_parameter("grasp_offset", 0.10)     # 파지 시 열매 중심 앞 TCP 정지거리
@@ -399,8 +403,49 @@ class PregraspDemo(Node):
         return ok
 
     # ══════════════════ 알고리즘: pre-grasp 자세 ══════════════════
+    def _perception_targets(self):
+        """인지 노드(/detected_fruits)가 낸 열매 → [(name, xyz, r), ...].
+
+        Stage 4. yaml 의 이름표 대신 **카메라가 본 것**을 타깃으로 쓴다. 최초 호출에서만
+        구독을 만들고 첫 메시지를 기다린다(latched 라 늦게 붙어도 즉시 받는다)."""
+        topic = self.get_parameter("targets_topic").value
+        if not hasattr(self, "_det"):
+            self._det = []
+            latched = QoSProfile(history=QoSHistoryPolicy.KEEP_LAST, depth=1,
+                                 reliability=QoSReliabilityPolicy.RELIABLE,
+                                 durability=QoSDurabilityPolicy.TRANSIENT_LOCAL)
+
+            def _cb(msg):
+                self._det = [(f"det_{m.id}",
+                              np.array([m.pose.position.x, m.pose.position.y,
+                                        m.pose.position.z]),
+                              float(m.scale.x) / 2.0)
+                             for m in msg.markers if m.action == Marker.ADD]
+            # ⚠ 이 데모 노드에 직접 구독을 달고 spin_once 로 돌리면 메시지가 안 들어온다
+            #   (서비스 클라이언트가 많은 노드라 대기셋 처리에서 밀린다 — 실측). 인지 결과는
+            #   **전용 보조 노드**로 받는다.
+            self._det_node = rclpy.create_node("pregrasp_targets_sub")
+            self._det_node.create_subscription(MarkerArray, topic, _cb, latched)
+            self.get_logger().info(f"인지 타깃 구독: {topic} (첫 관측 대기…)")
+            t0 = time.time()
+            wait = float(self.get_parameter("targets_wait").value)
+            while not self._det and time.time() - t0 < wait:
+                rclpy.spin_once(self._det_node, timeout_sec=0.2)
+            self.get_logger().info(f"인지 열매 {len(self._det)}개 수신"
+                                   f" ({time.time() - t0:.1f}s)")
+        else:
+            rclpy.spin_once(self._det_node, timeout_sec=0.0)   # 최신 관측 반영
+        return list(self._det)
+
     def _all_targets(self):
-        """obstacles.yaml 의 kind:target 열매 전부 [(name, xyz, r), ...]."""
+        """집기 목표 열매 전부 [(name, xyz, r), ...].
+
+        `target_source` 로 출처를 고른다:
+          · yaml       — obstacles.yaml 의 kind:target (설계값, 이름표 있음)
+          · perception — 카메라 인지 결과 /detected_fruits (Stage 4, 이름표 없음)
+        """
+        if str(self.get_parameter("target_source").value).lower().startswith("percep"):
+            return self._perception_targets()
         r0 = float(self.get_parameter("fruit_radius").value)
         path = self.get_parameter("obstacles_file").value or self._op.default_yaml()
         import yaml

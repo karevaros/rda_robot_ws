@@ -130,6 +130,15 @@ def _setup(context, *args, **kwargs):
                           parameters=[{"obstacles_file": os.path.join(
                               DESC_SRC, "config", "obstacles.yaml")}, sim]))
 
+    # Stage 4: 열매 인지 — 클라우드의 빨강 영역 → 3D 구(중심·반경) → /detected_fruits.
+    if lc("detect").perform(context).lower() in ("1", "true", "yes"):
+        nodes.append(Node(package="rda_robot_bringup", executable="fruit_detector.py",
+                          output="screen",
+                          parameters=[{"world_frame": "world",
+                                       "cloud_topics": [s.strip() for s in
+                                                        lc("cloud_topics").perform(context).split(",")
+                                                        if s.strip()]}, sim]))
+
     if lc("rviz").perform(context).lower() in ("1", "true", "yes"):
         rviz_cfg = os.path.join(cfg, "config", "perception_demo.rviz")
         if not os.path.exists(rviz_cfg):
@@ -154,6 +163,11 @@ def generate_launch_description():
                               description="옥토맵을 유지할 고정 프레임"),
         DeclareLaunchArgument("octomap_resolution", default_value="0.03",
                               description="복셀 한 변[m]. 줄기(지름 2~3cm)를 보려면 0.02~0.03."),
+        DeclareLaunchArgument("detect", default_value="true",
+                              description="열매 인지 노드(fruit_detector) 실행 — /detected_fruits 발행"),
+        DeclareLaunchArgument("cloud_topics",
+                              default_value="/d435i/depth/points,/d405/depth/points",
+                              description="인지에 쓸 포인트클라우드 토픽(쉼표 구분)"),
         DeclareLaunchArgument("rviz", default_value="true"),
         OpaqueFunction(function=_setup),
     ])

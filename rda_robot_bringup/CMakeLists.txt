@@ -18,6 +18,7 @@ install(PROGRAMS
   scripts/pregrasp_demo.py
   scripts/robot_introspect.py
   scripts/gen_gazebo_world.py
+  scripts/fruit_detector.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

@@ -118,6 +118,9 @@ def _setup(context, *args, **kwargs):
         "base_link": lc("base_link").perform(context),
         "ik_link": lc("ik_link").perform(context),
         "scan_all": lc("scan_all").perform(context).lower() in ("1", "true", "yes"),
+        # Stage 4: 목표 출처 — yaml(설계값) / perception(카메라 인지 /detected_fruits)
+        "target_source": lc("target_source").perform(context),
+        "targets_topic": lc("targets_topic").perform(context),
         "diag_straight": lc("diag_straight").perform(context).lower() in ("1", "true", "yes"),
     }
     use_yaml = lc("use_yaml_target").perform(context).lower() in ("1", "true", "yes")
@@ -171,6 +174,11 @@ def generate_launch_description():
                               description="true=데모 대신 전체 열매 도달 리포트 후 종료(RViz 자동 off)"),
         DeclareLaunchArgument("diag_straight", default_value="false",
                               description="true=선택 열매의 접근각별 직선 Cartesian fraction 진단 후 종료"),
+        DeclareLaunchArgument("target_source", default_value="yaml",
+                              description="집기 목표 출처: yaml(obstacles.yaml kind:target) "
+                                          "또는 perception(/detected_fruits, Stage 4)"),
+        DeclareLaunchArgument("targets_topic", default_value="detected_fruits",
+                              description="target_source=perception 일 때 구독할 토픽"),
         DeclareLaunchArgument("rviz", default_value="true"),
         OpaqueFunction(function=_setup),
     ])
