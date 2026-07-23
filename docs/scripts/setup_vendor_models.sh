@@ -18,6 +18,11 @@ clone() {  # clone <url> <branch> <dir>
 }
 
 echo "== clone =="
+# ── 기본 로봇(기본 조합에 반드시 필요) ────────────────────────────────────
+#    이 3개가 없으면 통합 URDF 조립 자체가 실패한다(기본 = Scout 2.0 + RB5-850e + D405/D435i).
+clone https://github.com/agilexrobotics/scout_ros2.git humble scout_ros2                                    # Apache-2.0 (scout_description)
+clone https://github.com/RainbowRobotics/rbpodo_ros2.git main rbpodo_ros2                                   # Apache-2.0 (rbpodo_description)
+clone https://github.com/IntelRealSense/realsense-ros.git ros2-master realsense-ros                         # Apache-2.0 (realsense2_description)
 # 팔
 clone https://github.com/UniversalRobots/Universal_Robots_ROS2_Description.git humble ur_description_ros2   # BSD-3
 clone https://github.com/xArm-Developer/xarm_ros2.git humble xarm_ros2                                      # BSD-3
@@ -69,8 +74,13 @@ fi
 echo "== build (description 패키지만) =="
 cd "$WS" || exit 1
 # shellcheck disable=SC1091
+# ⚠ set -u 상태로 ROS setup.bash 를 소싱하면 'AMENT_TRACE_SETUP_FILES: unbound variable'
+#   로 스크립트가 여기서 죽는다(= clone 만 되고 빌드가 안 돼 모델 로드가 실패). 잠시 끈다.
+set +u
 source /opt/ros/humble/setup.bash
+set -u
 colcon build --symlink-install --packages-select \
+  scout_description rbpodo_description realsense2_description \
   ur_description xarm_description onrobot_rg_description robotiq_description \
   franka_description allegro_hand_description \
   robotnik_description robotnik_sensors \

@@ -59,9 +59,11 @@ sudo apt install -y \
 
 ```bash
 mkdir -p ~/robot_ws
-git clone https://github.com/karevaros/rda_robot_ws.git ~/robot_ws/src
-# SSH 를 쓴다면: git clone git@github.com:karevaros/rda_robot_ws.git ~/robot_ws/src
+git clone git@github.com:karevaros/rda_robot_ws.git ~/robot_ws/src
+# HTTPS 를 쓴다면: git clone https://github.com/karevaros/rda_robot_ws.git ~/robot_ws/src
 ```
+
+> 이 저장소는 **비공개**다. 접근 권한이 있는 계정(SSH 키 등록 또는 HTTPS 인증)으로 받아야 한다.
 
 ### 2-3. 벤더 모델 받기 (필수)
 
@@ -74,6 +76,26 @@ source /opt/ros/humble/setup.bash
 cd ~/robot_ws
 bash src/docs/scripts/setup_vendor_models.sh     # clone + 벤더 description 패키지 빌드 (수 분)
 ```
+
+이 스크립트가 받아오는 것(모두 **공개 저장소**이고 각 원저작자의 라이선스를 따른다):
+
+| 받는 저장소 | 브랜치 | 라이선스 | 우리가 쓰는 것 |
+|-------------|--------|----------|----------------|
+| [agilexrobotics/scout_ros2](https://github.com/agilexrobotics/scout_ros2) | `humble` | Apache-2.0 | `scout_description` — **기본 모바일 베이스** |
+| [RainbowRobotics/rbpodo_ros2](https://github.com/RainbowRobotics/rbpodo_ros2) | `main` | Apache-2.0 | `rbpodo_description` — **기본 로봇팔(RB5-850e)** |
+| [IntelRealSense/realsense-ros](https://github.com/IntelRealSense/realsense-ros) | `ros2-master` | Apache-2.0 | `realsense2_description` — **기본 센서(D405/D435i)** |
+| [UniversalRobots/Universal_Robots_ROS2_Description](https://github.com/UniversalRobots/Universal_Robots_ROS2_Description) | `humble` | BSD-3 | UR5e·UR10e |
+| [xArm-Developer/xarm_ros2](https://github.com/xArm-Developer/xarm_ros2) | `humble` | BSD-3 | xArm6·UF850 |
+| [ABC-iRobotics/onrobot-ros2](https://github.com/ABC-iRobotics/onrobot-ros2) | `main` | MIT | OnRobot RG6 |
+| [PickNikRobotics/ros2_robotiq_gripper](https://github.com/PickNikRobotics/ros2_robotiq_gripper) | `humble` | BSD-3 | Robotiq 2F-85/140 |
+| [frankaemika/franka_description](https://github.com/frankaemika/franka_description) | `humble` | Apache-2.0 | Franka Hand |
+| [Wonikrobotics-git/allegro_hand_ros2_v5](https://github.com/Wonikrobotics-git/allegro_hand_ros2_v5) | `master-4finger` | BSD-2 | Allegro Hand V5 |
+| [clearpathrobotics/clearpath_common](https://github.com/clearpathrobotics/clearpath_common) | `humble` | BSD-3 | Husky·Jackal·Ridgeback·Dingo |
+| [RobotnikAutomation/robotnik_description](https://github.com/RobotnikAutomation/robotnik_description) · [robotnik_sensors](https://github.com/RobotnikAutomation/robotnik_sensors) | `humble-devel` | BSD-3 | RB-Theron·RB-Kairos·RB-Vogui·RB-Summit |
+| [turtlebot/turtlebot4](https://github.com/turtlebot/turtlebot4) · [iRobotEducation/create3_sim](https://github.com/iRobotEducation/create3_sim) | `humble` | Apache-2.0 / BSD-3 | TurtleBot4 |
+
+받은 것은 `src/vendor/` 에 그대로 두고(원본 수정 없음), 우리 저장소에는 포함하지 않는다
+(`.gitignore`). 즉 **벤더 코드는 각자의 저장소에서 각자의 라이선스로 받아 쓰는 구조**다.
 
 ### 2-4. 조립기용 파이썬 패키지
 
@@ -349,12 +371,15 @@ RViz/MoveIt 의 planning scene(`obstacle_publisher.py`)과 Gazebo 월드(`gen_ga
 
 **기본 파트 모델**
 
-| 파트 | 모델 | 출처 | 라이선스 |
-|------|------|------|----------|
-| 모바일 | Agilex Scout 2.0 | `agilexrobotics/scout_ros2` | Apache-2.0 |
-| 로봇팔 | Rainbow RB5-850e | `RainbowRobotics/rbpodo_ros2` | Apache-2.0 |
-| 엔드이펙터 | OnRobot RG2 | `AndrejOrsula/ur5_rg2_ign` 에서 추출·편입 | BSD |
-| 센서 | RealSense D405(손끝) + D435i(전역) | `IntelRealSense/realsense-ros` | Apache-2.0 |
+| 파트 | 모델 | 출처 | 라이선스 | 어디에 있나 |
+|------|------|------|----------|-------------|
+| 모바일 | Agilex Scout 2.0 | [agilexrobotics/scout_ros2](https://github.com/agilexrobotics/scout_ros2) | Apache-2.0 | `src/vendor/` (2-3 에서 clone) |
+| 로봇팔 | Rainbow RB5-850e | [RainbowRobotics/rbpodo_ros2](https://github.com/RainbowRobotics/rbpodo_ros2) | Apache-2.0 | `src/vendor/` (2-3 에서 clone) |
+| 엔드이펙터 | OnRobot RG2 | [AndrejOrsula/ur5_rg2_ign](https://github.com/AndrejOrsula/ur5_rg2_ign) 에서 추출·편입 | BSD | **이 저장소 안**(`rda_robot_description`) |
+| 센서 | RealSense D405(손끝) + D435i(전역) | [IntelRealSense/realsense-ros](https://github.com/IntelRealSense/realsense-ros) | Apache-2.0 | `src/vendor/` (2-3 에서 clone) |
+
+나머지 22종의 출처·라이선스는 [2-3 표](#2-3-벤더-모델-받기-필수)와
+[`config/models/README.md`](rda_robot_description/config/models/README.md) 에 있다.
 
 파트 규약 비교 → [`docs/파트규약-비교.md`](docs/파트규약-비교.md) ·
 기구학 분석 → [`docs/기구학-분석.md`](docs/기구학-분석.md)
@@ -470,7 +495,39 @@ cd ~/robot_ws/src && git add -A && git commit -m "메시지" && git push origin 
 
 ---
 
-## 8. 진행 현황
+## 8. 라이선스와 출처
+
+이 저장소에 담긴 것과 **밖에서 받아 오는 것**을 구분해 둔다.
+
+**우리가 쓴 것** — `rda_robot_*` 5개 패키지의 코드·설정·문서. 사내/파견 과제 산출물이며
+저장소는 비공개다(Apache-2.0 로 선언한 패키지가 있으나 전체 배포 정책은 미정).
+
+**외부에서 받아 오는 로봇 모델** — `src/vendor/` 로 clone 해서 쓰고 저장소에는 넣지 않는다.
+저장소 목록·브랜치·라이선스는 위 [2-3](#2-3-벤더-모델-받기-필수) 표에 있다. 원본은 수정하지
+않으며, 각 저장소의 라이선스(Apache-2.0 / BSD-2·3 / MIT)를 그대로 따른다.
+
+**저장소에 포함된 외부 산출물(추출·편입)**
+
+| 대상 | 원출처 | 라이선스 | 처리 |
+|------|--------|----------|------|
+| OnRobot RG2 URDF·mesh | [AndrejOrsula/ur5_rg2_ign](https://github.com/AndrejOrsula/ur5_rg2_ign) | BSD | `ur5_rg2.urdf` 에서 RG2 부분만 추출해 `rda_robot_description` 에 편입(mimic 조인트 버그 수정). 출처는 `urdf/parts/endeffector/onrobot_rg2_macro.xacro` 머리말에 명시 |
+
+**참고 데이터**
+
+| 대상 | 출처 | 처리 |
+|------|------|------|
+| 작물 파라미터 근거(줄기 두께·화방당 열매 수 등) | AI-Hub 「지능형 스마트팜 통합 데이터(토마토)」 (dataSetSn=534) | 원본은 재배포 제약·대용량이라 **저장소에 없다**(`.gitignore`). 라벨 62,301개를 집계한 **파생 통계만** [`docs/crop_ref/AIHUB_통계.md`](docs/crop_ref/AIHUB_통계.md) 에 남겼다 |
+| 온실 치수(줄 간격 0.83m·거터 상면 0.92m 등) | 대상 온실 STEP 도면 실측 | 도면 원본·추출 이미지는 저장소에 넣지 않고(`.gitignore`), 분석 스크립트와 결과 수치만 커밋 |
+
+**의도적으로 쓰지 않은 모델**(라이선스·호환성 문제) — 사유는
+[`docs/scripts/setup_vendor_models.sh`](docs/scripts/setup_vendor_models.sh) 말미에 정리해 두었다.
+AgileX 저상형(Tracer·Scout Mini·Bunker)은 mesh 가 담긴 저장소에 LICENSE 파일이 없고,
+MiR100 은 humble 브랜치인데도 description 이 catkin 이며, UR20/UR30 은 코드는 BSD-3 지만
+mesh 에 별도 제한이 걸려 있다.
+
+---
+
+## 9. 진행 현황
 
 | 주차 | 내용 | 상태 |
 |------|------|------|
