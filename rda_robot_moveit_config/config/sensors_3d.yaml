@@ -11,7 +11,8 @@
 # ⚠ 로봇 자신은 자동으로 옥토맵에서 제거된다(self-filter, URDF collision + padding).
 #   padding 이 너무 작으면 로봇 표면이 장애물로 남아 계획이 즉시 실패한다.
 sensors:
-  - d435i_cloud
+  - d435i_cloud   # eye-to-hand(전역): 온실 구조·작물행 전체
+  - d405_cloud    # eye-in-hand(손끝 근접): 전역 카메라의 가림/사각지대 보완
 
 d435i_cloud:
   sensor_plugin: occupancy_map_monitor/PointCloudOctomapUpdater
@@ -26,3 +27,16 @@ d435i_cloud:
   padding_scale: 1.0
   max_update_rate: 1.0
   filtered_cloud_topic: /d435i/filtered_cloud
+
+d405_cloud:
+  sensor_plugin: occupancy_map_monitor/PointCloudOctomapUpdater
+  point_cloud_topic: /d405/depth/points
+  # D405 는 근접 전용(제원 7cm~50cm) — 멀리까지 넣으면 전역 카메라와 중복만 늘고
+  # 근거리 정밀도 이점이 없다. Gazebo 센서 far(1.0m)와 맞춘다.
+  max_range: 1.0
+  point_subsample: 1
+  # 손끝 카메라는 그리퍼(rg2)를 코앞에서 본다 → 자기 몸 여유를 전역보다 크게.
+  padding_offset: 0.05
+  padding_scale: 1.0
+  max_update_rate: 1.0
+  filtered_cloud_topic: /d405/filtered_cloud

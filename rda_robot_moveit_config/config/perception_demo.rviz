@@ -5,6 +5,7 @@ Panels:
       Expanded:
         - /RobotModel1
         - /DepthCloud1
+        - /HandCloud1
         - /PlanningScene1
       Splitter Ratio: 0.5
   - Class: rviz_common/Views
@@ -42,6 +43,21 @@ Visualization Manager:
       Size (Pixels): 2
       Color Transformer: AxisColor
       Axis: Z
+      Decay Time: 0
+      Enabled: true
+    # D405(eye-in-hand) 근접 클라우드 — 손끝 시야. 색을 고정해 전역 카메라와 구분.
+    - Class: rviz_default_plugins/PointCloud2
+      Name: HandCloud
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+        Value: /d405/depth/points
+      Style: Points
+      Size (Pixels): 3
+      Color Transformer: FlatColor
+      Color: 255; 120; 0
       Decay Time: 0
       Enabled: true
     # ★ 센싱 결과가 planning scene 의 옥토맵(충돌객체)으로 들어온 모습.
