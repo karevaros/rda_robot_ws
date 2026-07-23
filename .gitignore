@@ -20,3 +20,6 @@ docs/crop_ref/*.part0
 docs/greenhouse_ref/*.stp
 docs/greenhouse_ref/*.png
 docs/greenhouse_ref/*.csv
+
+# 논문 초안 — 로컬 참조용(원격에 올리지 않음)
+docs/논문-*.md
