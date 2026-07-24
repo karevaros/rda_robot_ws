@@ -89,6 +89,15 @@ def _setup(context, *args, **kwargs):
     #   octomap_frame 은 **고정 프레임(world)** 이어야 한다. 센서 프레임으로 두면
     #   카메라가 움직일 때 지도가 따라 움직여 무의미해진다.
     sensors = _load_yaml(os.path.join(cfg, "config", "sensors_3d.yaml"))
+    # 사용할 3D 센서 선택. ⚠ 업데이터가 2개 이상이면 MoveIt 이 shape 핸들을 간접 매핑하는데,
+    #   그 경로에서 월드 CollisionObject 를 추가하면 transform cache 조회가 깨져
+    #   "Missing transform for shape …" 가 쏟아지고 마스킹·서비스 응답이 망가진다(실측).
+    #   Stage 5(구 영역 허용)를 쓰려면 단일 센서로 두는 편이 안전하다.
+    want = lc("sensors").perform(context).strip().lower()
+    if want not in ("", "both", "all"):
+        keep = [n for n in sensors.get("sensors", []) if want in n]
+        sensors = dict(sensors)
+        sensors["sensors"] = keep or sensors.get("sensors", [])
     octomap = {"octomap_frame": lc("octomap_frame").perform(context),
                "octomap_resolution": float(lc("octomap_resolution").perform(context))}
 
@@ -159,6 +168,9 @@ def generate_launch_description():
                               description="greenhouse(온실+작물) 또는 empty"),
         DeclareLaunchArgument("obstacles", default_value="false",
                               description="명명 장애물(obstacles.yaml)도 planning scene 에 넣을지(비교용)"),
+        DeclareLaunchArgument("sensors", default_value="both",
+                              description="옥토맵에 쓸 3D 센서: both(D435i+D405) | d435i | d405. "
+                                          "단일 센서면 월드 객체 추가 시 shape mask 가 안전하다 [Stage 5]"),
         DeclareLaunchArgument("octomap_frame", default_value="world",
                               description="옥토맵을 유지할 고정 프레임"),
         DeclareLaunchArgument("octomap_resolution", default_value="0.03",

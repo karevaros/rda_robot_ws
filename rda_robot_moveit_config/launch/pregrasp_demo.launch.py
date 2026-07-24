@@ -123,8 +123,13 @@ def _setup(context, *args, **kwargs):
         "targets_topic": lc("targets_topic").perform(context),
         "diag_straight": lc("diag_straight").perform(context).lower() in ("1", "true", "yes"),
         "bench": lc("bench").perform(context).lower() in ("1", "true", "yes"),
+        "verify_region": lc("verify_region").perform(context).lower() in ("1", "true", "yes"),
         "bench_n": int(lc("bench_n").perform(context)),
         "ik_timeout": float(lc("ik_timeout").perform(context)),
+        # Stage 5: 접근 시 충돌 허용 방식(region=열매 주변 구 영역 / stalk=이름기반 / none)
+        "acm_mode": lc("acm_mode").perform(context),
+        "region_margin": float(lc("region_margin").perform(context)),
+        "region_max_object": float(lc("region_max_object").perform(context)),
         # 빈 리스트는 launch 가 타입을 못 정해 오류 → 빈 문자열 1개로 표현(노드에서 걸러냄)
         "bench_targets": ([t.strip() for t in lc("bench_targets").perform(context).split(",")
                            if t.strip()] or [""]),
@@ -138,7 +143,7 @@ def _setup(context, *args, **kwargs):
 
     nodes = [rsp, move_group, world_tf, obstacles, demo]
     scanning = any(lc(a).perform(context).lower() in ("1", "true", "yes")
-                   for a in ("scan_all", "diag_straight", "bench"))
+                   for a in ("scan_all", "diag_straight", "bench", "verify_region"))
     if not scanning and lc("rviz").perform(context).lower() in ("1", "true", "yes"):
         rviz_cfg = os.path.join(cfg, "config", "pregrasp_demo.rviz")
         if not os.path.exists(rviz_cfg):
@@ -182,12 +187,24 @@ def generate_launch_description():
                               description="true=선택 열매의 접근각별 직선 Cartesian fraction 진단 후 종료"),
         DeclareLaunchArgument("bench", default_value="false",
                               description="true=조건별 비교실험(제안/각도탐색없음/선택ACM없음/전작물무시) 후 종료"),
+        DeclareLaunchArgument("verify_region", default_value="false",
+                              description="true=구 영역 허용 전/후를 옥토맵 크기·충돌 접촉·IK 로 측정 후 종료 [Stage 5]"),
         DeclareLaunchArgument("bench_n", default_value="8",
                               description="비교실험 표본 열매 수(0=도달 가능 전부)"),
         DeclareLaunchArgument("ik_timeout", default_value="0.1",
                               description="IK 1회 허용 시간[s]. 비교실험처럼 장면 갱신이 잦을 때는 0.5 권장"),
         DeclareLaunchArgument("bench_targets", default_value="",
                               description="비교실험 표본을 이름으로 고정(쉼표 구분). 빈값=자동 선택"),
+        DeclareLaunchArgument("acm_mode", default_value="region",
+                              description="접근 시 충돌 허용 방식 [Stage 5]: "
+                                          "region=목표 열매 주변 구 영역(이름표 불필요 — 인지 타깃/옥토맵에서 동작) / "
+                                          "stalk=이름 기반 목표 화방대(설계값 장면 전용) / none=허용 없음"),
+        DeclareLaunchArgument("region_margin", default_value="0.03",
+                              description="구 영역 반경 ρ = 열매반경 + 이 여유[m]. 실측: 목표 화방대 표면이 "
+                                          "열매 중심 5.8cm → 3cm 면 자기 화방대 포함·주 줄기(15.4cm) 제외"),
+        DeclareLaunchArgument("region_max_object", default_value="0.15",
+                              description="구에 닿아도 이 크기[m]를 넘는 객체는 허용 안 함(거터·레일 등 "
+                                          "구조물 통째 허용 방지)"),
         DeclareLaunchArgument("target_source", default_value="yaml",
                               description="집기 목표 출처: yaml(obstacles.yaml kind:target) "
                                           "또는 perception(/detected_fruits, Stage 4)"),
