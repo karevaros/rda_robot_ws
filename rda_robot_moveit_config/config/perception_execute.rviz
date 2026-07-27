@@ -17,7 +17,8 @@ Visualization Manager:
       Plane Cell Count: 20
       Color: 160; 160; 164
       Enabled: true
-    # 현재(실제) 로봇 — /joint_states(gazebo broadcaster) 기반. 계획 상태와 구분해서 봄.
+    # 현재(실제) 로봇 — /joint_states(gazebo broadcaster) 기반. gzclient 없이도 RViz 에서
+    #   팔의 실제 움직임(execute·run_demo)을 이걸로 본다.
     - Class: rviz_default_plugins/RobotModel
       Name: RobotModel(현재)
       Description Topic:
@@ -25,7 +26,7 @@ Visualization Manager:
         Durability Policy: Volatile
         Reliability Policy: Reliable
         Value: /robot_description
-      Enabled: false
+      Enabled: true
       Visual Enabled: true
       Collision Enabled: false
       Alpha: 1
