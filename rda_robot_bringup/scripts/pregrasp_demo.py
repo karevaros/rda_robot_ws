@@ -32,6 +32,7 @@ from rclpy.qos import (QoSDurabilityPolicy, QoSHistoryPolicy, QoSProfile,
 from builtin_interfaces.msg import Duration as DurationMsg
 from geometry_msgs.msg import Pose, PoseStamped, Point
 from sensor_msgs.msg import JointState
+from std_msgs.msg import String
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 from control_msgs.action import FollowJointTrajectory
 from visualization_msgs.msg import Marker, MarkerArray
@@ -159,6 +160,9 @@ class PregraspDemo(Node):
         #   → phase ①(home→pre-grasp)에서 손목/관절이 크게 뒤집혀 도는 동작을 없앤다.
         #   (false 면 종전대로 접근각 자연스러움(prior)만으로 선택)
         self.declare_parameter("prefer_near_home", True)
+        # interactive = 실제 로봇 조작하듯 **사용자가 타깃을 골라 명령**하는 모드. 자동 수확 대신
+        #   /harvest_targets(목록 발행) + /harvest_cmd(선택 수신)으로 동작. harvest_operator 로 조작.
+        self.declare_parameter("interactive", False)
 
         gp = self.get_parameter
         self.world = gp("world_frame").value
@@ -1766,6 +1770,94 @@ class PregraspDemo(Node):
             f"(후보 {len(picked)}, 전체 {len(tg)})")
         return harvested
 
+    # ══════════════════ 인터랙티브(조작기) 모드 ══════════════════
+    def _itarget_list(self):
+        """현재 타깃을 base 로부터 가까운 순으로 정렬해 반환(조작기 목록·번호의 단일 기준)."""
+        tg = self._all_targets()
+        bxy = self._base_xy()
+        if bxy is not None and tg:
+            l0 = np.array([bxy[0], bxy[1], 0.35])
+            tg.sort(key=lambda t: float(np.linalg.norm(t[1] - l0)))
+        return tg
+
+    def _publish_target_list(self):
+        tg = self._itarget_list()
+        self._itargets = tg
+        lines = [f"=== 수확 타깃 {len(tg)}개 (가까운 순) ==="]
+        for i, (name, p, r) in enumerate(tg):
+            lines.append(f"  [{i}] {name}  ({p[0]:.2f},{p[1]:.2f},{p[2]:.2f})  r={r:.3f}")
+        lines.append("명령: 번호=수확 · l=목록 · h=home · q=종료")
+        text = "\n".join(lines)
+        m = String(); m.data = text
+        self._targets_pub.publish(m)
+        self.get_logger().info(text)
+
+    def _resolve_target(self, cmd):
+        tg = getattr(self, "_itargets", None) or self._itarget_list()
+        if cmd.isdigit():
+            i = int(cmd)
+            return tg[i] if 0 <= i < len(tg) else None
+        for t in tg:
+            if t[0] == cmd:
+                return t
+        return None
+
+    def _on_cmd(self, msg):
+        self._cmd = msg.data.strip()
+
+    def _go_home(self):
+        self.get_logger().info("home 복귀…")
+        plan = self.plan_to({j: 0.0 for j in self.ARM})
+        dur = float(self.get_parameter("dur_home").value)
+        if plan is not None:
+            self._play_waypoints(plan[0], plan[1], dur)
+        else:
+            self._play_waypoints(self.ARM,
+                                 [[self.cur[j] for j in self.ARM], [0.0] * len(self.ARM)], dur)
+        self._set({j: 0.0 for j in self.ARM})
+
+    def _handle_cmd(self, cmd):
+        c = cmd.lower()
+        if c in ("list", "l", "refresh"):
+            return                                 # 목록은 루프 끝에서 재발행
+        if c in ("home", "h"):
+            self._go_home(); return
+        tgt = self._resolve_target(cmd)
+        if tgt is None:
+            self.get_logger().warn(f"타깃 '{cmd}' 못 찾음 (l 로 목록 확인)"); return
+        name, p, r = tgt
+        self.get_logger().info(
+            f"▶ 수확 명령: [{cmd}] {name} @ ({p[0]:.2f},{p[1]:.2f},{p[2]:.2f}) · 전략={self.strategy}")
+        sol = self.solve_pregrasp(p, r)
+        if sol is None:
+            self.get_logger().warn(f"{name} 도달불가/충돌 — 다른 타깃 선택 or base 위치 조정"); return
+        c2 = self._precompute(name, p, r, sol)
+        ok = self._play_cycle(name, p, r, c2)
+        self.get_logger().info(f"[{name}] 수확 {'완료' if ok else '실패'}. 다음 명령 대기…")
+
+    def run_interactive(self):
+        """실제 로봇 조작하듯 사용자가 타깃을 골라 명령하는 모드. /harvest_targets 로 목록을 발행하고
+        /harvest_cmd(String: 번호|이름|home|list)를 받아 선택 타깃을 전체 수확. harvest_operator 로 조작."""
+        latched = QoSProfile(history=QoSHistoryPolicy.KEEP_LAST, depth=1,
+                             reliability=QoSReliabilityPolicy.RELIABLE,
+                             durability=QoSDurabilityPolicy.TRANSIENT_LOCAL)
+        self._targets_pub = self.create_publisher(String, "harvest_targets", latched)
+        self._cmd = None
+        self.create_subscription(String, "harvest_cmd", self._on_cmd, 10)
+        self._publish_target_list()
+        self.get_logger().info(
+            "🕹 인터랙티브 모드 — 다른 터미널에서 "
+            "'ros2 run rda_robot_bringup harvest_operator.py' 로 타깃 선택. 명령 대기…")
+        while rclpy.ok():
+            rclpy.spin_once(self, timeout_sec=0.2)
+            if self._cmd is not None:
+                cmd, self._cmd = self._cmd, None
+                try:
+                    self._handle_cmd(cmd)
+                except Exception as e:
+                    self.get_logger().warn(f"명령 '{cmd}' 처리 실패: {e}")
+                self._publish_target_list()        # 명령 후 목록 갱신 재발행
+
 
 def main():
     rclpy.init()
@@ -1792,6 +1884,11 @@ def main():
             return
         if node.get_parameter("diag_straight").value:
             node._diag_straight()
+            node.destroy_node()
+            rclpy.shutdown()
+            return
+        if node.get_parameter("interactive").value:
+            node.run_interactive()      # 사용자가 타깃 골라 명령(harvest_operator)
             node.destroy_node()
             rclpy.shutdown()
             return

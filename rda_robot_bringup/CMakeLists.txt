@@ -19,6 +19,7 @@ install(PROGRAMS
   scripts/robot_introspect.py
   scripts/gen_gazebo_world.py
   scripts/fruit_detector.py
+  scripts/harvest_operator.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
