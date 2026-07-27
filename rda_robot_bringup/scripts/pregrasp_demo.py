@@ -133,12 +133,23 @@ class PregraspDemo(Node):
         self.declare_parameter("pause", 1.2)              # 구간 사이 정지
         self.declare_parameter("rate", 50.0)
         self.declare_parameter("loop", True)
+        # ── 접근 전략(작업 플래너) 선택 ──────────────────────────────
+        # strategy = 수확 작업을 어떻게 풀지(모션플래너 알고리즘을 고르듯 접근 방식을 고름):
+        #   harvest_linear : 수확 특화 — pre-grasp 자세 → Cartesian 직선접근 → 파지 → 역경로 후퇴 → home
+        #   direct         : 자유공간 모션플래너로 grasp pose 직행 → 파지 → 자유공간 복귀(직선접근 구조 없음)
+        # 새 전략은 _STRATEGIES 에 함수 하나 추가로 확장(레지스트리).
+        self.declare_parameter("strategy", "harvest_linear")
+        # planner_id = 자유공간 구간에 쓸 OMPL 알고리즘. ompl_planning.yaml 의 arm 목록과 일치해야 함
+        #   (RRTConnect·RRTstar·PRM·RRT·BiTRRT·EST). 빈 값이면 그룹 기본(RRTConnect).
+        self.declare_parameter("planner_id", "RRTConnect")
 
         gp = self.get_parameter
         self.world = gp("world_frame").value
         self.group = gp("group").value
         self.ik_link = gp("ik_link").value
         self.rate = float(gp("rate").value)
+        self.strategy = str(gp("strategy").value).strip().lower()
+        self.planner_id = str(gp("planner_id").value).strip()
 
         # ---- 현재 관절 상태(이 노드가 유일 발행자) : home + 그리퍼 벌림(open) ----
         self.cur = {j: 0.0 for j in self.ARM}
@@ -363,6 +374,8 @@ class PregraspDemo(Node):
         req = GetMotionPlan.Request()
         mpr = MotionPlanRequest()
         mpr.group_name = self.group
+        if self.planner_id:                       # 선택한 OMPL 알고리즘(RRTConnect/RRTstar/PRM/…)
+            mpr.planner_id = self.planner_id
         mpr.start_state = self._robot_state()
         mpr.num_planning_attempts = 5
         mpr.allowed_planning_time = float(self.get_parameter("plan_time").value)
@@ -1450,12 +1463,27 @@ class PregraspDemo(Node):
         self.get_logger().info(f"원자료 저장: {out}")
         return rows
 
+    # ══════════════════ 접근 전략(작업 플래너) 레지스트리 ══════════════════
+    # 각 전략은 (name, p_fruit, r, sol) → 재생용 계획 dict 을 돌려준다. 반환 규격은 run() 이 쓰는:
+    #   pre=(names,wp)  home→시작자세 구간
+    #   app=(names,wp,method,checked)  시작자세→grasp 접근 구간(direct 는 자리표시)
+    #   q_pre,q_grasp,q_home,gopen,close,home,sol
+    # 새 전략 추가 = 메서드 하나 만들고 아래 _STRATEGIES 에 등록만.
     def _precompute(self, name, p_fruit, r, sol):
-        """목표 열매에 대한 전체 데모 궤적(①home→pre ②접근 ④home복귀)을 한 번만 계획해 캐시.
-        base·목표가 고정이라 매 루프 재계획할 필요가 없다 → 이후 반복은 재생만(버퍼링/튐 제거).
-        계획 중 self.cur 를 가상 시작상태로 바꿔가며 각 구간을 계획한 뒤 home 으로 복원.
+        """선택된 strategy 로 전체 데모 궤적을 한 번만 계획해 캐시(이후 반복은 재생만)."""
+        fn = self._STRATEGIES.get(self.strategy)
+        if fn is None:
+            self.get_logger().warn(
+                f"알 수 없는 strategy '{self.strategy}' → harvest_linear 사용. "
+                f"(가능: {', '.join(self._STRATEGIES)})")
+            fn = self._STRATEGIES["harvest_linear"]
+        self.get_logger().info(
+            f"접근 전략 = {self.strategy} · planner_id = {self.planner_id or '(그룹기본)'}")
+        return fn(self, name, p_fruit, r, sol)
 
-        ★ '집기 전 직선이동' 우선: 먼저 직선 Cartesian 이 뚫리는 접근각을 찾아(있으면) 그 자세로
+    def _strategy_harvest_linear(self, name, p_fruit, r, sol):
+        """수확 특화: pre-grasp 자세 → Cartesian 직선접근 → 파지 → 역경로 후퇴 → home.
+        ★ '집기 전 직선이동' 우선: 직선 Cartesian 이 뚫리는 접근각을 찾아(있으면) 그 자세로
         교체 → ②가 완전 직선. 없으면 원래 sol(OMPL 우회)."""
         straight = self._best_straight_candidate(name, p_fruit, r)
         if straight is not None:
@@ -1495,6 +1523,43 @@ class PregraspDemo(Node):
         return dict(pre=pre, app=(app_n, app_wp, method, checked),
                     q_pre=q_pre, q_grasp=q_grasp, q_home=q_home,
                     gopen=gopen, close=close, home=home, sol=sol)
+
+    def _strategy_direct(self, name, p_fruit, r, sol):
+        """자유공간 직행: 모션플래너(planner_id, 예 RRTConnect)로 home→grasp pose 를 **직접**
+        계획, 파지 후 자유공간으로 home 복귀. pre-grasp·Cartesian 직선접근 구조가 없다 →
+        순수 모션플래너가 푸는 경로를 그대로 보는 대조군(줄기 사이 직선 진입을 강제하지 않음)."""
+        q_grasp = dict(sol["q_grasp"])
+        gopen = float(self.get_parameter("gripper_open").value)
+        close = float(self.get_parameter("gripper_close").value)
+        q_home = {j: 0.0 for j in self.ARM}
+
+        # ① home → grasp 직행 (자유공간 OMPL)
+        self.cur = {j: 0.0 for j in self.ARM}
+        self.cur.update({f: gopen for f in self.FINGERS})
+        plan = self.plan_to(q_grasp)
+        pre = plan if plan is not None else (
+            self.ARM, [[0.0] * len(self.ARM), [q_grasp[j] for j in self.ARM]])
+        method = f"direct/{self.planner_id or 'default'}" + ("" if plan is not None else "(폴백)")
+        self.get_logger().info(f"① home→grasp 직행 계획 {len(pre[1])}점 ({method})")
+
+        # ② 접근 구간 없음(이미 grasp) → 자리표시(역재생 후퇴도 자리표시가 됨; 실제 후퇴는 home 구간)
+        app_wp = [[q_grasp[j] for j in self.ARM], [q_grasp[j] for j in self.ARM]]
+
+        # ④ grasp → home 복귀 (자유공간 OMPL)
+        self._set({j: q_grasp[j] for j in self.ARM})
+        home = self.plan_to(q_home)
+
+        self.cur = {j: 0.0 for j in self.ARM}
+        self.cur.update({f: gopen for f in self.FINGERS})
+        return dict(pre=pre, app=(self.ARM, app_wp, method, plan is not None),
+                    q_pre=q_grasp, q_grasp=q_grasp, q_home=q_home,
+                    gopen=gopen, close=close, home=home, sol=sol)
+
+    # 전략 레지스트리 — 새 전략은 위에 메서드 추가 후 여기에 한 줄 등록만.
+    _STRATEGIES = {
+        "harvest_linear": _strategy_harvest_linear,
+        "direct": _strategy_direct,
+    }
 
     def run(self):
         # 목표 선택·전체 궤적 계획은 최초 1회만(base·목표 고정) → 캐시. 이후 반복은 재생만.

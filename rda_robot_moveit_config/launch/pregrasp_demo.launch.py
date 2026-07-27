@@ -133,6 +133,9 @@ def _setup(context, *args, **kwargs):
         # 빈 리스트는 launch 가 타입을 못 정해 오류 → 빈 문자열 1개로 표현(노드에서 걸러냄)
         "bench_targets": ([t.strip() for t in lc("bench_targets").perform(context).split(",")
                            if t.strip()] or [""]),
+        # Stage 6: 접근 전략(작업 플래너) + 자유공간 OMPL 알고리즘 선택
+        "strategy": lc("strategy").perform(context),
+        "planner_id": lc("planner_id").perform(context),
     }
     use_yaml = lc("use_yaml_target").perform(context).lower() in ("1", "true", "yes")
     if not use_yaml:
@@ -210,6 +213,12 @@ def generate_launch_description():
                                           "또는 perception(/detected_fruits, Stage 4)"),
         DeclareLaunchArgument("targets_topic", default_value="detected_fruits",
                               description="target_source=perception 일 때 구독할 토픽"),
+        DeclareLaunchArgument("strategy", default_value="harvest_linear",
+                              description="접근 전략(작업 플래너): harvest_linear(사전위치→직선접근"
+                                          "→파지→후퇴) / direct(자유공간 모션플래너로 grasp 직행)."),
+        DeclareLaunchArgument("planner_id", default_value="RRTConnect",
+                              description="자유공간 구간 OMPL 알고리즘: RRTConnect·RRT·RRTstar·"
+                                          "BiTRRT·EST·PRM (ompl_planning.yaml arm 목록)."),
         DeclareLaunchArgument("rviz", default_value="true"),
         OpaqueFunction(function=_setup),
     ])

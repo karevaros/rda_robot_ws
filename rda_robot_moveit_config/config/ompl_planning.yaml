@@ -13,21 +13,36 @@ planner_configs:
   RRTConnect:
     type: geometric::RRTConnect
     range: 0.0
+  RRT:
+    type: geometric::RRT
+    range: 0.0
+    goal_bias: 0.05
   RRTstar:
     type: geometric::RRTstar
     range: 0.0
     goal_bias: 0.05
     delay_collision_checking: 1
+  BiTRRT:
+    type: geometric::BiTRRT
+    range: 0.0
+  EST:
+    type: geometric::EST
+    range: 0.0
+    goal_bias: 0.05
   PRM:
     type: geometric::PRM
     max_nearest_neighbors: 10
 
 arm:
   # RRTConnect: 빠르고 안정적인 기본값. 최단/최적 경로가 필요하면 RRTstar.
+  # pregrasp_demo 의 planner_id 로 아래 중 하나를 골라 쓸 수 있다(strategy 와 조합).
   default_planner_config: RRTConnect
   planner_configs:
     - RRTConnect
+    - RRT
     - RRTstar
+    - BiTRRT
+    - EST
     - PRM
   projection_evaluator: joints(base,shoulder)
   longest_valid_segment_fraction: 0.005
