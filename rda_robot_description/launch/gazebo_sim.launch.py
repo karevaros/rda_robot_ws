@@ -15,6 +15,7 @@ TF 가 정합되는 것을 확인(빈 월드). 이후 Stage 2 에서 온실/작�
 """
 import math
 import os
+import re
 import subprocess
 import xml.etree.ElementTree as ET
 
@@ -29,13 +30,29 @@ from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 
 
+def _compose_env():
+    """compose_urdf 서브프로세스용 env. ⚠ 비대화형(bash script.sh)·헤드리스·ros2 launch
+    내부 실행에선 user site(~/.local/lib/pythonX.Y/site-packages)가 PYTHONPATH 에서 빠져
+    compose 가 의존하는 yourdfpy 를 못 찾는다(ModuleNotFoundError). 여기서 강제로 넣어준다."""
+    import sys
+    env = dict(os.environ)
+    us = os.path.join(os.path.expanduser("~"), ".local", "lib",
+                      f"python{sys.version_info.major}.{sys.version_info.minor}",
+                      "site-packages")
+    if os.path.isdir(us):
+        cur = env.get("PYTHONPATH", "")
+        if us not in cur.split(os.pathsep):
+            env["PYTHONPATH"] = us + (os.pathsep + cur if cur else "")
+    return env
+
+
 def compose_urdf(mounts_file):
     """mounts.yaml → 통합 URDF XML(문자열). rda_robot_display.launch.py 와 동일 방식."""
     try:
         return subprocess.check_output(
             ["ros2", "run", "rda_robot_assembler", "compose_urdf",
              "--mounts", mounts_file],
-            text=True, stderr=subprocess.PIPE, timeout=180)
+            text=True, stderr=subprocess.PIPE, timeout=180, env=_compose_env())
     except subprocess.CalledProcessError as e:
         raise RuntimeError("통합 URDF 조립 실패:\n" + (e.stderr or "").strip())
     except FileNotFoundError:
@@ -216,6 +233,14 @@ def _setup(context, *args, **kwargs):
         composed = _gazeboize_control(composed, controllers_yaml,
                                       (bx, by, z + bz, byaw))
         urdf_xml = _inject_overlay(composed, overlay)
+        # 🔴 gazebo_ros2_control(0.4.10)은 robot_description(URDF)을 controller_manager 노드에
+        #   `-p robot_description:=<URDF>` CLI 인자로 넘긴다. rcl 은 이 값을 **YAML 로 파싱**하는데
+        #   pretty-print 된 여러 줄 URDF 는 YAML 로 유효하지 않아 파싱이 깨진다("Couldn't parse
+        #   parameter override rule") → CM 노드 미생성 → 스포너 타임아웃 → 컨트롤러 0개 →
+        #   팔이 중력에 처짐. ⇒ control 모드에선 **주석 제거 + 한 줄로 압축**해 rsp 에 준다
+        #   (rsp 가 재발행 → 플러그인이 한 줄 URDF 를 넘김 → rcl YAML 스칼라로 파싱 OK).
+        urdf_xml = re.sub(r"<!--.*?-->", "", urdf_xml, flags=re.DOTALL)
+        urdf_xml = re.sub(r"\s+", " ", urdf_xml).strip()
     else:
         # 기본(Stage 1~5): 정적 블록 + 센서 오버레이. 배치는 spawn pose 로.
         with open(overlay) as f:
@@ -266,19 +291,23 @@ def _setup(context, *args, **kwargs):
                  arguments=["-topic", "robot_description", "-entity", "rda_robot",
                             "-timeout", "60"])])
         # gazebo_ros2_control 플러그인이 controller_manager 를 띄운 뒤 스포너로 활성화.
-        # 스폰(5s)+플러그인 기동 시간을 주려고 8s 뒤에.
-        spawners = TimerAction(period=8.0, actions=[
-            Node(package="controller_manager", executable="spawner", output="screen",
-                 arguments=["joint_state_broadcaster",
-                            "--controller-manager", "/controller_manager"]),
-            Node(package="controller_manager", executable="spawner", output="screen",
-                 arguments=["arm_controller",
-                            "--controller-manager", "/controller_manager"]),
-            Node(package="controller_manager", executable="spawner", output="screen",
-                 arguments=["gripper_controller",
-                            "--controller-manager", "/controller_manager"]),
-        ])
-        return procs + [rsp, spawn, spawners]
+        # ⚠ 스폰(5s)→Gazebo 모델 로드→플러그인 CM 생성까지 시간이 더 걸린다. 스포너가 너무
+        #   일찍 뜨면 CM 을 못 찾아 실패한다 → 12s 로 미루고, 그래도 못 찾으면 60s 까지
+        #   기다리도록 --controller-manager-timeout 을 준다(활성 실패 시 팔이 중력에 처짐).
+        def _spawner(name):
+            return Node(package="controller_manager", executable="spawner", output="screen",
+                        arguments=[name, "--controller-manager", "/controller_manager",
+                                   "--controller-manager-timeout", "60"])
+        # ⚠ gazebo 안의 CM 은 기동 직후 서비스 응답이 느려(sim 루프에 묶임) 스포너들을 동시에
+        #   띄우면 configure 호출이 타임아웃→재시도→"이미 active" 로 실패한다(컨트롤러 자체는
+        #   1차 시도로 active 가 됨). ⇒ **시차를 두고 하나씩** 띄워 CM 부하를 분산한다.
+        #   broadcaster(관절상태 발행) 먼저, 그다음 arm, gripper.
+        spawners = [
+            TimerAction(period=12.0, actions=[_spawner("joint_state_broadcaster")]),
+            TimerAction(period=16.0, actions=[_spawner("arm_controller")]),
+            TimerAction(period=20.0, actions=[_spawner("gripper_controller")]),
+        ]
+        return procs + [rsp, spawn] + spawners
 
     # 기본(static) 모드: TF 완성용 jsp(팔 관절 0 고정) + base_placement spawn pose.
     jsp = Node(package="joint_state_publisher", executable="joint_state_publisher",

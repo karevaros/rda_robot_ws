@@ -26,6 +26,7 @@
 """
 import math
 import os
+import sys
 
 import yaml
 from ament_index_python.packages import get_package_share_directory
@@ -66,9 +67,16 @@ def _setup(context, *args, **kwargs):
 
     # move_group 이 쓸 URDF = 컴포저 원본(gazebo 오버레이 없이). Gazebo 쪽 rsp 는
     # 오버레이 주입본을 쓰지만 링크/조인트 기하는 동일하므로 TF 가 정합된다.
+    # ⚠ 비대화형/헤드리스/ros2 launch 내부에선 user site(~/.local)가 PYTHONPATH 에서 빠져
+    #   compose 의존 yourdfpy 를 못 찾는다 → 서브프로세스 env 에 강제 주입.
+    _cenv = dict(os.environ)
+    _us = os.path.join(os.path.expanduser("~"), ".local", "lib",
+                       f"python{sys.version_info.major}.{sys.version_info.minor}", "site-packages")
+    if os.path.isdir(_us) and _us not in _cenv.get("PYTHONPATH", "").split(os.pathsep):
+        _cenv["PYTHONPATH"] = _us + os.pathsep + _cenv.get("PYTHONPATH", "")
     urdf_xml = subprocess.check_output(
         ["ros2", "run", "rda_robot_assembler", "compose_urdf", "--mounts", mounts],
-        text=True, stderr=subprocess.PIPE, timeout=180)
+        text=True, stderr=subprocess.PIPE, timeout=180, env=_cenv)
     with open(os.path.join(cfg, "config", "rda_robot.srdf")) as f:
         srdf_xml = f.read()
 
