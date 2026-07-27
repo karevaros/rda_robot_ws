@@ -1,0 +1,55 @@
+# ros2_control 컨트롤러 설정 (6주차 · gazebo_ros2_control 이 로드)
+# gazebo_sim.launch.py control:=true 일 때 GazeboSystem 플러그인의 <parameters> 로 주입되고
+# controller_manager 스포너가 아래 3개 컨트롤러를 활성화한다.
+#
+# 조인트 이름은 통합 URDF(compose_urdf)의 ros2_control 블록과 정확히 일치해야 한다:
+#   팔  = base, shoulder, elbow, wrist1, wrist2, wrist3   (SRDF arm 그룹, link0→tcp)
+#   그리퍼 = rg2_finger_joint1                            (finger_joint2 는 URDF mimic)
+#
+# position 명령 인터페이스 → GazeboSystem 은 PID 미설정 시 kinematic SetPosition 으로
+# 관절을 이동(placeholder 관성으로도 안정). 팔이 실제로 움직여 eye-in-hand(D405) 시점이
+# 바뀌므로 옥토맵 실시간 갱신이 성립한다(Stage 6).
+
+controller_manager:
+  ros__parameters:
+    update_rate: 100
+    use_sim_time: true
+
+    joint_state_broadcaster:
+      type: joint_state_broadcaster/JointStateBroadcaster
+
+    arm_controller:
+      type: joint_trajectory_controller/JointTrajectoryController
+
+    gripper_controller:
+      type: joint_trajectory_controller/JointTrajectoryController
+
+arm_controller:
+  ros__parameters:
+    joints:
+      - base
+      - shoulder
+      - elbow
+      - wrist1
+      - wrist2
+      - wrist3
+    command_interfaces:
+      - position
+    state_interfaces:
+      - position
+      - velocity
+    # MoveIt(FollowJointTrajectory) 실행 허용오차 — 너무 빡빡하면 execute 가 중단된다.
+    allow_partial_joints_goal: false
+    constraints:
+      stopped_velocity_tolerance: 0.01
+      goal_time: 0.0
+
+gripper_controller:
+  ros__parameters:
+    joints:
+      - rg2_finger_joint1
+    command_interfaces:
+      - position
+    state_interfaces:
+      - position
+      - velocity

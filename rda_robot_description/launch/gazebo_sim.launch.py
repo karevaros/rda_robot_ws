@@ -55,14 +55,18 @@ def _ground_offset(urdf_xml):
     return 0.0
 
 
-def _inject_overlay(urdf_xml, overlay_file):
-    """통합 URDF 의 </robot> 앞에 gazebo 오버레이(정적+카메라)를 주입."""
-    with open(overlay_file) as f:
-        overlay = f.read()
+def _inject_text(urdf_xml, text):
+    """통합 URDF 의 </robot> 앞에 임의의 gazebo 스니펫(문자열)을 주입."""
     idx = urdf_xml.rfind("</robot>")
     if idx < 0:
         raise RuntimeError("URDF 에 </robot> 가 없습니다.")
-    return urdf_xml[:idx] + "\n" + overlay + "\n" + urdf_xml[idx:]
+    return urdf_xml[:idx] + "\n" + text + "\n" + urdf_xml[idx:]
+
+
+def _inject_overlay(urdf_xml, overlay_file):
+    """통합 URDF 의 </robot> 앞에 gazebo 오버레이(카메라 센서)를 주입."""
+    with open(overlay_file) as f:
+        return _inject_text(urdf_xml, f.read())
 
 
 def _add_missing_inertials(urdf_xml):
@@ -86,6 +90,84 @@ def _add_missing_inertials(urdf_xml):
             added.append(link.get("name"))
     if added:
         print(f"[gazebo_sim] 관성 보완(체인 유지): {', '.join(added)}")
+    return ET.tostring(root, encoding="unicode")
+
+
+_ARM_JOINTS = ["base", "shoulder", "elbow", "wrist1", "wrist2", "wrist3"]
+_GRIPPER_JOINT = "rg2_finger_joint1"
+
+
+def _static_overlay():
+    """control:=false 일 때 주입하는 정적 블록(구 gazebo_overlay.xml 의 <static>)."""
+    return "<gazebo>\n  <static>true</static>\n</gazebo>\n"
+
+
+def _gazeboize_control(urdf_xml, controllers_yaml, placement):
+    """control:=true 용 URDF 변형 (compose_urdf 산출물은 손대지 않고 여기서만 가공).
+
+    ① 벤더 ros2_control(rbpodo 실하드웨어 IP)를 gazebo_ros2_control/GazeboSystem 으로 교체하고
+       팔 6조인트 + 그리퍼(rg2_finger_joint1)에 position 명령 / position·velocity 상태
+       인터페이스를 건다. position 명령 → GazeboSystem 이 PID 미설정 시 kinematic SetPosition
+       으로 이동(placeholder 관성으로도 안정).
+    ② base_link 를 world 에 고정(world 링크 + fixed 조인트, 원점=base_placement). 모델을
+       non-static 으로 풀면 떠다니는 베이스가 되므로 고정해 팔만 움직이게 한다. 스폰 pose 는
+       world 링크가 전역 원점을 강제하므로 무시된다 → 배치는 이 조인트 origin 으로 넣는다.
+    ③ libgazebo_ros2_control.so 플러그인 주입(<parameters>=controllers.yaml)."""
+    root = ET.fromstring(urdf_xml)
+
+    rc = root.find("ros2_control")
+    if rc is None:
+        raise RuntimeError("URDF 에 <ros2_control> 블록이 없습니다(벤더 팔 xacro 확인).")
+
+    # ① 하드웨어 플러그인 교체 + 벤더 param 제거
+    hw = rc.find("hardware")
+    if hw is not None:
+        for p in list(hw.findall("param")):
+            hw.remove(p)
+        plugin = hw.find("plugin")
+        if plugin is None:
+            plugin = ET.SubElement(hw, "plugin")
+        plugin.text = "gazebo_ros2_control/GazeboSystem"
+
+    def _set_interfaces(joint_el):
+        # 기존 인터페이스/파라미터 제거 후 position 명령 + position·velocity 상태로 재구성
+        for ch in list(joint_el):
+            if ch.tag in ("command_interface", "state_interface"):
+                joint_el.remove(ch)
+        ET.SubElement(joint_el, "command_interface").set("name", "position")
+        ET.SubElement(joint_el, "state_interface").set("name", "position")
+        ET.SubElement(joint_el, "state_interface").set("name", "velocity")
+
+    existing = {j.get("name") for j in rc.findall("joint")}
+    for j in rc.findall("joint"):
+        _set_interfaces(j)
+
+    # 그리퍼 조인트가 벤더 블록엔 없으므로 추가(finger_joint2 는 URDF mimic 이 자동 처리)
+    if _GRIPPER_JOINT not in existing:
+        gj = ET.SubElement(rc, "joint")
+        gj.set("name", _GRIPPER_JOINT)
+        _set_interfaces(gj)
+
+    # ② world 고정
+    bx, by, bz, byaw = placement
+    if root.find("link[@name='world']") is None:
+        ET.SubElement(root, "link").set("name", "world")
+        wj = ET.SubElement(root, "joint")
+        wj.set("name", "world_fixed")
+        wj.set("type", "fixed")
+        ET.SubElement(wj, "parent").set("link", "world")
+        ET.SubElement(wj, "child").set("link", "base_link")
+        o = ET.SubElement(wj, "origin")
+        o.set("xyz", f"{bx:.6f} {by:.6f} {bz:.6f}")
+        o.set("rpy", f"0 0 {byaw:.6f}")
+
+    # ③ gazebo_ros2_control 플러그인
+    gz = ET.SubElement(root, "gazebo")
+    pl = ET.SubElement(gz, "plugin")
+    pl.set("filename", "libgazebo_ros2_control.so")
+    pl.set("name", "gazebo_ros2_control")
+    ET.SubElement(pl, "parameters").text = controllers_yaml
+
     return ET.tostring(root, encoding="unicode")
 
 
@@ -120,8 +202,25 @@ def _setup(context, *args, **kwargs):
     mounts_file = LaunchConfiguration("mounts_file").perform(context)
     overlay = os.path.join(desc, "config", "gazebo_overlay.xml")
 
-    urdf_xml = _inject_overlay(_add_missing_inertials(compose_urdf(mounts_file)), overlay)
-    z = _ground_offset(urdf_xml)
+    control = LaunchConfiguration("control").perform(context).lower() in ("1", "true", "yes")
+
+    composed = _add_missing_inertials(compose_urdf(mounts_file))
+    z = _ground_offset(composed)          # world→base_footprint 보정(world 링크 추가 전 계산)
+    bx, by, bz, byaw = _base_placement(mounts_file)
+
+    if control:
+        # control 모드: ros2_control(GazeboSystem)+world 고정. static 은 주입하지 않는다.
+        # world 링크가 전역 원점을 강제하므로 배치는 world_fixed 조인트 origin 에 넣고
+        # spawn pose 는 0 으로 둔다.
+        controllers_yaml = os.path.join(desc, "config", "controllers.yaml")
+        composed = _gazeboize_control(composed, controllers_yaml,
+                                      (bx, by, z + bz, byaw))
+        urdf_xml = _inject_overlay(composed, overlay)
+    else:
+        # 기본(Stage 1~5): 정적 블록 + 센서 오버레이. 배치는 spawn pose 로.
+        with open(overlay) as f:
+            urdf_xml = _inject_text(composed, _static_overlay() + f.read())
+
     robot_description = ParameterValue(urdf_xml, value_type=str)
     gui = LaunchConfiguration("gui").perform(context).lower() in ("1", "true", "yes")
 
@@ -158,12 +257,32 @@ def _setup(context, *args, **kwargs):
     rsp = Node(package="robot_state_publisher", executable="robot_state_publisher",
                output="screen", parameters=[{"robot_description": robot_description,
                                              "use_sim_time": True}])
-    # TF 완성용(팔 관절 0). static 모델이라 값은 0 고정.
+
+    if control:
+        # control 모드: 관절 상태는 joint_state_broadcaster 가 발행(jsp 금지 — 충돌).
+        # 배치는 world_fixed 조인트 origin 에 이미 반영 → spawn pose 는 0.
+        spawn = TimerAction(period=5.0, actions=[
+            Node(package="gazebo_ros", executable="spawn_entity.py", output="screen",
+                 arguments=["-topic", "robot_description", "-entity", "rda_robot",
+                            "-timeout", "60"])])
+        # gazebo_ros2_control 플러그인이 controller_manager 를 띄운 뒤 스포너로 활성화.
+        # 스폰(5s)+플러그인 기동 시간을 주려고 8s 뒤에.
+        spawners = TimerAction(period=8.0, actions=[
+            Node(package="controller_manager", executable="spawner", output="screen",
+                 arguments=["joint_state_broadcaster",
+                            "--controller-manager", "/controller_manager"]),
+            Node(package="controller_manager", executable="spawner", output="screen",
+                 arguments=["arm_controller",
+                            "--controller-manager", "/controller_manager"]),
+            Node(package="controller_manager", executable="spawner", output="screen",
+                 arguments=["gripper_controller",
+                            "--controller-manager", "/controller_manager"]),
+        ])
+        return procs + [rsp, spawn, spawners]
+
+    # 기본(static) 모드: TF 완성용 jsp(팔 관절 0 고정) + base_placement spawn pose.
     jsp = Node(package="joint_state_publisher", executable="joint_state_publisher",
                output="screen", parameters=[{"use_sim_time": True}])
-    # /robot_description(latched) 를 읽어 스폰. 로봇을 어셈블러 base_placement 자세로
-    # 배치(월드 프레임의 온실/작물을 카메라가 실제 배치대로 보도록). base_footprint z 보정.
-    bx, by, bz, byaw = _base_placement(mounts_file)
     # gzserver 가 /spawn_entity 를 띄울 시간을 주려고 5초 뒤에 스폰.
     spawn = TimerAction(period=5.0, actions=[
         Node(package="gazebo_ros", executable="spawn_entity.py", output="screen",
@@ -184,6 +303,9 @@ def generate_launch_description():
                 "config", "mounts.yaml")),
         DeclareLaunchArgument("gui", default_value="true",
                               description="gzclient(GUI) 실행 여부. false=헤드리스."),
+        DeclareLaunchArgument("control", default_value="false",
+                              description="true=ros2_control(GazeboSystem) 로 팔 실구동"
+                                          "(execute·실시간 옥토맵). false=static(Stage1~5)."),
         DeclareLaunchArgument("world", default_value="greenhouse",
                               description="greenhouse(온실 구조+작물, 카메라가 봄) 또는 empty."),
         DeclareLaunchArgument(
