@@ -25,12 +25,15 @@ import numpy as np
 
 import rclpy
 from rclpy.node import Node
+from rclpy.action import ActionClient
 from rclpy.qos import (QoSDurabilityPolicy, QoSHistoryPolicy, QoSProfile,
                        QoSReliabilityPolicy)
 
 from builtin_interfaces.msg import Duration as DurationMsg
 from geometry_msgs.msg import Pose, PoseStamped, Point
 from sensor_msgs.msg import JointState
+from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
+from control_msgs.action import FollowJointTrajectory
 from visualization_msgs.msg import Marker, MarkerArray
 
 from moveit_msgs.srv import (GetPositionIK, GetMotionPlan, GetCartesianPath,
@@ -142,6 +145,13 @@ class PregraspDemo(Node):
         # planner_id = 자유공간 구간에 쓸 OMPL 알고리즘. ompl_planning.yaml 의 arm 목록과 일치해야 함
         #   (RRTConnect·RRTstar·PRM·RRT·BiTRRT·EST). 빈 값이면 그룹 기본(RRTConnect).
         self.declare_parameter("planner_id", "RRTConnect")
+        # execute = true 면 /joint_states 재생 대신 **실제 컨트롤러(FollowJointTrajectory)로 실구동**.
+        #   6주차 ros2_control(gazebo control 모드)과 묶어 센싱 장면에서 팔을 실제로 움직인다.
+        #   이때 관절 상태는 gazebo joint_state_broadcaster 가 발행 → 이 노드는 /joint_states 를
+        #   발행하지 않고 **구독**해 현재 상태를 추종한다.
+        self.declare_parameter("execute", False)
+        self.declare_parameter("arm_controller", "arm_controller")
+        self.declare_parameter("gripper_controller", "gripper_controller")
 
         gp = self.get_parameter
         self.world = gp("world_frame").value
@@ -150,6 +160,7 @@ class PregraspDemo(Node):
         self.rate = float(gp("rate").value)
         self.strategy = str(gp("strategy").value).strip().lower()
         self.planner_id = str(gp("planner_id").value).strip()
+        self.execute = bool(gp("execute").value)
 
         # ---- 현재 관절 상태(이 노드가 유일 발행자) : home + 그리퍼 벌림(open) ----
         self.cur = {j: 0.0 for j in self.ARM}
@@ -159,13 +170,28 @@ class PregraspDemo(Node):
         latched = QoSProfile(history=QoSHistoryPolicy.KEEP_LAST, depth=1,
                              reliability=QoSReliabilityPolicy.RELIABLE,
                              durability=QoSDurabilityPolicy.TRANSIENT_LOCAL)
-        self.js_pub = self.create_publisher(JointState, "joint_states", 10)
+        # ⚠ execute 모드에선 gazebo joint_state_broadcaster 가 /joint_states 를 발행하므로
+        #   이 노드는 발행하지 않는다(이중 발행 충돌 방지). 대신 구독해 실제 상태를 추종.
+        self.js_pub = None if self.execute else self.create_publisher(JointState, "joint_states", 10)
         self.mk_pub = self.create_publisher(MarkerArray, "pregrasp_markers", latched)
         self.state_pub = self.create_publisher(DisplayRobotState, "pregrasp_robot_state",
                                                latched)
 
-        # 발행 시작(RViz TF 확보) — 서비스 대기 동안에도 home 자세 유지
-        self._publish_js()
+        if self.execute:
+            # 컨트롤러 액션 클라이언트. (계획은 upfront·가상 시작상태로 하고 캐시 궤적을 실행하므로
+            #  실제 상태 readback 은 불필요 — SetPosition 실행이 정확해 로봇이 계획을 그대로 따른다.
+            #  /joint_states 구독은 오히려 _precompute 의 가상 시작상태를 덮어써 방해하므로 안 함.)
+            self._arm_ac = ActionClient(
+                self, FollowJointTrajectory,
+                f"/{gp('arm_controller').value}/follow_joint_trajectory")
+            self._grip_ac = ActionClient(
+                self, FollowJointTrajectory,
+                f"/{gp('gripper_controller').value}/follow_joint_trajectory")
+            self.get_logger().info("execute 모드: FollowJointTrajectory 로 실구동(재생 안 함).")
+        else:
+            self._arm_ac = self._grip_ac = None
+            # 발행 시작(RViz TF 확보) — 서비스 대기 동안에도 home 자세 유지
+            self._publish_js()
 
         # ---- 서비스 ----
         self.ik = self.create_client(GetPositionIK, "compute_ik")
@@ -285,6 +311,8 @@ class PregraspDemo(Node):
 
     # ══════════════════ 유틸: 발행/재생 ══════════════════
     def _publish_js(self):
+        if self.execute:      # broadcaster 가 발행 → 이 노드는 발행 안 함
+            return
         js = JointState()
         js.header.stamp = self.get_clock().now().to_msg()
         js.name = list(self.cur.keys())
@@ -307,8 +335,12 @@ class PregraspDemo(Node):
             t += dt
 
     def _play_waypoints(self, names, waypts, duration):
-        """waypts = [pos_array,...] (각 array 는 names 순서). duration 초에 걸쳐 선형보간 재생."""
+        """waypts = [pos_array,...] (각 array 는 names 순서). duration 초에 걸쳐 선형보간 재생.
+        execute 모드면 재생 대신 컨트롤러(FollowJointTrajectory)로 실제 실행."""
         if not waypts:
+            return
+        if self.execute:
+            self._execute_traj(names, waypts, duration)
             return
         dt = 1.0 / self.rate
         nsteps = max(1, int(duration * self.rate))
@@ -327,6 +359,42 @@ class PregraspDemo(Node):
             self._publish_js()
             rclpy.spin_once(self, timeout_sec=0.0)
             time.sleep(dt)
+
+    def _execute_traj(self, names, waypts, duration):
+        """execute 모드: waypts 를 FollowJointTrajectory 로 컨트롤러에 보내 실제 실행·완료 대기.
+        names 가 그리퍼 조인트면 gripper_controller, 아니면 arm_controller 로 라우팅."""
+        nameset = set(names)
+        if nameset & set(self.FINGERS):
+            ac, ctrl_joints = self._grip_ac, ["rg2_finger_joint1"]  # 나머지 finger 는 mimic
+        else:
+            ac, ctrl_joints = self._arm_ac, list(self.ARM)
+        idx = {n: names.index(n) for n in ctrl_joints if n in names}
+        js = [j for j in ctrl_joints if j in idx]
+        if not js:
+            return
+        traj = JointTrajectory()
+        traj.joint_names = js
+        n = len(waypts)
+        for k, wp in enumerate(waypts):
+            pt = JointTrajectoryPoint()
+            pt.positions = [float(wp[idx[j]]) for j in js]
+            t = duration * (k + 1) / n            # 모두 양수·단조증가(첫 점도 t>0)
+            pt.time_from_start = DurationMsg(sec=int(t), nanosec=int((t % 1.0) * 1e9))
+            traj.points.append(pt)
+        if not ac.wait_for_server(timeout_sec=10.0):
+            self.get_logger().error(
+                "컨트롤러 액션 서버 없음 — gazebo 가 control 모드(execute:=true)로 떴는지 확인.")
+            return
+        goal = FollowJointTrajectory.Goal()
+        goal.trajectory = traj
+        gh_fut = ac.send_goal_async(goal)
+        rclpy.spin_until_future_complete(self, gh_fut, timeout_sec=15.0)
+        gh = gh_fut.result()
+        if gh is None or not gh.accepted:
+            self.get_logger().warn("궤적 goal 거부/무응답.")
+            return
+        rf = gh.get_result_async()
+        rclpy.spin_until_future_complete(self, rf, timeout_sec=duration + 20.0)
 
     def _traj_to_waypts(self, joint_traj):
         names = list(joint_traj.joint_names)

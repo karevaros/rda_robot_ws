@@ -165,6 +165,24 @@ def _setup(context, *args, **kwargs):
                                                         lc("cloud_topics").perform(context).split(",")
                                                         if s.strip()]}, sim]))
 
+    # Stage 6: 수확 시퀀스 자동 구동(pregrasp_demo)을 execute 로 함께 띄운다.
+    #   run_demo:=true + execute:=true 일 때만. 인지 타깃(det_N) + 선택한 전략/planner 로
+    #   home→pre-grasp→접근→파지→후퇴 를 컨트롤러(FollowJointTrajectory)로 실제 구동.
+    if execute and lc("run_demo").perform(context).lower() in ("1", "true", "yes"):
+        nodes.append(Node(
+            package="rda_robot_bringup", executable="pregrasp_demo.py", output="screen",
+            parameters=[{
+                "execute": True,
+                "strategy": lc("strategy").perform(context),
+                "planner_id": lc("planner_id").perform(context),
+                "target_source": "perception",
+                "targets_topic": "detected_fruits",
+                "min_scene_objects": 0,          # 센싱 장면(옥토맵만) — 명명객체 0개 허용
+                "acm_mode": "region",            # 공간(구 영역) ACM(Stage 5)
+                "ik_timeout": 0.5,               # 도달권 경계 열매엔 여유
+                "world_frame": "world", "base_link": "link0", "ik_link": "tcp", "group": "arm",
+            }, sim]))
+
     if lc("rviz").perform(context).lower() in ("1", "true", "yes"):
         # execute 모드에선 MotionPlanning(EE 마커 드래그→Plan→Execute) 포함 설정을 쓴다.
         rviz_cfg = os.path.join(cfg, "config",
@@ -205,5 +223,13 @@ def generate_launch_description():
             description="true=ros2_control 로 팔 실구동+MoveIt execute 활성화"
                         "(gazebo control:=true, 팔이 움직여 옥토맵 실시간 갱신). "
                         "⚠ Stage 5/6 는 sensors:=d435i 권장(2센서 shape_mask 깨짐)."),
+        DeclareLaunchArgument(
+            "run_demo", default_value="false",
+            description="execute=true 와 함께 true 면 수확 시퀀스(pregrasp_demo)를 컨트롤러로 "
+                        "자동 구동(인지 타깃). RViz 수동 조작 대신 전체 시퀀스 실행."),
+        DeclareLaunchArgument("strategy", default_value="harvest_linear",
+                              description="접근 전략: harvest_linear / direct (run_demo 시)."),
+        DeclareLaunchArgument("planner_id", default_value="RRTConnect",
+                              description="자유공간 OMPL 알고리즘 (run_demo 시)."),
         OpaqueFunction(function=_setup),
     ])
