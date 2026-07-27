@@ -10,6 +10,14 @@
 # 관절을 이동(placeholder 관성으로도 안정). 팔이 실제로 움직여 eye-in-hand(D405) 시점이
 # 바뀌므로 옥토맵 실시간 갱신이 성립한다(Stage 6).
 
+# gazebo_ros2_control 플러그인 노드 파라미터.
+# hold_joints=true → 컨트롤러가 붙기 전에도 관절을 (초기)위치에 붙잡아둔다. 온실처럼 무거운
+# 월드는 스폰~컨트롤러 활성 사이에 시간이 걸리는데, 이 사이 placeholder 관성 팔이 중력에
+# 쏟아지고 position 컨트롤러가 그 '쏟아진 자세'를 붙잡아 계속 처져 보였다. hold_joints 로 방지.
+gazebo_ros2_control:
+  ros__parameters:
+    hold_joints: true
+
 controller_manager:
   ros__parameters:
     update_rate: 100

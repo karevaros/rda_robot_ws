@@ -167,6 +167,31 @@ def _gazeboize_control(urdf_xml, controllers_yaml, placement):
         gj.set("name", _GRIPPER_JOINT)
         _set_interfaces(gj)
 
+    # ②' 🔴 로봇 링크 중력 OFF — 우리는 팔의 중력 역학이 필요 없다(인지·계획용 kinematic
+    #    이동만). placeholder 관성 + 중력이 오히려 불안정의 원인이었다: 스폰~컨트롤러 활성
+    #    사이(무거운 온실은 수 초)에 팔이 쏟아지고, position 컨트롤러(SetPosition)도 매 사이클
+    #    사이 누적되는 중력 속도를 완전히 못 이겨 시간이 지나며 서서히 처졌다. 링크 gravity=0
+    #    으로 두면 처질 일이 없고 SetPosition 제어는 그대로 동작한다(execute 정상).
+    for link in root.findall("link"):
+        ln = link.get("name")
+        if not ln:
+            continue
+        gz = ET.SubElement(root, "gazebo")
+        gz.set("reference", ln)
+        ET.SubElement(gz, "gravity").text = "0"
+
+    # ②'' 🔴 로봇 링크 collision 제거 — Gazebo 에서 로봇의 **물리적 충돌이 필요 없다**(카메라
+    #    렌더링·kinematic 이동만 쓰고, 충돌 회피는 MoveIt 이 계획 단계에서 처리). 온실에선 팔이
+    #    구조물(거터·레일·작물)과 접촉해 그 힘에 밀려 처졌다(empty 엔 충돌 대상이 없어 안 밀림).
+    #    collision 을 빼면 접촉이 없어 밀림이 사라진다. visual 메시는 남아 카메라엔 그대로 보인다.
+    #    (move_group 은 별도 URDF 를 쓰므로 계획용 충돌모델엔 영향 없음.)
+    _n_col = 0
+    for link in root.findall("link"):
+        for col in link.findall("collision"):
+            link.remove(col)
+            _n_col += 1
+    print(f"[gazebo_sim] control 모드: 로봇 collision {_n_col}개 제거(물리 접촉 방지)")
+
     # ② world 고정
     bx, by, bz, byaw = placement
     if root.find("link[@name='world']") is None:
@@ -297,11 +322,8 @@ def _setup(context, *args, **kwargs):
             return Node(package="controller_manager", executable="spawner", output="screen",
                         arguments=[name, "--controller-manager", "/controller_manager",
                                    "--controller-manager-timeout", "120"])
-        # 🔴 고정 타이머 대신 **이벤트 연쇄**로 스포너를 띄운다. 온실처럼 무거운 월드·GUI·RViz
-        #   부하에선 gazebo 모델 로드→CM 기동이 느려져 고정 타이머(12/16/20s)가 CM 보다 앞서거나
-        #   configure 응답이 느려 스포너가 지쳐 실패했다(→ 컨트롤러 미부착 → 팔이 바닥으로 처짐).
-        #   ⇒ spawn_entity 완료 후 broadcaster→arm→gripper 를 **하나 끝나면 다음** 순으로 연쇄.
-        #   각 스포너는 CM 을 최대 120s 대기(--controller-manager-timeout). 부하와 무관하게 견고.
+        # spawn_entity 완료 후 broadcaster→arm→gripper 를 이벤트 연쇄로(부하와 무관하게 순차 기동).
+        # 링크 중력 OFF 라 스폰~부착 사이 지연이 있어도 팔이 처지지 않는다(물리 정지 불필요).
         jsb = _spawner("joint_state_broadcaster")
         arm = _spawner("arm_controller")
         grp = _spawner("gripper_controller")
