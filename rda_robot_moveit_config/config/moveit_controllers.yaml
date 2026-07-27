@@ -1,0 +1,40 @@
+# MoveIt ↔ ros2_control 배선 (6주차 · execute 활성화 시 move_group 이 로드)
+# MoveItSimpleControllerManager 가 아래 컨트롤러의 FollowJointTrajectory 액션으로 궤적을
+# 실행한다. 컨트롤러 이름·조인트는 controllers.yaml(gazebo_ros2_control 쪽)과 정확히 일치.
+#   arm_controller     → /arm_controller/follow_joint_trajectory
+#   gripper_controller → /gripper_controller/follow_joint_trajectory
+# (JTC 는 action_ns=follow_joint_trajectory 로 액션을 연다)
+
+moveit_controller_manager: moveit_simple_controller_manager/MoveItSimpleControllerManager
+
+moveit_simple_controller_manager:
+  controller_names:
+    - arm_controller
+    - gripper_controller
+
+  arm_controller:
+    type: FollowJointTrajectory
+    action_ns: follow_joint_trajectory
+    default: true
+    joints:
+      - base
+      - shoulder
+      - elbow
+      - wrist1
+      - wrist2
+      - wrist3
+
+  gripper_controller:
+    type: FollowJointTrajectory
+    action_ns: follow_joint_trajectory
+    default: true
+    joints:
+      - rg2_finger_joint1
+
+# 실행 허용오차 — 시작 자세와 궤적 첫 점의 오차/시간 스케일. 너무 빡빡하면 execute 가
+# "Invalid Trajectory: start point deviates" 로 거부된다. Gazebo kinematic 구동은 정확하나
+# 여유를 둔다.
+trajectory_execution:
+  allowed_execution_duration_scaling: 1.5
+  allowed_goal_duration_margin: 0.5
+  allowed_start_tolerance: 0.05

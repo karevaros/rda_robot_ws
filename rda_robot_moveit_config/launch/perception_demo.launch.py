@@ -80,9 +80,14 @@ def _setup(context, *args, **kwargs):
                 _load_yaml(os.path.join(cfg, "config", "joint_limits.yaml"))}
     ompl = _load_yaml(os.path.join(cfg, "config", "ompl_planning.yaml"))
     pipe = {"planning_pipelines": ["ompl"], "default_planning_pipeline": "ompl", "ompl": ompl}
-    execu = {"allow_trajectory_execution": False, "publish_planning_scene": True,
+    execute = lc("execute").perform(context).lower() in ("1", "true", "yes")
+    execu = {"allow_trajectory_execution": execute, "publish_planning_scene": True,
              "publish_geometry_updates": True, "publish_state_updates": True,
              "publish_transforms_updates": True}
+    if execute:
+        # MoveIt ↔ ros2_control 배선(SimpleControllerManager→FollowJointTrajectory) +
+        # 실행 허용오차. gazebo 는 control:=true 로 GazeboSystem 컨트롤러를 띄운다.
+        execu = {**execu, **_load_yaml(os.path.join(cfg, "config", "moveit_controllers.yaml"))}
     sim = {"use_sim_time": True}
 
     # ★ Stage 3 의 본체: 3D 센서 → 옥토맵.
@@ -127,9 +132,13 @@ def _setup(context, *args, **kwargs):
             os.path.join(desc, "launch", "gazebo_sim.launch.py")),
         launch_arguments={"mounts_file": mounts,
                           "gui": lc("gui").perform(context),
-                          "world": lc("world").perform(context)}.items())
+                          "world": lc("world").perform(context),
+                          "control": "true" if execute else "false"}.items())
 
-    nodes = [gazebo, move_group, world_tf]
+    # ⚠ execute(control) 모드에선 gazebo 의 rsp 가 world_fixed 조인트로 world→base_link 를
+    #   이미 발행한다(배치는 그 조인트 origin 에 반영). 여기서 world_tf 를 또 발행하면 같은
+    #   TF 엣지가 두 소스가 되어 충돌하므로 넣지 않는다.
+    nodes = [gazebo, move_group] + ([] if execute else [world_tf])
 
     # 명명 장애물(obstacles.yaml)은 기본 off — Stage 3 의 목적이 '센싱만으로 장애물이
     # 서는가' 이므로 켜 두면 무엇이 옥토맵인지 구분이 안 된다. 비교용으로만 켠다.
@@ -181,5 +190,10 @@ def generate_launch_description():
                               default_value="/d435i/depth/points,/d405/depth/points",
                               description="인지에 쓸 포인트클라우드 토픽(쉼표 구분)"),
         DeclareLaunchArgument("rviz", default_value="true"),
+        DeclareLaunchArgument(
+            "execute", default_value="false",
+            description="true=ros2_control 로 팔 실구동+MoveIt execute 활성화"
+                        "(gazebo control:=true, 팔이 움직여 옥토맵 실시간 갱신). "
+                        "⚠ Stage 5/6 는 sensors:=d435i 권장(2센서 shape_mask 깨짐)."),
         OpaqueFunction(function=_setup),
     ])
