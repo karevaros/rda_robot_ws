@@ -155,6 +155,10 @@ class PregraspDemo(Node):
         # harvest_all = 도달 가능한 열매를 하나씩 **연속 수확**(단일 열매 반복 대신). harvest_max 개까지.
         self.declare_parameter("harvest_all", False)
         self.declare_parameter("harvest_max", 5)
+        # prefer_near_home = pre-grasp 자세 후보를 **home 과 관절거리가 가까운** 것으로 우선 선택
+        #   → phase ①(home→pre-grasp)에서 손목/관절이 크게 뒤집혀 도는 동작을 없앤다.
+        #   (false 면 종전대로 접근각 자연스러움(prior)만으로 선택)
+        self.declare_parameter("prefer_near_home", True)
 
         gp = self.get_parameter
         self.world = gp("world_frame").value
@@ -888,6 +892,7 @@ class PregraspDemo(Node):
         반환: dict(q_pre, q_grasp, a, p_pre, p_grasp, quat, c) 또는 None."""
         d0 = float(self.get_parameter("standoff").value)
         goff = float(self.get_parameter("grasp_offset").value)
+        prefer_home = bool(self.get_parameter("prefer_near_home").value)
         yaw = float(self.get_parameter("approach_yaw_deg").value)
         if not math.isnan(yaw):
             a0 = np.array([math.cos(math.radians(yaw)), math.sin(math.radians(yaw)), 0.0])
@@ -915,10 +920,16 @@ class PregraspDemo(Node):
             qg = self.solve_ik(p_grasp, quat, avoid=True)   # grasp 도 도달? (직선 접근 보장)
             if qg is None:
                 continue
-            if best is None or c.prior < best[0]:
-                best = (c.prior, c, a, p_pre, p_grasp, quat, q, qg)
-                if c.prior == 0.0:
-                    break
+            if prefer_home:
+                # home(관절 0) 과의 L1 관절거리 우선 + prior 는 가벼운 보조항 → 가장 덜 도는 자세
+                jd = sum(abs(float(q.get(j, 0.0))) for j in self.ARM)
+                score = jd + 0.15 * c.prior
+            else:
+                score = c.prior
+            if best is None or score < best[0]:
+                best = (score, c, a, p_pre, p_grasp, quat, q, qg)
+                if not prefer_home and c.prior == 0.0:
+                    break                                    # 종전: 첫 정면각에서 종료
         if best is None:
             return None
         _, c, a, p_pre, p_grasp, quat, q, qg = best
@@ -990,6 +1001,7 @@ class PregraspDemo(Node):
         bxy = self._base_xy()
         hv = (p_fruit[:2] - bxy) if bxy is not None else np.array([1.0, 0.0])
         a0 = PG._unit(np.array([hv[0], hv[1], 0.0]))
+        prefer_home = bool(self.get_parameter("prefer_near_home").value)
         phis = [0, -10, 10, -20, 20, -30, 30, -40, 40]
         thetas = [0, 15, 30, -15, -30]        # +θ = 위에서 접근(매달린 열매에 유리)
         best = None                            # (key, frac, sol)
@@ -999,6 +1011,7 @@ class PregraspDemo(Node):
                 quat = PG.mat_to_quat(PG.gaze_rotation(a, 0.0, self.approach_axis))
                 p_grasp = p_fruit - a * goff
                 p_pre = p_grasp - a * d0
+                self._set({j: 0.0 for j in self.ARM})   # IK 시드=home → 후보 자세를 home 근처로
                 q = self.solve_ik(p_pre, quat, avoid=True)
                 if q is None:
                     continue
@@ -1013,7 +1026,10 @@ class PregraspDemo(Node):
                 cart = self.cartesian_to(gp_pose)
                 frac = cart[2] if cart is not None else 0.0
                 prior = abs(phd) + abs(thd)          # nominal(수평) 근접 — tie-break
-                key = (round(frac, 3), -prior)
+                # prefer_home: 같은 fraction 이면 **home 과 관절거리가 작은**(덜 도는) 자세 우선.
+                hdist = sum(abs(float(q.get(j, 0.0))) for j in self.ARM)
+                key = ((round(frac, 3), -hdist, -prior) if prefer_home
+                       else (round(frac, 3), -prior))
                 if best is None or key > best[0]:
                     c = SimpleNamespace(phi=math.radians(phd), theta=math.radians(thd),
                                         psi=0.0, d=d0, prior=prior)

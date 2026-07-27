@@ -138,6 +138,7 @@ def _setup(context, *args, **kwargs):
         "planner_id": lc("planner_id").perform(context),
         "harvest_all": lc("harvest_all").perform(context).lower() in ("1", "true", "yes"),
         "harvest_max": int(lc("harvest_max").perform(context)),
+        "prefer_near_home": lc("prefer_near_home").perform(context).lower() in ("1", "true", "yes"),
     }
     use_yaml = lc("use_yaml_target").perform(context).lower() in ("1", "true", "yes")
     if not use_yaml:
@@ -225,6 +226,8 @@ def generate_launch_description():
                               description="도달 열매를 하나씩 연속 수확(단일 열매 반복 대신)."),
         DeclareLaunchArgument("harvest_max", default_value="5",
                               description="연속 수확 최대 열매 수."),
+        DeclareLaunchArgument("prefer_near_home", default_value="true",
+                              description="pre-grasp 자세를 home 에 가까운 것으로 선택(접근 전 큰 회전 제거)."),
         DeclareLaunchArgument("rviz", default_value="true"),
         OpaqueFunction(function=_setup),
     ])
