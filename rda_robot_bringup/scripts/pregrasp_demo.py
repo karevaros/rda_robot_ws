@@ -163,6 +163,10 @@ class PregraspDemo(Node):
         # interactive = 실제 로봇 조작하듯 **사용자가 타깃을 골라 명령**하는 모드. 자동 수확 대신
         #   /harvest_targets(목록 발행) + /harvest_cmd(선택 수신)으로 동작. harvest_operator 로 조작.
         self.declare_parameter("interactive", False)
+        # reachable_only = 목록/선택 대상을 **워크스페이스 내 수확 가능한 열매**로 한정(도달·충돌 통과).
+        #   arm_reach = 기하 프리필터용 팔 최대 도달반경[m](link0 기준) — IK 호출 전 명백히 먼 열매 제거.
+        self.declare_parameter("reachable_only", True)
+        self.declare_parameter("arm_reach", 1.0)
 
         gp = self.get_parameter
         self.world = gp("world_frame").value
@@ -1735,14 +1739,18 @@ class PregraspDemo(Node):
     def run_harvest_all(self):
         """도달 가능한 열매를 가까운 순으로 **하나씩 연속 수확**(harvest_max 개까지). 각 열매마다
         선택 전략으로 계획→실행. 단일 열매 반복(run) 대신 실제 수확 런에 가깝다."""
-        tg = self._all_targets()
+        # reachable_only(기본): 수확 가능한 열매만(가까운 순). 아니면 전체를 가까운 순.
+        if bool(self.get_parameter("reachable_only").value):
+            tg = self._harvestable_targets()
+        else:
+            tg = self._all_targets()
+            bxy = self._base_xy()
+            if bxy is not None:
+                l0 = np.array([bxy[0], bxy[1], 0.35])
+                tg.sort(key=lambda t: float(np.linalg.norm(t[1] - l0)))
         if not tg:
-            self.get_logger().error("열매를 찾지 못함 — target_source/obstacles.yaml 확인.")
+            self.get_logger().error("수확 가능한 열매를 찾지 못함 — 도달권/타깃/base 위치 확인.")
             return 0
-        bxy = self._base_xy()
-        if bxy is not None:
-            l0 = np.array([bxy[0], bxy[1], 0.35])
-            tg.sort(key=lambda t: float(np.linalg.norm(t[1] - l0)))
         hmax = int(self.get_parameter("harvest_max").value)
         picked = tg[:hmax] if hmax > 0 else tg
         self.get_logger().info(
@@ -1770,9 +1778,50 @@ class PregraspDemo(Node):
             f"(후보 {len(picked)}, 전체 {len(tg)})")
         return harvested
 
+    # ══════════════════ 수확 가능(워크스페이스) 필터 ══════════════════
+    def _is_harvestable(self, p_fruit, r):
+        """빠른 수확가능 판정 — 전체 후보 샘플링 없이:
+        ① 기하 프리필터: link0(팔 base) 기준 거리가 도달반경(arm_reach) 밖이면 즉시 제외.
+        ② 명목 접근자세(base→열매 수평)로 **pre-grasp·grasp IK** 통과 확인(충돌 포함).
+        (정밀 판정·직선성은 선택 시 solve_pregrasp 가 다시 확정. 여기선 목록용 빠른 선별.)"""
+        bxy = self._base_xy()
+        goff = float(self.get_parameter("grasp_offset").value)
+        d0 = float(self.get_parameter("standoff").value)
+        reach = float(self.get_parameter("arm_reach").value)
+        if bxy is not None:
+            l0 = np.array([bxy[0], bxy[1], 0.35])       # link0 world(≈팔 base)
+            d = float(np.linalg.norm(p_fruit - l0))
+            if d > reach + goff + 0.05 or d < 0.15:      # 명백히 밖/안 → 제외
+                return False
+            hv = p_fruit[:2] - bxy
+        else:
+            hv = np.array([1.0, 0.0])
+        a = PG._unit(np.array([hv[0], hv[1], 0.0])) if np.linalg.norm(hv) > 1e-6 \
+            else np.array([1.0, 0.0, 0.0])
+        quat = PG.mat_to_quat(PG.gaze_rotation(a, 0.0, self.approach_axis))
+        p_grasp = p_fruit - a * goff
+        p_pre = p_grasp - a * d0
+        self._set({j: 0.0 for j in self.ARM})           # IK 시드 = home
+        if self.solve_ik(p_pre, quat, avoid=True) is None:
+            return False
+        return self.solve_ik(p_grasp, quat, avoid=True) is not None
+
+    def _harvestable_targets(self):
+        """워크스페이스 내 수확 가능한 열매만 도출(가까운 순). 기하 프리필터 후 IK 로 확정."""
+        tg = self._all_targets()
+        bxy = self._base_xy()
+        if bxy is not None and tg:
+            l0 = np.array([bxy[0], bxy[1], 0.35])
+            tg.sort(key=lambda t: float(np.linalg.norm(t[1] - l0)))
+        out = [(n, p, r) for (n, p, r) in tg if self._is_harvestable(p, r)]
+        self.get_logger().info(f"수확 가능 열매 {len(out)} / 전체 {len(tg)} (워크스페이스 필터)")
+        return out
+
     # ══════════════════ 인터랙티브(조작기) 모드 ══════════════════
     def _itarget_list(self):
-        """현재 타깃을 base 로부터 가까운 순으로 정렬해 반환(조작기 목록·번호의 단일 기준)."""
+        """조작기 목록·번호의 단일 기준. reachable_only 면 수확 가능한 열매만, 아니면 전체(가까운 순)."""
+        if bool(self.get_parameter("reachable_only").value):
+            return self._harvestable_targets()
         tg = self._all_targets()
         bxy = self._base_xy()
         if bxy is not None and tg:

@@ -140,6 +140,8 @@ def _setup(context, *args, **kwargs):
         "harvest_max": int(lc("harvest_max").perform(context)),
         "prefer_near_home": lc("prefer_near_home").perform(context).lower() in ("1", "true", "yes"),
         "interactive": lc("interactive").perform(context).lower() in ("1", "true", "yes"),
+        "reachable_only": lc("reachable_only").perform(context).lower() in ("1", "true", "yes"),
+        "arm_reach": float(lc("arm_reach").perform(context)),
     }
     use_yaml = lc("use_yaml_target").perform(context).lower() in ("1", "true", "yes")
     if not use_yaml:
@@ -231,6 +233,10 @@ def generate_launch_description():
                               description="pre-grasp 자세를 home 에 가까운 것으로 선택(접근 전 큰 회전 제거)."),
         DeclareLaunchArgument("interactive", default_value="false",
                               description="자동 수확 대신 사용자가 타깃을 골라 명령(harvest_operator)."),
+        DeclareLaunchArgument("reachable_only", default_value="true",
+                              description="워크스페이스 내 수확 가능한 열매만 목록/선택."),
+        DeclareLaunchArgument("arm_reach", default_value="1.0",
+                              description="기하 프리필터용 팔 최대 도달반경[m](link0 기준)."),
         DeclareLaunchArgument("rviz", default_value="true"),
         OpaqueFunction(function=_setup),
     ])
