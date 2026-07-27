@@ -152,6 +152,9 @@ class PregraspDemo(Node):
         self.declare_parameter("execute", False)
         self.declare_parameter("arm_controller", "arm_controller")
         self.declare_parameter("gripper_controller", "gripper_controller")
+        # harvest_all = 도달 가능한 열매를 하나씩 **연속 수확**(단일 열매 반복 대신). harvest_max 개까지.
+        self.declare_parameter("harvest_all", False)
+        self.declare_parameter("harvest_max", 5)
 
         gp = self.get_parameter
         self.world = gp("world_frame").value
@@ -1659,9 +1662,14 @@ class PregraspDemo(Node):
             self.get_logger().info(
                 f"계획 완료 → 접근 방식={method}" + ("" if checked else " ⚠충돌검증 안됨")
                 + ". 이후 반복은 이 궤적을 매끈하게 재생만 함(재계획 없음).")
-        c = self._plan_cache
-        c_sol = c.get("sol", sol)
-        self._publish_markers(p_fruit, r, c_sol["p_pre"], c_sol["a"], reachable=True)
+        return self._play_cycle(name, p_fruit, r, self._plan_cache)
+
+    def _play_cycle(self, name, p_fruit, r, c):
+        """계획 dict c(전략 산출)의 한 수확 사이클(home→pre→접근→파지→후퇴→home)을 실행/재생.
+        execute 모드면 각 구간이 컨트롤러로 실구동된다."""
+        c_sol = c.get("sol")
+        if c_sol is not None:
+            self._publish_markers(p_fruit, r, c_sol["p_pre"], c_sol["a"], reachable=True)
 
         gopen, close = c["gopen"], c["close"]
         q_pre, q_grasp, q_home = c["q_pre"], c["q_grasp"], c["q_home"]
@@ -1701,8 +1709,46 @@ class PregraspDemo(Node):
                                  float(self.get_parameter("dur_home").value))
         self._set({j: 0.0 for j in self.ARM})
         self._hold(float(self.get_parameter("pause").value))
-        self.get_logger().info(f"[{name}] 데모 1회 완료(재생).")
+        self.get_logger().info(f"[{name}] 수확 사이클 완료.")
         return True
+
+    def run_harvest_all(self):
+        """도달 가능한 열매를 가까운 순으로 **하나씩 연속 수확**(harvest_max 개까지). 각 열매마다
+        선택 전략으로 계획→실행. 단일 열매 반복(run) 대신 실제 수확 런에 가깝다."""
+        tg = self._all_targets()
+        if not tg:
+            self.get_logger().error("열매를 찾지 못함 — target_source/obstacles.yaml 확인.")
+            return 0
+        bxy = self._base_xy()
+        if bxy is not None:
+            l0 = np.array([bxy[0], bxy[1], 0.35])
+            tg.sort(key=lambda t: float(np.linalg.norm(t[1] - l0)))
+        hmax = int(self.get_parameter("harvest_max").value)
+        picked = tg[:hmax] if hmax > 0 else tg
+        self.get_logger().info(
+            f"연속 수확 시작 — 전략={self.strategy} · 후보 {len(picked)}개(전체 {len(tg)}, 가까운 순)")
+        harvested = attempted = skipped = 0
+        for name, p_fruit, r in picked:
+            sol = self.solve_pregrasp(p_fruit, r)
+            if sol is None:
+                skipped += 1
+                self.get_logger().info(f"  건너뜀 {name}(도달불가/충돌)")
+                continue
+            attempted += 1
+            self.get_logger().info(
+                f"── 수확 {attempted}: {name} @ "
+                f"({p_fruit[0]:.2f},{p_fruit[1]:.2f},{p_fruit[2]:.2f}) r={r:.3f} ──")
+            try:
+                c = self._precompute(name, p_fruit, r, sol)
+                if self._play_cycle(name, p_fruit, r, c):
+                    harvested += 1
+            except Exception as e:
+                self.get_logger().warn(f"  {name} 수확 실패: {e}")
+            self._hold(float(self.get_parameter("pause").value))
+        self.get_logger().info(
+            f"연속 수확 완료 — 수확 {harvested} / 시도 {attempted} / 건너뜀 {skipped} "
+            f"(후보 {len(picked)}, 전체 {len(tg)})")
+        return harvested
 
 
 def main():
@@ -1732,6 +1778,16 @@ def main():
             node._diag_straight()
             node.destroy_node()
             rclpy.shutdown()
+            return
+        if node.get_parameter("harvest_all").value:
+            # 연속 수확: 도달 열매를 하나씩. loop 면 전체 세트를 반복.
+            while rclpy.ok():
+                node.run_harvest_all()
+                if not node.get_parameter("loop").value:
+                    while rclpy.ok():
+                        node._hold(1.0)
+                    break
+                node._hold(2.0)
             return
         while rclpy.ok():
             ok = node.run()

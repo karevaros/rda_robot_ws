@@ -136,6 +136,8 @@ def _setup(context, *args, **kwargs):
         # Stage 6: 접근 전략(작업 플래너) + 자유공간 OMPL 알고리즘 선택
         "strategy": lc("strategy").perform(context),
         "planner_id": lc("planner_id").perform(context),
+        "harvest_all": lc("harvest_all").perform(context).lower() in ("1", "true", "yes"),
+        "harvest_max": int(lc("harvest_max").perform(context)),
     }
     use_yaml = lc("use_yaml_target").perform(context).lower() in ("1", "true", "yes")
     if not use_yaml:
@@ -219,6 +221,10 @@ def generate_launch_description():
         DeclareLaunchArgument("planner_id", default_value="RRTConnect",
                               description="자유공간 구간 OMPL 알고리즘: RRTConnect·RRT·RRTstar·"
                                           "BiTRRT·EST·PRM (ompl_planning.yaml arm 목록)."),
+        DeclareLaunchArgument("harvest_all", default_value="false",
+                              description="도달 열매를 하나씩 연속 수확(단일 열매 반복 대신)."),
+        DeclareLaunchArgument("harvest_max", default_value="5",
+                              description="연속 수확 최대 열매 수."),
         DeclareLaunchArgument("rviz", default_value="true"),
         OpaqueFunction(function=_setup),
     ])

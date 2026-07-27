@@ -175,6 +175,8 @@ def _setup(context, *args, **kwargs):
                 "execute": True,
                 "strategy": lc("strategy").perform(context),
                 "planner_id": lc("planner_id").perform(context),
+                "harvest_all": lc("harvest_all").perform(context).lower() in ("1", "true", "yes"),
+                "harvest_max": int(lc("harvest_max").perform(context)),
                 "target_source": "perception",
                 "targets_topic": "detected_fruits",
                 "min_scene_objects": 0,          # 센싱 장면(옥토맵만) — 명명객체 0개 허용
@@ -231,5 +233,9 @@ def generate_launch_description():
                               description="접근 전략: harvest_linear / direct (run_demo 시)."),
         DeclareLaunchArgument("planner_id", default_value="RRTConnect",
                               description="자유공간 OMPL 알고리즘 (run_demo 시)."),
+        DeclareLaunchArgument("harvest_all", default_value="false",
+                              description="run_demo 시 도달 열매를 하나씩 연속 수확(단일 반복 대신)."),
+        DeclareLaunchArgument("harvest_max", default_value="5",
+                              description="연속 수확 최대 열매 수(harvest_all 시)."),
         OpaqueFunction(function=_setup),
     ])
