@@ -166,7 +166,9 @@ def _setup(context, *args, **kwargs):
                                                         if s.strip()]}, sim]))
 
     if lc("rviz").perform(context).lower() in ("1", "true", "yes"):
-        rviz_cfg = os.path.join(cfg, "config", "perception_demo.rviz")
+        # execute 모드에선 MotionPlanning(EE 마커 드래그→Plan→Execute) 포함 설정을 쓴다.
+        rviz_cfg = os.path.join(cfg, "config",
+                                "perception_execute.rviz" if execute else "perception_demo.rviz")
         if not os.path.exists(rviz_cfg):
             rviz_cfg = os.path.join(cfg, "config", "moveit.rviz")
         nodes.append(Node(package="rviz2", executable="rviz2", output="screen",
