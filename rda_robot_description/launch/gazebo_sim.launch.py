@@ -24,7 +24,9 @@ import yaml
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (DeclareLaunchArgument, ExecuteProcess,
-                            OpaqueFunction, SetEnvironmentVariable, TimerAction)
+                            OpaqueFunction, RegisterEventHandler,
+                            SetEnvironmentVariable, TimerAction)
+from launch.event_handlers import OnProcessExit
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
@@ -286,28 +288,29 @@ def _setup(context, *args, **kwargs):
     if control:
         # control 모드: 관절 상태는 joint_state_broadcaster 가 발행(jsp 금지 — 충돌).
         # 배치는 world_fixed 조인트 origin 에 이미 반영 → spawn pose 는 0.
-        spawn = TimerAction(period=5.0, actions=[
-            Node(package="gazebo_ros", executable="spawn_entity.py", output="screen",
-                 arguments=["-topic", "robot_description", "-entity", "rda_robot",
-                            "-timeout", "60"])])
-        # gazebo_ros2_control 플러그인이 controller_manager 를 띄운 뒤 스포너로 활성화.
-        # ⚠ 스폰(5s)→Gazebo 모델 로드→플러그인 CM 생성까지 시간이 더 걸린다. 스포너가 너무
-        #   일찍 뜨면 CM 을 못 찾아 실패한다 → 12s 로 미루고, 그래도 못 찾으면 60s 까지
-        #   기다리도록 --controller-manager-timeout 을 준다(활성 실패 시 팔이 중력에 처짐).
+        spawn_node = Node(package="gazebo_ros", executable="spawn_entity.py", output="screen",
+                          arguments=["-topic", "robot_description", "-entity", "rda_robot",
+                                     "-timeout", "60"])
+        spawn = TimerAction(period=5.0, actions=[spawn_node])
+
         def _spawner(name):
             return Node(package="controller_manager", executable="spawner", output="screen",
                         arguments=[name, "--controller-manager", "/controller_manager",
-                                   "--controller-manager-timeout", "60"])
-        # ⚠ gazebo 안의 CM 은 기동 직후 서비스 응답이 느려(sim 루프에 묶임) 스포너들을 동시에
-        #   띄우면 configure 호출이 타임아웃→재시도→"이미 active" 로 실패한다(컨트롤러 자체는
-        #   1차 시도로 active 가 됨). ⇒ **시차를 두고 하나씩** 띄워 CM 부하를 분산한다.
-        #   broadcaster(관절상태 발행) 먼저, 그다음 arm, gripper.
-        spawners = [
-            TimerAction(period=12.0, actions=[_spawner("joint_state_broadcaster")]),
-            TimerAction(period=16.0, actions=[_spawner("arm_controller")]),
-            TimerAction(period=20.0, actions=[_spawner("gripper_controller")]),
+                                   "--controller-manager-timeout", "120"])
+        # 🔴 고정 타이머 대신 **이벤트 연쇄**로 스포너를 띄운다. 온실처럼 무거운 월드·GUI·RViz
+        #   부하에선 gazebo 모델 로드→CM 기동이 느려져 고정 타이머(12/16/20s)가 CM 보다 앞서거나
+        #   configure 응답이 느려 스포너가 지쳐 실패했다(→ 컨트롤러 미부착 → 팔이 바닥으로 처짐).
+        #   ⇒ spawn_entity 완료 후 broadcaster→arm→gripper 를 **하나 끝나면 다음** 순으로 연쇄.
+        #   각 스포너는 CM 을 최대 120s 대기(--controller-manager-timeout). 부하와 무관하게 견고.
+        jsb = _spawner("joint_state_broadcaster")
+        arm = _spawner("arm_controller")
+        grp = _spawner("gripper_controller")
+        chain = [
+            RegisterEventHandler(OnProcessExit(target_action=spawn_node, on_exit=[jsb])),
+            RegisterEventHandler(OnProcessExit(target_action=jsb, on_exit=[arm])),
+            RegisterEventHandler(OnProcessExit(target_action=arm, on_exit=[grp])),
         ]
-        return procs + [rsp, spawn] + spawners
+        return procs + [rsp, spawn] + chain
 
     # 기본(static) 모드: TF 완성용 jsp(팔 관절 0 고정) + base_placement spawn pose.
     jsp = Node(package="joint_state_publisher", executable="joint_state_publisher",
