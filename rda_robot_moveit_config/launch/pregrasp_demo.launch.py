@@ -24,7 +24,9 @@ import os
 import yaml
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, OpaqueFunction
+from launch.actions import (DeclareLaunchArgument, OpaqueFunction, RegisterEventHandler,
+                            Shutdown)
+from launch.event_handlers import OnProcessExit
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
@@ -142,6 +144,14 @@ def _setup(context, *args, **kwargs):
         "interactive": lc("interactive").perform(context).lower() in ("1", "true", "yes"),
         "reachable_only": lc("reachable_only").perform(context).lower() in ("1", "true", "yes"),
         "arm_reach": float(lc("arm_reach").perform(context)),
+        # 6주차 후속: 전략 × planner 정량 비교(계획만 수행, 재생 없음)
+        "bench_strategy": lc("bench_strategy").perform(context).lower() in ("1", "true", "yes"),
+        "bench_strategies": [s.strip() for s in
+                             lc("bench_strategies").perform(context).split(",") if s.strip()],
+        "bench_planners": [s.strip() for s in
+                           lc("bench_planners").perform(context).split(",") if s.strip()],
+        "bench_repeat": int(lc("bench_repeat").perform(context)),
+        "bench_out": lc("bench_out").perform(context),
     }
     use_yaml = lc("use_yaml_target").perform(context).lower() in ("1", "true", "yes")
     if not use_yaml:
@@ -152,7 +162,13 @@ def _setup(context, *args, **kwargs):
 
     nodes = [rsp, move_group, world_tf, obstacles, demo]
     scanning = any(lc(a).perform(context).lower() in ("1", "true", "yes")
-                   for a in ("scan_all", "diag_straight", "bench", "verify_region"))
+                   for a in ("scan_all", "diag_straight", "bench", "verify_region",
+                             "bench_strategy"))
+    if scanning:
+        # 측정/스캔 모드는 데모 노드가 끝나면 할 일이 없다 → 스택 전체를 내린다.
+        # (안 그러면 move_group·obstacle_publisher 가 남아 사용자가 Ctrl-C 를 눌러야 한다.)
+        nodes.append(RegisterEventHandler(
+            OnProcessExit(target_action=demo, on_exit=[Shutdown(reason="측정 완료")])))
     if not scanning and lc("rviz").perform(context).lower() in ("1", "true", "yes"):
         rviz_cfg = os.path.join(cfg, "config", "pregrasp_demo.rviz")
         if not os.path.exists(rviz_cfg):
@@ -198,6 +214,18 @@ def generate_launch_description():
                               description="true=조건별 비교실험(제안/각도탐색없음/선택ACM없음/전작물무시) 후 종료"),
         DeclareLaunchArgument("verify_region", default_value="false",
                               description="true=구 영역 허용 전/후를 옥토맵 크기·충돌 접촉·IK 로 측정 후 종료 [Stage 5]"),
+        DeclareLaunchArgument("bench_strategy", default_value="false",
+                              description="전략 × planner 정량 비교 측정 후 종료(계획만, 재생 없음). "
+                                          "계획시간·경로길이(관절/TCP)·성공률·충돌wp 를 표/JSON/CSV 로"),
+        DeclareLaunchArgument("bench_strategies", default_value="harvest_linear,direct",
+                              description="비교할 접근 전략(쉼표 구분)"),
+        DeclareLaunchArgument("bench_planners",
+                              default_value="RRTConnect,RRT,RRTstar,BiTRRT,EST,PRM",
+                              description="비교할 OMPL 알고리즘(쉼표 구분, ompl_planning.yaml 과 일치)"),
+        DeclareLaunchArgument("bench_repeat", default_value="3",
+                              description="같은 조합 반복 횟수(OMPL 은 확률적 — 평균용)"),
+        DeclareLaunchArgument("bench_out", default_value="/tmp/bench_strategy",
+                              description="원자료 저장 경로 접두사(.json/.csv)"),
         DeclareLaunchArgument("bench_n", default_value="8",
                               description="비교실험 표본 열매 수(0=도달 가능 전부)"),
         DeclareLaunchArgument("ik_timeout", default_value="0.1",

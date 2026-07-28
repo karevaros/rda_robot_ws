@@ -167,6 +167,16 @@ class PregraspDemo(Node):
         #   arm_reach = 기하 프리필터용 팔 최대 도달반경[m](link0 기준) — IK 호출 전 명백히 먼 열매 제거.
         self.declare_parameter("reachable_only", True)
         self.declare_parameter("arm_reach", 1.0)
+        # ── 전략·planner 비교 측정(bench_strategy) ─────────────────────
+        #   같은 표본 열매에 대해 (전략 × planner) 조합마다 **전체 수확 궤적을 계획**해
+        #   계획시간·경로길이(관절/TCP)·성공률·충돌 웨이포인트를 잰다. 재생/실행은 하지 않는다.
+        #   ⚠ OMPL 은 확률적이라 1회 측정은 흔들린다 → bench_repeat 로 반복 평균.
+        self.declare_parameter("bench_strategy", False)
+        self.declare_parameter("bench_strategies", ["harvest_linear", "direct"])
+        self.declare_parameter("bench_planners",
+                               ["RRTConnect", "RRT", "RRTstar", "BiTRRT", "EST", "PRM"])
+        self.declare_parameter("bench_repeat", 3)
+        self.declare_parameter("bench_out", "/tmp/bench_strategy")   # .json/.csv 로 저장
 
         gp = self.get_parameter
         self.world = gp("world_frame").value
@@ -260,6 +270,7 @@ class PregraspDemo(Node):
         urdf = self._get_str_param("robot_state_publisher", "robot_description")
         srdf = self._get_str_param("move_group", "robot_description_semantic")
         info = None
+        self._fk = None                      # (joints, chain) — 로컬 FK(경로길이 측정용)
         if urdf and srdf:
             try:
                 info = RI.playback_joints(srdf, urdf, self.group,
@@ -268,6 +279,10 @@ class PregraspDemo(Node):
                     self.ARM = info["arm"]
                 if info["gripper_all"]:
                     self.FINGERS = info["gripper_all"]
+                chain = RI.fk_chain(info["joints"], info["child_to_joint"],
+                                    self.get_parameter("base_link").value, self.ik_link)
+                if chain:
+                    self._fk = (info["joints"], chain)
             except Exception as e:
                 self.get_logger().warn(f"관절 introspection 실패({e}) → 폴백 유지")
         else:
@@ -472,8 +487,16 @@ class PregraspDemo(Node):
             c.joint_constraints.append(jc)
         mpr.goal_constraints.append(c)
         req.motion_plan_request = mpr
+        t0 = time.time()
         res = self._call(self.plan, req, mpr.allowed_planning_time + 2.0)
-        if res is None or res.motion_plan_response.error_code.val != 1:
+        ok = res is not None and res.motion_plan_response.error_code.val == 1
+        st = getattr(self, "_plan_stat", None)     # bench_strategy 측정용(평소엔 None)
+        if st is not None:
+            st["calls"] += 1
+            st["t"] += time.time() - t0
+            if not ok:
+                st["fail"] += 1
+        if not ok:
             return None
         return self._traj_to_waypts(res.motion_plan_response.trajectory.joint_trajectory)
 
@@ -1474,11 +1497,14 @@ class PregraspDemo(Node):
           no_acm     = 선택적 해제 없음(전 작물 장애물)
           ignore_all = 전 작물 충돌 무시(순진한 완화)
         """
-        self._bench_crops = self._crop_objects()
-        self.get_logger().info(f"작물 객체 {len(self._bench_crops)}개를 ACM 조작 대상으로 잡음")
-        # ★ 장면이 **전부** 로드될 때까지 기다린다. _wait_scene 은 최소 개수만 보므로,
-        #   부분 로드 상태에서 재면 장애물이 덜 실린 채로 IK 가 통과해 결과가 실행마다 달라진다
-        #   (실제로 같은 표본이 8/8 ↔ 3/8 로 흔들렸다). 개수가 안정될 때까지 대기.
+        picked = self._bench_pick_samples()
+        return self._bench_run(picked)
+
+    def _bench_wait_scene_stable(self):
+        """장면이 **전부** 로드될 때까지 대기 → 측정 재현성 확보.
+
+        `_wait_scene` 은 최소 개수만 보므로, 부분 로드 상태에서 재면 장애물이 덜 실린 채로
+        IK 가 통과해 결과가 실행마다 달라진다(실제로 같은 표본이 8/8 ↔ 3/8 로 흔들렸다)."""
         prev, stable = -1, 0
         for _ in range(60):
             req = GetPlanningScene.Request()
@@ -1491,6 +1517,15 @@ class PregraspDemo(Node):
                 break
             time.sleep(1.0)
         self.get_logger().info(f"장면 안정화: collision object {prev}개")
+        return prev
+
+    def _bench_pick_samples(self):
+        """비교실험 표본 열매 [(name,p,r), …]. bench_targets 가 있으면 그것으로 고정(재현성),
+        없으면 제안 조건(구 영역 허용)에서 도달 가능한 열매를 가까운 순으로 bench_n 개."""
+        if not hasattr(self, "_bench_crops") or self._bench_crops is None:
+            self._bench_crops = self._crop_objects()
+            self.get_logger().info(f"작물 객체 {len(self._bench_crops)}개를 ACM 조작 대상으로 잡음")
+        self._bench_wait_scene_stable()
         tg = self._all_targets()
         bxy = self._base_xy()
         l0 = np.array([bxy[0], bxy[1], 0.35]) if bxy is not None else np.array([0.0, 0.0, 0.35])
@@ -1504,7 +1539,7 @@ class PregraspDemo(Node):
             missing = [n for n in fixed if n not in byname]
             if missing:
                 self.get_logger().warn(f"표본에 없는 이름: {missing}")
-            return self._bench_run(picked)
+            return picked
         # 제안 조건(구 영역 허용)에서 도달 가능한 열매만 표본으로
         picked = []
         for nm, p, r in tg:
@@ -1518,7 +1553,7 @@ class PregraspDemo(Node):
                 picked.append((nm, p, r))
             if nmax and len(picked) >= nmax:
                 break
-        return self._bench_run(picked)
+        return picked
 
     def _bench_run(self, picked):
         self.get_logger().info(f"=== 비교실험 표본 {len(picked)}개 열매 ===")
@@ -1557,6 +1592,192 @@ class PregraspDemo(Node):
             json.dump(rows, f, ensure_ascii=False, indent=1)
         self.get_logger().info(f"원자료 저장: {out}")
         return rows
+
+    # ══════════ 전략·planner 비교 측정(bench_strategy) — 6주차 후속 ══════════
+    # "어느 수확 전략·어느 OMPL 알고리즘이 나은가"를 **같은 표본 열매**에서 정량 비교한다.
+    #   측정: 계획시간 · 경로길이(관절 rad / TCP m) · 성공률 · 접근 검증여부 · 충돌 웨이포인트
+    #   ⚠ 재생/실행은 하지 않는다(계획만). OMPL 이 확률적이라 bench_repeat 회 반복해 평균낸다.
+    def _seg_len(self, names, wp):
+        """한 구간의 (관절 경로길이[rad], TCP 경로길이[m]). wp=[pos_array,…](names 순서)."""
+        if not wp or len(wp) < 2:
+            return 0.0, 0.0
+        a = np.asarray(wp, float)
+        jl = float(np.sum(np.linalg.norm(np.diff(a, axis=0), axis=1)))
+        cl = 0.0
+        if self._fk is not None:                    # 로컬 FK(서비스 왕복 없이 수백 점 처리)
+            joints, chain = self._fk
+            pts = np.asarray([RI.fk_pos(joints, chain, dict(zip(names, row))) for row in a])
+            cl = float(np.sum(np.linalg.norm(np.diff(pts, axis=0), axis=1)))
+        return jl, cl
+
+    def _bench_strategy_one(self, name, p_fruit, r, strat, planner):
+        """한 열매 × (전략, planner) 1회 계획을 측정 → dict 리포트."""
+        import re
+        home = {j: 0.0 for j in self.ARM}
+        self._set(home)
+        # ── 조건 고정: 공간 ACM(제안 방식) + 전 작물 장애물 ──
+        self._clear_zone()
+        self._set_allow(self._bench_crops, False)
+        self._acm_mode = "region"
+        self._remember_target(name, p_fruit, r)
+        self.strategy, self.planner_id = strat, planner
+        self._plan_stat = dict(calls=0, fail=0, t=0.0)   # plan_to 가 여기에 적는다
+        t0 = time.time()
+        sol = self.solve_pregrasp(p_fruit, r)
+        if sol is None:
+            self._plan_stat = None
+            return dict(name=name, strategy=strat, planner=planner, ok=False,
+                        method="IK 실패", checked=False, t=time.time() - t0,
+                        jl=None, cl=None, n=0, bad=None, frac=None,
+                        fallback=False, pre_fb=False, home_fb=False,
+                        plan_calls=0, plan_fail=0, plan_t=0.0)
+        c = self._precompute(name, p_fruit, r, sol)
+        t = time.time() - t0
+        stat, self._plan_stat = self._plan_stat, None
+        pre_n, pre_wp = c["pre"]
+        app_n, app_wp, method, checked = c["app"]
+        home_n, home_wp = c["home"] if c["home"] is not None else (self.ARM, [])
+        # 폴백 판정 — 계획 실패 시 전략이 2점 관절보간으로 대체한다(충돌 미검증·길이 과소평가).
+        #   pre  : [home(전부 0), 목표] 2점  ·  home : plan_to 실패 시 c["home"] is None
+        pre_fb = (len(pre_wp) == 2 and max(abs(float(v)) for v in pre_wp[0]) < 1e-9)
+        home_fb = c["home"] is None
+        s_pre = self._seg_len(pre_n, pre_wp)
+        s_app = self._seg_len(app_n, app_wp)
+        s_home = self._seg_len(home_n, home_wp)
+        # 한 수확 사이클의 실제 이동 = pre + 접근 + 후퇴(접근 역재생) + home → 접근 구간은 2회
+        jl = s_pre[0] + 2 * s_app[0] + s_home[0]
+        cl = s_pre[1] + 2 * s_app[1] + s_home[1]
+        nwp = len(pre_wp) + 2 * len(app_wp) + len(home_wp)
+        # ── 안전성 재검증: 항상 '전 작물 장애물 + 수확 대상 줄기만 해제' 기준으로 ──
+        #   (구 영역을 먼저 걷어내지 않으면 허용 해제된 구가 열매 자리의 장애물이 된다)
+        self._clear_zone()
+        self._set_allow(self._bench_crops, False)
+        stalk = self._stalk_of(name)
+        if stalk:
+            self._set_allow([stalk], True)
+        bad = (self._invalid_waypoints(pre_n, pre_wp)
+               + self._invalid_waypoints(app_n, app_wp)
+               + (self._invalid_waypoints(home_n, home_wp) if home_wp else 0))
+        self._set(home)
+        m = re.search(r"frac=([0-9.]+)", str(method))
+        return dict(name=name, strategy=strat, planner=planner, ok=True,
+                    method=method, checked=bool(checked), t=t,
+                    jl=jl, cl=cl, n=nwp, bad=bad,
+                    frac=(float(m.group(1)) if m else None),
+                    fallback=bool(pre_fb or home_fb), pre_fb=pre_fb, home_fb=home_fb,
+                    jl_pre=s_pre[0], jl_app=s_app[0], jl_home=s_home[0],
+                    plan_calls=stat["calls"], plan_fail=stat["fail"], plan_t=stat["t"])
+
+    def bench_strategy_compare(self):
+        """전략 × planner 격자를 같은 표본 열매에서 돌려 표·요약·원자료(JSON/CSV)로 낸다."""
+        strat0, planner0 = self.strategy, self.planner_id     # 원상복구용
+        picked = self._bench_pick_samples()
+        strats = [str(s).strip() for s in (self.get_parameter("bench_strategies").value or [])
+                  if str(s).strip()]
+        planners = [str(p).strip() for p in (self.get_parameter("bench_planners").value or [])
+                    if str(p).strip()]
+        rep = max(1, int(self.get_parameter("bench_repeat").value))
+        unknown = [s for s in strats if s not in self._STRATEGIES]
+        if unknown:
+            self.get_logger().warn(f"알 수 없는 전략 {unknown} → 제외 (가능: {list(self._STRATEGIES)})")
+            strats = [s for s in strats if s in self._STRATEGIES]
+        if not picked or not strats or not planners:
+            self.get_logger().error("측정 표본/전략/planner 가 비었다 — bench_n·bench_strategies·"
+                                    "bench_planners 확인.")
+            return []
+        total = len(picked) * len(strats) * len(planners) * rep
+        # 표본을 남긴다 → 다음 실행을 같은 열매로 고정할 수 있다(bench_targets:=…).
+        self.get_logger().info(f"표본 열매: {','.join(nm for nm, _, _ in picked)}")
+        self.get_logger().info(
+            f"=== 전략·planner 비교 측정 === 표본 {len(picked)}열매 × 전략 {len(strats)} × "
+            f"planner {len(planners)} × 반복 {rep} = {total}회 계획 (수 분~수십 분 소요)")
+        if self._fk is None:
+            self.get_logger().warn("로컬 FK 미구성(URDF 조회 실패) → TCP 경로길이는 0 으로 기록된다.")
+        rows = []
+        for nm, p, r in picked:
+            for strat in strats:
+                for pl in planners:
+                    for k in range(rep):
+                        res = self._bench_strategy_one(nm, p, r, strat, pl)
+                        res["rep"] = k
+                        rows.append(res)
+                        # ★ 매 행마다 저장한다. 전체 격자는 한 시간을 넘길 수 있어, 끝에서만
+                        #   저장하면 중간에 죽었을 때(타임아웃·Ctrl-C) 측정을 통째로 잃는다.
+                        self._bench_strategy_save(rows)
+                        self.get_logger().info(
+                            f"  [{len(rows):3d}/{total}] {nm:20s} {strat:14s} {pl:11s} "
+                            f"{'OK ' if res['ok'] else '실패'} t={res['t']:5.1f}s "
+                            f"관절={('%.2f' % res['jl']) if res['jl'] is not None else '  - '}rad "
+                            f"TCP={('%.2f' % res['cl']) if res['cl'] is not None else '  - '}m "
+                            f"pts={res['n']:3d} 충돌wp={res['bad'] if res['bad'] is not None else '-'} "
+                            f"{'검증O' if res['checked'] else '검증X'}"
+                            f"{' 폴백' if res.get('fallback') else '    '} method={res['method']}")
+        self._bench_strategy_summary(rows, strats, planners, len(picked), rep)
+        self.strategy, self.planner_id = strat0, planner0
+        return rows
+
+    def _bench_strategy_summary(self, rows, strats, planners, n_fruit, rep):
+        def agg(rs):
+            n = len(rs)
+            ok = [x for x in rs if x["ok"]]
+            # 유효 = 충돌free · 접근 검증됨 · 폴백(2점 보간) 없음 → 경로길이는 이 행들로만 평균낸다
+            #   (폴백 행은 계획 없이 관절을 직선보간한 것이라 길이를 과소평가한다)
+            good = [x for x in ok if x["checked"] and not x["bad"] and not x.get("fallback")]
+            def mean(key):
+                v = [x[key] for x in good if x[key] is not None]
+                return sum(v) / len(v) if v else 0.0
+            return dict(n=n, ok=len(ok), good=len(good),
+                        t=sum(x["t"] for x in rs) / max(1, n),
+                        jl=mean("jl"), cl=mean("cl"),
+                        bad=sum(x["bad"] for x in ok if x["bad"] is not None),
+                        straight=sum(1 for x in ok if str(x["method"]).startswith("cartesian(")),
+                        unver=sum(1 for x in ok if not x["checked"]),
+                        fb=sum(1 for x in ok if x.get("fallback")),
+                        pfail=sum(x["plan_fail"] for x in rs))
+        self.get_logger().info(
+            f"=== 요약(표본 {n_fruit}열매 × 반복 {rep}) — 성공=IK+계획 · "
+            f"유효=충돌free·검증·폴백없음 · 길이 평균은 유효 행만 ===")
+        self.get_logger().info(
+            f"  {'전략':14s} {'planner':11s} {'성공':>7s} {'유효':>7s} {'계획시간':>8s} "
+            f"{'관절길이':>9s} {'TCP길이':>8s} {'완전직선':>7s} {'폴백':>4s} {'충돌wp':>6s} "
+            f"{'플래너실패':>7s}")
+        for strat in strats:
+            for pl in planners:
+                rs = [x for x in rows if x["strategy"] == strat and x["planner"] == pl]
+                if not rs:
+                    continue
+                a = agg(rs)
+                self.get_logger().info(
+                    f"  {strat:14s} {pl:11s} {a['ok']:3d}/{a['n']:<3d} {a['good']:3d}/{a['n']:<3d} "
+                    f"{a['t']:7.2f}s {a['jl']:8.2f}rad {a['cl']:7.3f}m "
+                    f"{a['straight']:3d}/{a['n']:<3d} {a['fb']:4d} {a['bad']:6d} {a['pfail']:7d}")
+        for strat in strats:                       # 전략별 총평(planner 통합)
+            rs = [x for x in rows if x["strategy"] == strat]
+            if rs:
+                a = agg(rs)
+                self.get_logger().info(
+                    f"  ▶ {strat:12s} 전체: 성공 {a['ok']}/{a['n']} · 유효 {a['good']}/{a['n']} · "
+                    f"평균 {a['t']:.2f}s · 관절 {a['jl']:.2f}rad · TCP {a['cl']:.3f}m · "
+                    f"완전직선 {a['straight']}/{a['n']} · 폴백 {a['fb']} · 무검증 {a['unver']}")
+        base = self._bench_strategy_save(rows)
+        self.get_logger().info(f"원자료 저장: {base}.json · {base}.csv")
+
+    def _bench_strategy_save(self, rows):
+        """원자료를 JSON/CSV 로 덮어쓴다(측정 중 매 행마다 호출 — 중간 종료 대비)."""
+        import csv
+        import json
+        base = str(self.get_parameter("bench_out").value) or "/tmp/bench_strategy"
+        with open(base + ".json", "w") as f:
+            json.dump(rows, f, ensure_ascii=False, indent=1)
+        keys = ["name", "strategy", "planner", "rep", "ok", "checked", "fallback",
+                "pre_fb", "home_fb", "t", "jl", "cl", "n", "bad", "frac",
+                "jl_pre", "jl_app", "jl_home",
+                "plan_calls", "plan_fail", "plan_t", "method"]
+        with open(base + ".csv", "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=keys, extrasaction="ignore")
+            w.writeheader()
+            w.writerows(rows)
+        return base
 
     # ══════════════════ 접근 전략(작업 플래너) 레지스트리 ══════════════════
     # 각 전략은 (name, p_fruit, r, sol) → 재생용 계획 dict 을 돌려준다. 반환 규격은 run() 이 쓰는:
@@ -1928,6 +2149,11 @@ def main():
             return
         if node.get_parameter("bench").value:
             node.bench_compare()
+            node.destroy_node()
+            rclpy.shutdown()
+            return
+        if node.get_parameter("bench_strategy").value:
+            node.bench_strategy_compare()      # 전략 × planner 정량 비교(계획만, 재생 없음)
             node.destroy_node()
             rclpy.shutdown()
             return
