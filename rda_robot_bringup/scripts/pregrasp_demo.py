@@ -41,7 +41,8 @@ from moveit_msgs.srv import (GetPositionIK, GetMotionPlan, GetCartesianPath,
                              GetPlanningScene, ApplyPlanningScene, GetStateValidity)
 from moveit_msgs.msg import (PositionIKRequest, RobotState, MotionPlanRequest,
                              Constraints, JointConstraint, DisplayRobotState,
-                             PlanningScene, PlanningSceneComponents, CollisionObject)
+                             PlanningScene, PlanningSceneComponents, CollisionObject,
+                             AllowedCollisionEntry)
 from shape_msgs.msg import SolidPrimitive
 from std_srvs.srv import Empty
 
@@ -271,6 +272,7 @@ class PregraspDemo(Node):
         srdf = self._get_str_param("move_group", "robot_description_semantic")
         info = None
         self._fk = None                      # (joints, chain) — 로컬 FK(경로길이 측정용)
+        self._link_names = set()             # 로봇 링크 이름(ACM 검증용)
         if urdf and srdf:
             try:
                 info = RI.playback_joints(srdf, urdf, self.group,
@@ -283,6 +285,9 @@ class PregraspDemo(Node):
                                     self.get_parameter("base_link").value, self.ik_link)
                 if chain:
                     self._fk = (info["joints"], chain)
+                # 로봇 링크 이름 집합 — ACM 검증에서 '월드 객체'와 '로봇 링크'를 구분하는 데 쓴다.
+                for j in info["joints"].values():
+                    self._link_names.update((j["parent"], j["child"]))
             except Exception as e:
                 self.get_logger().warn(f"관절 introspection 실패({e}) → 폴백 유지")
         else:
@@ -1365,14 +1370,23 @@ class PregraspDemo(Node):
         return None if res is None else res.scene.allowed_collision_matrix
 
     def _set_allow(self, names, value, tries=4, check_pairs=False):
-        """ACM default entry 를 diff 로 일괄 설정(True=충돌 무시).
+        """ACM 을 diff 로 일괄 설정(True=충돌 무시). **default + 쌍별(entry) 을 함께** 쓴다.
 
-        ⚠ 응답의 success 를 믿지 않고 **ACM 을 재조회해 값이 실제로 반영됐는지 확인**하고,
-        아니면 다시 시도한다. (객체를 ADD 하면 MoveIt 이 그 객체의 default entry 를 False 로
-        자동 생성하므로, 우리 허용이 조용히 누락되면 구가 그대로 장애물이 된다 — 실측 확인.)"""
+        ⚠ 2026-07-28 규명 — 예전에는 default entry 만 썼는데, MoveIt 은 **쌍별 entry 가 있으면
+          그쪽을 우선**한다. 이 장면은 객체가 장면에 들어올 때 로봇 링크와의 쌍별 entry(False)가
+          이미 만들어져 있어서, default=True 를 아무리 걸어도 **목표 화방대 허용이 실제로는
+          안 걸렸다**('조용한 무효'). 그래서 이제 허용/차단할 이름의 **행·열을 직접 써넣는다.**
+        ⚠ 검증도 두 군데가 틀렸었다:
+          ① `want=False` 인데 항목이 **없는** 것을 불일치로 봤다 — MoveIt 은 중복인 False default
+             를 저장하지 않는다(실측: stem 84개가 매번 '누락'으로 잡혀 4회 재시도 낭비).
+          ② 쌍별을 **월드 객체끼리**의 쌍까지 확인했다 — MoveIt 이 검사하는 건 로봇↔월드와
+             자기충돌뿐이라 객체끼리의 False 는 정상이다. 이제 **로봇 링크와의 쌍만** 본다.
+        ⚠ 응답의 success 는 믿지 않는다(옥토맵이 크면 자주 밀린다) — 재조회로 판정."""
         if not names or self.apply_scene is None:
             return False
         want = bool(value)
+        world = set(self._world_object_names() or [])
+        bad_def, bad_pair = [], []
         for k in range(tries):
             acm = self._read_acm()
             if acm is None:
@@ -1385,30 +1399,56 @@ class PregraspDemo(Node):
                 else:
                     acm.default_entry_names.append(n)
                     acm.default_entry_values.append(want)
+            # 쌍별 — 장면에 실제로 있는 객체(또는 이미 행이 있는 이름)만. 없는 이름에 행을
+            # 만들면 ACM 만 부풀고 MoveIt 이 어차피 버린다.
+            cols = {nm: i for i, nm in enumerate(acm.entry_names)}
+            for n in names:
+                if n not in cols:
+                    if n not in world:
+                        continue
+                    acm.entry_names.append(n)
+                    for e in acm.entry_values:
+                        e.enabled.append(want)
+                    acm.entry_values.append(
+                        AllowedCollisionEntry(enabled=[want] * len(acm.entry_names)))
+                    cols = {nm: i for i, nm in enumerate(acm.entry_names)}
+                i = cols[n]
+                for j in range(len(acm.entry_names)):
+                    if j != i:                      # 자기 자신 쌍은 두고, n 이 낀 쌍만 바꾼다
+                        acm.entry_values[i].enabled[j] = want
+                        acm.entry_values[j].enabled[i] = want
             ps = PlanningScene()
             ps.is_diff = True
             ps.robot_state.is_diff = True
             ps.allowed_collision_matrix = acm
             self._call(self.apply_scene, ApplyPlanningScene.Request(scene=ps), 20.0)
             chk = self._read_acm()
+            bad_def, bad_pair = [], []
             if chk is not None:
                 cur = dict(zip(chk.default_entry_names, chk.default_entry_values))
-                ok = all(cur.get(n) == want for n in names)
-                # 쌍별 entry 는 **객체가 장면에 있을 때만** 생긴다. 그래서 객체 추가 뒤 호출에서만
-                # 확인한다(객체 없을 때 확인하면 영영 실패해 배치 자체가 취소된다 — 실측).
+                # want=False 는 '항목 없음'도 통과(없음 = 기본 불허 = 우리가 원하는 상태)
+                bad_def = [n for n in names
+                           if cur.get(n) != want and not (want is False and n not in cur)]
+                ok = not bad_def
                 if check_pairs and ok:
-                    rows = {nm: chk.entry_values[i].enabled
-                            for i, nm in enumerate(chk.entry_names)}
                     cols = {nm: i for i, nm in enumerate(chk.entry_names)}
+                    known = getattr(self, "_link_names", set())   # introspection 실패 시 빈 집합
+                    links = [nm for nm in chk.entry_names if nm in known]
                     for n in names:
-                        if n in rows:
-                            vals = [rows[n][cols[m]] for m in chk.entry_names if m != n]
-                            if vals and not all(v == want for v in vals):
+                        if n in cols:
+                            row = chk.entry_values[cols[n]].enabled
+                            bad = [m for m in links if m != n and row[cols[m]] != want]
+                            if bad:
                                 ok = False
+                                bad_pair.append((n, bad[:3]))
                 if ok:
                     return True
             time.sleep(1.0)
-        self.get_logger().warn(f"ACM 설정 확인 실패({len(names)}개 → {want}) — 반영 안 됐을 수 있음")
+        # 무엇이 안 맞았는지 남긴다 — 원인을 로그만 보고 좁힐 수 있게(2026-07-28).
+        self.get_logger().warn(
+            f"ACM 설정 확인 실패({len(names)}개 → {want}) — 반영 안 됐을 수 있음"
+            + (f" · default 불일치 {len(bad_def)}개 {bad_def[:3]}" if bad_def else "")
+            + (f" · 쌍별 불일치 {bad_pair[:2]}" if bad_pair else ""))
         return False
 
     def _invalid_waypoints(self, names, wp, sample=1):
@@ -1620,6 +1660,11 @@ class PregraspDemo(Node):
         self._set_allow(self._bench_crops, False)
         self._acm_mode = "region"
         self._remember_target(name, p_fruit, r)
+        # ★ IK 전에 구 영역 허용을 건다 — 표본 선정(_bench_pick_samples)과 같은 기준이어야
+        #   "뽑힌 열매가 측정에선 IK 실패" 같은 불일치가 안 생긴다. (ACM 이 무효였던 동안에는
+        #   이 차이가 드러나지 않았다. 수정 후 실측: 허용 전 IK 는 6열매 중 3개가 실패.)
+        #   ⚠ 데모 경로(`_select_reachable`)는 여전히 허용 전에 IK 를 본다 — 별건.
+        self._allow_for_target(name)
         self.strategy, self.planner_id = strat, planner
         self._plan_stat = dict(calls=0, fail=0, t=0.0)   # plan_to 가 여기에 적는다
         t0 = time.time()
