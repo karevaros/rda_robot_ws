@@ -32,7 +32,7 @@ def _tf(xyz, rpy):
 
 
 def parse_urdf(urdf_xml):
-    """→ (joints, child_to_joint). joints[name]={type,parent,child,T,mimic}."""
+    """→ (joints, child_to_joint). joints[name]={type,parent,child,T,axis,mimic}."""
     root = ET.fromstring(urdf_xml)
     joints, child_to_joint = {}, {}
     for j in root.findall("joint"):
@@ -50,8 +50,13 @@ def parse_urdf(urdf_xml):
             if o.get("rpy"):
                 rpy = [float(v) for v in o.get("rpy").split()]
         mim = j.find("mimic")
+        # 관절 회전/이동 축(URDF 기본 = X). 관절값을 넣은 FK(자세별 TCP 위치)에 필요.
+        ae = j.find("axis")
+        axis = [1.0, 0.0, 0.0]
+        if ae is not None and ae.get("xyz"):
+            axis = [float(v) for v in ae.get("xyz").split()]
         joints[name] = dict(type=typ, parent=parent, child=child,
-                            T=_tf(xyz, rpy),
+                            T=_tf(xyz, rpy), axis=axis,
                             mimic=(mim.get("joint") if mim is not None else None))
         child_to_joint[child] = name
     return joints, child_to_joint
@@ -115,6 +120,48 @@ def compose_tf(joints, child_to_joint, from_link, to_link):
         link = joints[jn]["parent"]
         guard += 1
     return T if link == from_link else None
+
+
+def fk_chain(joints, child_to_joint, base_link, tip_link):
+    """base_link→tip_link 관절 순서열(고정관절 포함). fk_pos 에 넘길 체인."""
+    return _chain(joints, child_to_joint, base_link, tip_link)
+
+
+def fk_pos(joints, chain, q):
+    """관절값 q(name→rad/m)를 넣어 tip 원점을 base 프레임에서 계산 → np.array([x,y,z]).
+
+    ROS 서비스(/compute_fk) 없이 로컬로 푼다(웨이포인트 수백 개의 TCP 경로길이를
+    재는 데 서비스 왕복은 너무 느리다). revolute/continuous=축 회전, prismatic=축 이동.
+    """
+    T = np.eye(4)
+    for jn in chain:
+        j = joints.get(jn)
+        if j is None:
+            continue
+        T = T @ j["T"]
+        typ = j.get("type")
+        if typ in ("revolute", "continuous"):
+            T = T @ _axis_rot(j.get("axis", [1.0, 0.0, 0.0]), float(q.get(jn, 0.0)))
+        elif typ == "prismatic":
+            D = np.eye(4)
+            ax = np.asarray(j.get("axis", [1.0, 0.0, 0.0]), float)
+            D[:3, 3] = ax * float(q.get(jn, 0.0))
+            T = T @ D
+    return T[:3, 3].copy()
+
+
+def _axis_rot(axis, ang):
+    """축-각 회전(4x4). Rodrigues."""
+    a = np.asarray(axis, float)
+    n = float(np.linalg.norm(a))
+    if n < 1e-12:
+        return np.eye(4)
+    a = a / n
+    c, s = math.cos(ang), math.sin(ang)
+    K = np.array([[0.0, -a[2], a[1]], [a[2], 0.0, -a[0]], [-a[1], a[0], 0.0]])
+    T = np.eye(4)
+    T[:3, :3] = np.eye(3) + s * K + (1.0 - c) * (K @ K)
+    return T
 
 
 def detect_approach_axis(srdf_xml, joints, child_to_joint, tcp_link):
