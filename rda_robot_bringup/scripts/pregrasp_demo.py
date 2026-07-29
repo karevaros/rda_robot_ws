@@ -202,6 +202,10 @@ class PregraspDemo(Node):
         #   원인일 거라 보고 3회로 올려 봤지만 흔들림이 그대로였고(들쭉날쭉 4개 동일) 라운드
         #   시간만 2~4배로 늘었다(46~116s → 92~185s). 원인은 다른 데 있다(아래 reach_noise 참조).
         self.declare_parameter("harvest_ik_tries", 1)
+        # 선별(수확가능 판정)을 **비파괴적**으로 — 후보마다 구 영역 객체를 넣지 않고, 라운드
+        #   전체에 ACM(옥토맵↔그리퍼 링크)만 한 번 걸었다 되돌린다. 종전 방식은 장면을 누적
+        #   변형시켜(옥토맵 마스킹 비가역) 라운드마다 판정이 달라졌다. false=종전 동작.
+        self.declare_parameter("screen_nondestructive", True)
         # [진단] 수확가능 판정을 K 회 반복해 **흔들림 자체를 측정**하고 종료(0=사용 안 함).
         #   판정 잡음이 '수확하면 뒤가 열린다' 신호보다 크면 그 효과는 측정 자체가 불가능하다.
         self.declare_parameter("reach_repeat", 0)
@@ -2267,7 +2271,11 @@ class PregraspDemo(Node):
             if sol is None:
                 skipped += 1
                 failed.add(name)
-                self.get_logger().info(f"  건너뜀 {name}(도달불가/충돌)")
+                # ★ 실패한 시도가 남긴 구 영역을 **반드시 치운다**. 안 치우면 ρ=16.5cm 짜리
+                #   구가 캐노피에 남아 다음 선별을 통째로 망친다(실측: 수확가능 3 → 0,
+                #   탈락 사유가 전부 pre IK 로 바뀜). 성공 경로는 `_remove_fruit` 이 치운다.
+                self._clear_zone()
+                self.get_logger().info(f"  건너뜀 {name}(도달불가/충돌) · 구 영역 정리")
                 continue
             attempted += 1
             self.get_logger().info(
@@ -2555,6 +2563,11 @@ class PregraspDemo(Node):
         if _ik_ok():
             return True
         # 2단계: 수확 작업공간(구 영역)을 걸고 재판정 — 실제 수확 사이클과 같은 기준.
+        #   ⚠ 이 단계가 **장면을 바꾼다**(구 객체 삽입 → 옥토맵 마스킹은 비가역) → 판정이
+        #     라운드마다 달라진다. `screen_nondestructive`(기본 true) 면 이 단계를 쓰지 않고,
+        #     대신 라운드 전체에 걸린 ACM(옥토맵↔그리퍼)으로 같은 목적을 달성한다.
+        if bool(self.get_parameter("screen_nondestructive").value):
+            return False
         if name is None or getattr(self, "_acm_mode", "region") == "none":
             return False
         self._remember_target(name, p_fruit, r)
@@ -2571,11 +2584,80 @@ class PregraspDemo(Node):
             tg.sort(key=lambda t: float(np.linalg.norm(t[1] - l0)))
         return tg
 
+    OCTOMAP_ID = "<octomap>"
+
+    def _set_pair_allow(self, obj, links, value, verify=True):
+        """ACM 에서 **obj ↔ 지정한 로봇 링크들** 쌍만 허용/차단한다(전체가 아니라 그 쌍만).
+
+        `_set_allow` 는 이름 하나를 **모든 것과** 허용해 버려 선별용으로는 너무 거칠다.
+        여기서는 필요한 쌍만 건드리므로 되돌리기도 정확하다."""
+        if self.apply_scene is None or not links:
+            return False
+        acm = self._read_acm()
+        if acm is None:
+            return False
+        if obj not in acm.entry_names:                 # 아직 행이 없으면 만든다
+            acm.entry_names.append(obj)
+            for e in acm.entry_values:
+                e.enabled.append(False)
+            acm.entry_values.append(
+                AllowedCollisionEntry(enabled=[False] * len(acm.entry_names)))
+        idx = {n: i for i, n in enumerate(acm.entry_names)}
+        i = idx[obj]
+        touched = 0
+        for ln in links:
+            j = idx.get(ln)
+            if j is None:
+                continue
+            acm.entry_values[i].enabled[j] = bool(value)
+            acm.entry_values[j].enabled[i] = bool(value)
+            touched += 1
+        ps = PlanningScene()
+        ps.is_diff = True
+        ps.robot_state.is_diff = True
+        ps.allowed_collision_matrix = acm
+        self._call(self.apply_scene, ApplyPlanningScene.Request(scene=ps), 15.0)
+        if not verify:
+            return touched > 0
+        chk = self._read_acm()                          # 응답을 믿지 않고 재조회
+        if chk is None or obj not in chk.entry_names:
+            return False
+        c = {n: k for k, n in enumerate(chk.entry_names)}
+        row = chk.entry_values[c[obj]].enabled
+        bad = [ln for ln in links if ln in c and row[c[ln]] != bool(value)]
+        if bad:
+            self.get_logger().warn(f"ACM 쌍 설정 확인 실패({obj}↔{bad[:3]} → {value})")
+            return False
+        return True
+
+    def _screen_acm(self, on):
+        """[선별 전용] **옥토맵 ↔ 그리퍼 링크** 충돌만 잠시 허용하고, 끝나면 되돌린다.
+
+        ★ 판정을 **비파괴적**으로 만드는 장치다(2026-07-29). 종전에는 후보마다 구 영역
+          CollisionObject 를 넣었다 뺐고, 그때마다 MoveIt 이 그 구를 **옥토맵 센서 마스크**에
+          등록해 안쪽 복셀을 지웠다 — 그리고 **그 마스킹은 비가역**이다(정적 카메라). 그래서
+          라운드마다 장면이 달라졌다(실측: 1라운드만 5개·29초, 2라운드부터 흔들림·느려짐).
+          ACM 만 건드리면 **지도를 손대지 않고**, 정확히 되돌릴 수 있다.
+        허용 범위를 **그리퍼 링크로 한정**하는 이유: 열매를 감싸는 손만 그 열매 복셀을 무시하면
+        되고, 팔은 여전히 캐노피를 피해야 한다(전부 허용하면 판정이 무의미해진다)."""
+        links = list(self._grip_links) or [self.ik_link]
+        if not self._has_octomap():
+            return False                                # 설계값 장면 — 옥토맵 자체가 없다
+        return self._set_pair_allow(self.OCTOMAP_ID, links, bool(on))
+
     def _harvestable_targets(self):
         """워크스페이스 내 수확 가능한 열매만 도출(가까운 순). 기하 프리필터 후 IK 로 확정."""
         tg = self._sorted_targets()
         self._hv_why = {}                    # 탈락 사유 집계(이 라운드)
-        out = [(n, p, r) for (n, p, r) in tg if self._is_harvestable(p, r, n)]
+        # ★ 비파괴 선별: 라운드 시작에 ACM 을 **한 번만** 열고 끝나면 되돌린다.
+        #   (종전: 후보마다 구 영역 객체를 넣었다 뺐다 → 장면이 누적 변형됐다)
+        nd = bool(self.get_parameter("screen_nondestructive").value)
+        opened = self._screen_acm(True) if nd else False
+        try:
+            out = [(n, p, r) for (n, p, r) in tg if self._is_harvestable(p, r, n)]
+        finally:
+            if opened:
+                self._screen_acm(False)
         why = " · ".join(f"{k} {v}" for k, v in sorted(self._hv_why.items(),
                                                        key=lambda x: -x[1]))
         # 옥토맵 크기를 같이 남긴다 — 수확 후 후보가 줄면 '지도가 불어난 탓'인지 바로 갈린다.
