@@ -107,7 +107,12 @@ def _setup(context, *args, **kwargs):
 
     obstacles = Node(package="rda_robot_bringup", executable="obstacle_publisher.py",
                      output="screen",
-                     parameters=[{"obstacles_file": os.path.join(DESC_SRC, "config", "obstacles.yaml")}])
+                     parameters=[{
+                         "obstacles_file": os.path.join(DESC_SRC, "config", "obstacles.yaml"),
+                         # 켜면 열매도 충돌객체 — 이웃 열매를 밀고 지나가는 궤적이 잡힌다
+                         "publish_targets": (lc("publish_targets").perform(context).lower()
+                                             in ("1", "true", "yes")),
+                     }])
 
     # 데모 노드 파라미터
     demo_params = {
@@ -140,7 +145,11 @@ def _setup(context, *args, **kwargs):
         "planner_id": lc("planner_id").perform(context),
         "harvest_all": lc("harvest_all").perform(context).lower() in ("1", "true", "yes"),
         "harvest_max": int(lc("harvest_max").perform(context)),
+        # 수확한 열매를 장면에서 없앤다(실제 수확처럼) → 뒤쪽 열매의 가림·막힘이 풀린다
+        "harvest_remove": lc("harvest_remove").perform(context).lower() in ("1", "true", "yes"),
         "prefer_near_home": lc("prefer_near_home").perform(context).lower() in ("1", "true", "yes"),
+        # 직선접근의 '관절 건전성' 한도 — TCP 직선이어도 관절이 크게 도는 해를 거른다(0=끔)
+        "approach_jl_max": float(lc("approach_jl_max").perform(context)),
         "interactive": lc("interactive").perform(context).lower() in ("1", "true", "yes"),
         "reachable_only": lc("reachable_only").perform(context).lower() in ("1", "true", "yes"),
         "arm_reach": float(lc("arm_reach").perform(context)),
@@ -259,6 +268,18 @@ def generate_launch_description():
                               description="연속 수확 최대 열매 수."),
         DeclareLaunchArgument("prefer_near_home", default_value="true",
                               description="pre-grasp 자세를 home 에 가까운 것으로 선택(접근 전 큰 회전 제거)."),
+        DeclareLaunchArgument("harvest_remove", default_value="true",
+                              description="수확한 열매를 장면에서 제거(planning scene·재발행·"
+                                          "Gazebo). 뒤쪽 열매의 가림/막힘이 풀려 수확 가능 "
+                                          "범위가 는다."),
+        DeclareLaunchArgument("publish_targets", default_value="false",
+                              description="열매(kind:target)도 충돌객체로 발행. 켜면 목표가 "
+                                          "아닌 이웃 열매가 진짜 장애물이 된다(목표는 구 영역 "
+                                          "ACM 이 허용)."),
+        DeclareLaunchArgument("approach_jl_max", default_value="2.0",
+                              description="직선접근 허용 관절 경로길이[rad]. TCP 는 직선이어도 "
+                                          "손목이 크게 도는 해를 거른다(그 해에서만 손가락이 "
+                                          "주 줄기에 닿았다). 0=검사 안 함."),
         DeclareLaunchArgument("interactive", default_value="false",
                               description="자동 수확 대신 사용자가 타깃을 골라 명령(harvest_operator)."),
         DeclareLaunchArgument("reachable_only", default_value="true",

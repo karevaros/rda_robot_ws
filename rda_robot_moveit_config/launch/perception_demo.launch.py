@@ -181,6 +181,10 @@ def _setup(context, *args, **kwargs):
                 "interactive": lc("interactive").perform(context).lower() in ("1", "true", "yes"),
                 "reachable_only": lc("reachable_only").perform(context).lower() in ("1", "true", "yes"),
                 "arm_reach": float(lc("arm_reach").perform(context)),
+                # 수확한 열매는 Gazebo 에서도 지운다 → 카메라가 더는 못 보고(가림 해소),
+                # 옥토맵·인지 결과가 갱신돼 뒤쪽 열매가 새로 수확 가능해진다.
+                "harvest_remove": (lc("harvest_remove").perform(context).lower()
+                                   in ("1", "true", "yes")),
                 "target_source": "perception",
                 "targets_topic": "detected_fruits",
                 "min_scene_objects": 0,          # 센싱 장면(옥토맵만) — 명명객체 0개 허용
@@ -241,6 +245,9 @@ def generate_launch_description():
                               description="run_demo 시 도달 열매를 하나씩 연속 수확(단일 반복 대신)."),
         DeclareLaunchArgument("harvest_max", default_value="5",
                               description="연속 수확 최대 열매 수(harvest_all 시)."),
+        DeclareLaunchArgument("harvest_remove", default_value="true",
+                              description="수확한 열매를 Gazebo·planning scene 에서 제거 "
+                                          "→ 가림이 풀려 뒤쪽 열매가 새로 수확 가능해진다."),
         DeclareLaunchArgument("prefer_near_home", default_value="true",
                               description="pre-grasp 자세를 home 근처로 선택(접근 전 큰 회전 제거)."),
         DeclareLaunchArgument("interactive", default_value="false",

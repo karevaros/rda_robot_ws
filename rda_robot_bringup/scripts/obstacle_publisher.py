@@ -12,6 +12,12 @@
   marker_topic (str, 'obstacle_markers')
   publish_collision (bool, True)   MoveIt CollisionObject 발행 여부
   period (float, 1.0)              재발행 주기[s] (0 이면 1회만)
+  publish_targets (bool, False)    kind:target(열매)도 충돌객체로 발행할지
+  harvested_topic (str, 'harvested')  수확된(=장면에서 사라진) 객체 이름 수신
+
+수확 반영: `harvested_topic` 으로 이름을 받으면 그 객체를 **REMOVE 하고 이후 재발행에서
+제외**한다. 재발행 주기(1s)가 있어서, 데모가 planning scene 에서 지워도 여기서 빼지 않으면
+곧바로 되살아난다. 'reset'(또는 '*')을 보내면 제외 목록을 비운다(데모 재시작용).
 """
 import os
 import sys
@@ -24,6 +30,7 @@ from rclpy.qos import (QoSDurabilityPolicy, QoSHistoryPolicy, QoSProfile,
                        QoSReliabilityPolicy)
 from ament_index_python.packages import get_package_share_directory
 from geometry_msgs.msg import Pose
+from std_msgs.msg import String
 from visualization_msgs.msg import Marker, MarkerArray
 
 try:
@@ -202,6 +209,12 @@ class ObstaclePublisher(Node):
         self.declare_parameter("marker_topic", "obstacle_markers")
         self.declare_parameter("publish_collision", True)
         self.declare_parameter("period", 1.0)
+        # kind:target(열매)은 원래 충돌객체에서 빠진다 — '목표를 장애물로 세면 계획 실패'
+        # 때문이었는데, 그 결과 **목표가 아닌 이웃 열매까지 전부 장애물이 아니게** 된다
+        # (2026-07-29 확인). 켜면 열매도 장애물이 되고, 목표 열매는 데모의 구 영역 ACM 이
+        # 허용한다(이웃 열매를 밀고 지나가는 궤적이 그제서야 충돌로 잡힌다).
+        self.declare_parameter("publish_targets", False)
+        self.declare_parameter("harvested_topic", "harvested")
 
         path = self.get_parameter("obstacles_file").value or default_yaml()
         self.path = path
@@ -236,10 +249,45 @@ class ObstaclePublisher(Node):
                 "(RViz 마커만 발행). MoveIt 설치 후 다시 실행하세요."
             )
 
+        # 수확된 객체 — 재발행에서 빼고 planning scene 에서도 지운다.
+        #   ⚠ TRANSIENT_LOCAL: 데모가 우리보다 먼저 보내도 붙는 즉시 받는다(놓치면 부활).
+        self._harvested = set()
+        self.create_subscription(
+            String, self.get_parameter("harvested_topic").value, self._on_harvested,
+            QoSProfile(depth=50, reliability=QoSReliabilityPolicy.RELIABLE,
+                       durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+                       history=QoSHistoryPolicy.KEEP_LAST))
+
         self.publish_all()
         p = float(self.get_parameter("period").value)
         if p > 0:
             self.create_timer(p, self.publish_all)
+
+    def _on_harvested(self, msg):
+        """수확 통보 수신 — 이름 하나(또는 쉼표 구분). 'reset'/'*' 이면 제외 목록 비움."""
+        raw = str(msg.data).strip()
+        if raw in ("reset", "*"):
+            n = len(self._harvested)
+            self._harvested.clear()
+            self.get_logger().info(f"수확 제외 목록 초기화({n}개) → 다음 발행에서 복원")
+            self.publish_all()
+            return
+        names = [s.strip() for s in raw.split(",") if s.strip()]
+        new = [n for n in names if n not in self._harvested]
+        if not new:
+            return
+        self._harvested.update(new)
+        frame = self.spec.get("frame", "world")
+        if self.cpub is not None:
+            for n in new:
+                rm = CollisionObject()
+                rm.header.frame_id = frame
+                rm.id = n
+                rm.operation = CollisionObject.REMOVE
+                self.cpub.publish(rm)
+        self.get_logger().info(
+            f"수확됨 → 장면에서 제외: {new} (누적 {len(self._harvested)}개)")
+        self.publish_all()          # 마커도 즉시 갱신(수확한 열매가 화면에서 사라진다)
 
     def load(self):
         if not os.path.exists(self.path):
@@ -314,11 +362,16 @@ class ObstaclePublisher(Node):
             return [float(o["height"]), float(o["radius"])]     # SolidPrimitive 순서
         return [float(o["radius"])]
 
+    def _live(self):
+        """수확되지 않은(=아직 장면에 있는) 장애물 목록. 마커·충돌객체의 단일 기준."""
+        return [o for o in (self.spec.get("obstacles") or [])
+                if o["name"] not in self._harvested]
+
     def publish_all(self):
         reloaded = self._maybe_reload()
         frame = self.spec.get("frame", "world")
-        # 리로드로 개체 수가 줄면 옛 마커가 남으므로 먼저 전부 지운다(DELETEALL).
-        if reloaded:
+        # 리로드/수확으로 개체 수가 줄면 옛 마커가 남으므로 먼저 전부 지운다(DELETEALL).
+        if reloaded or self._harvested:
             clr = MarkerArray()
             for ns in ("obstacles", "obstacle_labels", "workspace"):
                 dm = Marker()
@@ -328,7 +381,7 @@ class ObstaclePublisher(Node):
                 clr.markers.append(dm)
             self.mpub.publish(clr)
         arr = MarkerArray()
-        for i, o in enumerate(self.spec.get("obstacles", [])):
+        for i, o in enumerate(self._live()):
             m = Marker()
             m.header.frame_id = frame
             m.header.stamp = self.get_clock().now().to_msg()
@@ -373,12 +426,15 @@ class ObstaclePublisher(Node):
         self.mpub.publish(arr)
 
         # MoveIt planning scene 로도 같은 장애물을 보낸다(단일 진실원 유지).
-        # target(집기 목표)은 회피 대상이 아니라 제외 — 목표를 장애물로 세면 플래닝 실패.
+        # target(집기 목표)은 기본적으로 제외 — 목표를 장애물로 세면 플래닝이 실패한다.
+        #   ⚠ 단 이 규칙은 **목표가 아닌 열매까지** 전부 빼버린다 → `publish_targets:=true`
+        #     면 열매도 발행하고, 목표 열매만 데모의 구 영역 ACM 이 허용한다.
         if self.cpub is not None:
-            cur_ids = {o["name"] for o in self.spec.get("obstacles", [])
-                       if o.get("kind") != "target"}
-            # 리로드로 사라진 충돌객체는 planning scene 에서 REMOVE.
-            if reloaded:
+            want_tgt = bool(self.get_parameter("publish_targets").value)
+            cur_ids = {o["name"] for o in self._live()
+                       if want_tgt or o.get("kind") != "target"}
+            # 리로드/수확으로 사라진 충돌객체는 planning scene 에서 REMOVE.
+            if reloaded or self._harvested:
                 for gone in getattr(self, "_prev_ids", set()) - cur_ids:
                     rm = CollisionObject()
                     rm.header.frame_id = frame
@@ -387,8 +443,8 @@ class ObstaclePublisher(Node):
                     self.cpub.publish(rm)
             self._prev_ids = cur_ids
             n_pub = 0
-            for o in self.spec.get("obstacles", []):
-                if o.get("kind") == "target":
+            for o in self._live():
+                if o.get("kind") == "target" and not want_tgt:
                     continue
                 co = CollisionObject()
                 co.header.frame_id = frame
