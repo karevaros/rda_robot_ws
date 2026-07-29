@@ -206,6 +206,13 @@ class PregraspDemo(Node):
         #   전체에 ACM(옥토맵↔그리퍼 링크)만 한 번 걸었다 되돌린다. 종전 방식은 장면을 누적
         #   변형시켜(옥토맵 마스킹 비가역) 라운드마다 판정이 달라졌다. false=종전 동작.
         self.declare_parameter("screen_nondestructive", True)
+        # [진단] 선별에서 탈락한 자세를 **무엇이 막는지**(접촉 쌍) 조회해 로그에 남긴다.
+        #   개수만으로는 옥토맵 탓인지 다른 탓인지 못 가른다. 후보당 IK+검사 1회씩 더 든다.
+        self.declare_parameter("screen_why_detail", False)
+        # [진단] 수확 1회 후 선별을 K 회 반복하며 개수·옥토맵 크기·막는 것을 추적하고 종료.
+        #   "수확하면 뒤가 열리는가 / 오히려 새 복셀이 막는가" 를 가르는 측정.
+        self.declare_parameter("probe_after_harvest", 0)
+        self.declare_parameter("probe_interval", 20.0)
         # [진단] 수확가능 판정을 K 회 반복해 **흔들림 자체를 측정**하고 종료(0=사용 안 함).
         #   판정 잡음이 '수확하면 뒤가 열린다' 신호보다 크면 그 효과는 측정 자체가 불가능하다.
         self.declare_parameter("reach_repeat", 0)
@@ -305,6 +312,7 @@ class PregraspDemo(Node):
                        history=QoSHistoryPolicy.KEEP_LAST))
         self._del_entity = None      # Gazebo /delete_entity (있을 때만 lazy 생성)
         self._hv_why = {}            # 수확가능 판정 탈락 사유 집계(라운드마다 초기화)
+        self._hv_pairs = {}          # 탈락 자세를 막은 접촉 쌍(진단용)
         self._grip_links = []        # 그리퍼 링크(파지한 열매의 touch_links)
         self._attached = None        # 현재 그리퍼에 부착된 열매 객체 id
         self._op = _import_sibling("_obstacle_publisher", "obstacle_publisher.py")
@@ -2551,12 +2559,32 @@ class PregraspDemo(Node):
                     return q
             return None
 
+        def _why(tag, p):
+            """[진단] 그 자세를 **무엇이 막는지** 접촉 쌍으로 남긴다.
+            충돌 무시 IK 로 자세를 구한 뒤 그 자세의 접촉을 조회한다 — '탈락 개수'만으로는
+            옥토맵 탓인지 다른 탓인지 못 가른다(2026-07-29 가설 검증용)."""
+            if not bool(self.get_parameter("screen_why_detail").value):
+                return
+            q = self.solve_ik(p, quat, avoid=False)     # 기구학만 — 도달 자체가 안 되면 None
+            if q is None:
+                self._hv_pairs["도달불가(기구학)"] = self._hv_pairs.get("도달불가(기구학)", 0) + 1
+                return
+            _v, cnt = self._state_report({j: q[j] for j in self.ARM if j in q})
+            if not cnt:
+                self._hv_pairs[f"{tag}:접촉없음(원인불명)"] = \
+                    self._hv_pairs.get(f"{tag}:접촉없음(원인불명)", 0) + 1
+            for k in cnt:
+                key = f"{tag}:{k}"
+                self._hv_pairs[key] = self._hv_pairs.get(key, 0) + 1
+
         def _ik_ok():
             if _ik1(p_pre) is None:
                 self._hv_why["pre IK"] = self._hv_why.get("pre IK", 0) + 1
+                _why("pre", p_pre)
                 return False
             if _ik1(p_grasp) is None:
                 self._hv_why["grasp IK"] = self._hv_why.get("grasp IK", 0) + 1
+                _why("grasp", p_grasp)
                 return False
             return True
 
@@ -2648,7 +2676,7 @@ class PregraspDemo(Node):
     def _harvestable_targets(self):
         """워크스페이스 내 수확 가능한 열매만 도출(가까운 순). 기하 프리필터 후 IK 로 확정."""
         tg = self._sorted_targets()
-        self._hv_why = {}                    # 탈락 사유 집계(이 라운드)
+        self._hv_why, self._hv_pairs = {}, {}    # 탈락 사유·접촉 쌍(이 라운드)
         # ★ 비파괴 선별: 라운드 시작에 ACM 을 **한 번만** 열고 끝나면 되돌린다.
         #   (종전: 후보마다 구 영역 객체를 넣었다 뺐다 → 장면이 누적 변형됐다)
         nd = bool(self.get_parameter("screen_nondestructive").value)
@@ -2666,6 +2694,10 @@ class PregraspDemo(Node):
             f"수확 가능 열매 {len(out)} / 전체 {len(tg)} (워크스페이스 필터)"
             + (f" · 탈락: {why}" if why else "")
             + (f" · 옥토맵 {ob}B" if ob > 0 else ""))
+        if self._hv_pairs:
+            top = sorted(self._hv_pairs.items(), key=lambda x: -x[1])[:5]
+            self.get_logger().info(
+                "    막은 것: " + ", ".join(f"{k}×{v}" for k, v in top))
         return out
 
     def reach_noise(self):
@@ -2713,6 +2745,62 @@ class PregraspDemo(Node):
             "  ⇒ '수확하면 뒤가 열린다'는 신호가 1~2개 규모이므로, 잡음(들쭉날쭉 개수)이 "
             "그보다 작아야 그 효과를 측정할 수 있다.")
         return dict(counts=counts, always=always, sometimes=sometimes)
+
+    def probe_after_harvest(self):
+        """[진단] **수확 1회 전후**로 선별을 반복 추적한다 — "수확하면 뒤가 열리는가,
+        아니면 드러난 배경이 새 복셀로 막는가" 를 가르는 측정.
+
+        절차: 옥토맵 안정화 → 수확 전 선별 2회(기준) → 가장 가까운 열매 1개 수확·제거 →
+        `probe_after_harvest` 회 만큼 `probe_interval` 초 간격으로 선별 반복.
+        매 회 **개수·옥토맵 크기·막은 접촉 쌍**을 남긴다."""
+        k = max(1, int(self.get_parameter("probe_after_harvest").value))
+        dt = float(self.get_parameter("probe_interval").value)
+        if self._has_octomap():
+            b = self._wait_octomap_stable()
+            self.get_logger().info(f"옥토맵 안정화 {b}B → 기준선 측정")
+        self.get_logger().info("=== [수확 전] 기준 선별 2회 ===")
+        base = [len(self._harvestable_targets()) for _ in range(2)]
+        tg = self._harvestable_targets()
+        base.append(len(tg))        # ★ 대상 고르는 이 선별이 '수확 직전' 상태다 — 판정 기준은
+                                    #   이것이어야 한다(앞 2회로 판정하면 그 사이 변동을 수확 탓으로 돌린다)
+        if not tg:
+            self.get_logger().error("수확 가능한 열매가 없어 측정을 중단한다.")
+            return
+        name, p_fruit, r = tg[0]
+        self.get_logger().info(f"=== 수확 대상 {name} @ "
+                               f"({p_fruit[0]:.2f},{p_fruit[1]:.2f},{p_fruit[2]:.2f}) ===")
+        self._remember_target(name, p_fruit, r)
+        self._allow_for_target(name)
+        sol = self.solve_pregrasp(p_fruit, r)
+        if sol is None:
+            self.get_logger().error(f"{name} 계획 실패 — 측정 중단"); self._clear_zone(); return
+        try:
+            c = self._precompute(name, p_fruit, r, sol)
+            self._play_cycle(name, p_fruit, r, c)
+        except Exception as e:                                   # noqa: BLE001
+            self.get_logger().warn(f"수확 사이클 예외: {e}")
+        self._remove_fruit(name, p_fruit)
+        self.get_logger().info(f"=== [수확 후] {k}회 추적 ({dt:.0f}s 간격) ===")
+        after = []
+        for i in range(k):
+            n = len(self._harvestable_targets())
+            after.append(n)
+            self.get_logger().info(f"  [{i+1}/{k}] 수확가능 {n}개")
+            if i < k - 1:
+                self._hold(dt)
+        self.get_logger().info(
+            f"=== 판정: 수확 전 {base} → 수확 후 {after} (대상 1개 제거됨) ===")
+        exp = base[-1] - 1
+        if after and max(after) > exp:
+            self.get_logger().info(
+                f"  ⇒ **뒤가 열렸다**: 제거분을 빼고도 {max(after)} > {exp} 개")
+        elif after and min(after) < exp:
+            self.get_logger().info(
+                f"  ⇒ **오히려 막혔다**: 제거분을 빼면 {exp} 개여야 하는데 {min(after)} 개 "
+                "— 드러난 배경이 새 복셀로 막았을 가능성(위 '막은 것' 로그로 확인)")
+        else:
+            self.get_logger().info(f"  ⇒ 변화 없음: 딱 제거분 1개만 줄었다({exp}개)")
+        return dict(before=base, after=after)
 
     # ══════════════════ 인터랙티브(조작기) 모드 ══════════════════
     def _itarget_list(self):
@@ -2829,6 +2917,11 @@ def main():
             return
         if node.get_parameter("bench_strategy").value:
             node.bench_strategy_compare()      # 전략 × planner 정량 비교(계획만, 재생 없음)
+            node.destroy_node()
+            rclpy.shutdown()
+            return
+        if int(node.get_parameter("probe_after_harvest").value) > 0:
+            node.probe_after_harvest()      # [진단] 수확 전후 선별 추적 후 종료
             node.destroy_node()
             rclpy.shutdown()
             return

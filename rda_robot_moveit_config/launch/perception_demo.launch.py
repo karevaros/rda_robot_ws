@@ -192,6 +192,10 @@ def _setup(context, *args, **kwargs):
                 "screen_nondestructive": (lc("screen_nondestructive").perform(context).lower()
                                           in ("1", "true", "yes")),
                 "reach_repeat": int(lc("reach_repeat").perform(context)),
+                "screen_why_detail": (lc("screen_why_detail").perform(context).lower()
+                                      in ("1", "true", "yes")),
+                "probe_after_harvest": int(lc("probe_after_harvest").perform(context)),
+                "probe_interval": float(lc("probe_interval").perform(context)),
                 "target_source": "perception",
                 "targets_topic": "detected_fruits",
                 # 검출이 쌓이는 데 시간이 걸린다(실측: 첫 메시지 3개 → 30s 후 19개).
@@ -270,6 +274,13 @@ def generate_launch_description():
         DeclareLaunchArgument("harvest_ik_tries", default_value="1",
                               description="수확가능 판정에서 IK 재시도 횟수(KDL 은 무작위 "
                                           "재시작이라 1회면 판정이 흔들린다). 1=종전."),
+        DeclareLaunchArgument("screen_why_detail", default_value="false",
+                              description="[진단] 선별 탈락 자세를 무엇이 막는지 접촉 쌍으로 기록."),
+        DeclareLaunchArgument("probe_after_harvest", default_value="0",
+                              description="[진단] 수확 1회 전후로 선별을 K회 추적하고 종료 "
+                                          "('뒤가 열리는가 vs 새 복셀이 막는가' 판정)."),
+        DeclareLaunchArgument("probe_interval", default_value="20.0",
+                              description="probe_after_harvest 추적 간격[s]."),
         DeclareLaunchArgument("reach_repeat", default_value="0",
                               description="[진단] 수확가능 판정을 K회 반복해 흔들림을 재고 "
                                           "종료. 0=사용 안 함."),
