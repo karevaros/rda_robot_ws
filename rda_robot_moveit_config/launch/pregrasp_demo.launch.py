@@ -152,6 +152,8 @@ def _setup(context, *args, **kwargs):
         "harvest_remove": lc("harvest_remove").perform(context).lower() in ("1", "true", "yes"),
         # 파지한 열매를 그리퍼에 부착 → 후퇴·복귀 경로를 '든 상태'로 계획
         "attach_fruit": lc("attach_fruit").perform(context).lower() in ("1", "true", "yes"),
+        "harvest_ik_tries": int(lc("harvest_ik_tries").perform(context)),
+        "reach_repeat": int(lc("reach_repeat").perform(context)),
         "prefer_near_home": lc("prefer_near_home").perform(context).lower() in ("1", "true", "yes"),
         # 직선접근의 '관절 건전성' 한도 — TCP 직선이어도 관절이 크게 도는 해를 거른다(0=끔)
         "approach_jl_max": float(lc("approach_jl_max").perform(context)),
@@ -283,6 +285,10 @@ def generate_launch_description():
                               description="연속 수확 최대 열매 수."),
         DeclareLaunchArgument("prefer_near_home", default_value="true",
                               description="pre-grasp 자세를 home 에 가까운 것으로 선택(접근 전 큰 회전 제거)."),
+        DeclareLaunchArgument("harvest_ik_tries", default_value="1",
+                              description="수확가능 판정 IK 재시도 횟수(1=종전)."),
+        DeclareLaunchArgument("reach_repeat", default_value="0",
+                              description="[진단] 수확가능 판정 K회 반복해 흔들림 측정 후 종료."),
         DeclareLaunchArgument("attach_fruit", default_value="true",
                               description="파지한 열매를 그리퍼에 AttachedCollisionObject 로 "
                                           "부착 → 손에 든 열매까지 충돌검사에 넣는다."),

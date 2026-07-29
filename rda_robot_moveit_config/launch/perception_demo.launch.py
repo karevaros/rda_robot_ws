@@ -187,6 +187,9 @@ def _setup(context, *args, **kwargs):
                                    in ("1", "true", "yes")),
                 "attach_fruit": (lc("attach_fruit").perform(context).lower()
                                  in ("1", "true", "yes")),
+                # 판정 잡음 대책 + 그 잡음을 재는 진단 모드
+                "harvest_ik_tries": int(lc("harvest_ik_tries").perform(context)),
+                "reach_repeat": int(lc("reach_repeat").perform(context)),
                 "target_source": "perception",
                 "targets_topic": "detected_fruits",
                 # 검출이 쌓이는 데 시간이 걸린다(실측: 첫 메시지 3개 → 30s 후 19개).
@@ -258,6 +261,12 @@ def generate_launch_description():
                               description="구 영역 ρ = 열매반경 + 이 여유[m]. 센싱 장면은 "
                                           "그리퍼 점유공간까지 덮어야 해서 설계값 장면(0.03)보다 "
                                           "커야 한다(Stage 5 실측 최소 ρ=15.7cm)."),
+        DeclareLaunchArgument("harvest_ik_tries", default_value="1",
+                              description="수확가능 판정에서 IK 재시도 횟수(KDL 은 무작위 "
+                                          "재시작이라 1회면 판정이 흔들린다). 1=종전."),
+        DeclareLaunchArgument("reach_repeat", default_value="0",
+                              description="[진단] 수확가능 판정을 K회 반복해 흔들림을 재고 "
+                                          "종료. 0=사용 안 함."),
         DeclareLaunchArgument("attach_fruit", default_value="true",
                               description="파지한 열매를 그리퍼에 부착해 계획에 반영."),
         DeclareLaunchArgument("harvest_remove", default_value="true",

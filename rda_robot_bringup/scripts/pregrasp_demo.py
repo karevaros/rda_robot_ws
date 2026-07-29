@@ -197,6 +197,14 @@ class PregraspDemo(Node):
         # 파지한 열매를 그리퍼에 **부착**해 계획에 반영(손에 든 열매가 옆 줄기를 쓸지 않게).
         #   끄면 종전처럼 '빈손' 가정으로 후퇴·복귀 경로를 짠다.
         self.declare_parameter("attach_fruit", True)
+        # 수확가능 판정에서 IK 를 몇 번까지 다시 물을지.
+        #   🔴 **기본 1 — 재시도는 효과가 없었다**(2026-07-29 실측). KDL IK 의 무작위 재시작이
+        #   원인일 거라 보고 3회로 올려 봤지만 흔들림이 그대로였고(들쭉날쭉 4개 동일) 라운드
+        #   시간만 2~4배로 늘었다(46~116s → 92~185s). 원인은 다른 데 있다(아래 reach_noise 참조).
+        self.declare_parameter("harvest_ik_tries", 1)
+        # [진단] 수확가능 판정을 K 회 반복해 **흔들림 자체를 측정**하고 종료(0=사용 안 함).
+        #   판정 잡음이 '수확하면 뒤가 열린다' 신호보다 크면 그 효과는 측정 자체가 불가능하다.
+        self.declare_parameter("reach_repeat", 0)
         # 센싱 장면에서 **옥토맵이 생길 때까지** 기다리는 한도[s]. 빈 지도 위에서 기준선을
         #   잡으면 전부 '수확 가능'으로 나왔다가 지도가 자라며 사라진다(실측 4 → 0).
         self.declare_parameter("octomap_wait", 60.0)
@@ -2522,12 +2530,24 @@ class PregraspDemo(Node):
         p_grasp = p_fruit - a * goff
         p_pre = p_grasp - a * d0
 
+        # ⚠ KDL IK 는 **무작위 재시작**이라 같은 질문에도 실패/성공이 갈린다. 한 번만 물으면
+        #   판정이 흔들려(실측: 같은 옥토맵에서 수확가능 수가 1↔5) '수확해서 열렸다' 같은
+        #   신호를 잡음이 덮는다 → `harvest_ik_tries` 회까지 다시 묻는다(성공하면 즉시 종료).
+        tries = max(1, int(self.get_parameter("harvest_ik_tries").value))
+
+        def _ik1(p):
+            for _ in range(tries):
+                self._set({j: 0.0 for j in self.ARM})   # IK 시드 = home(매 시도 동일 기준)
+                q = self.solve_ik(p, quat, avoid=True)
+                if q is not None:
+                    return q
+            return None
+
         def _ik_ok():
-            self._set({j: 0.0 for j in self.ARM})       # IK 시드 = home
-            if self.solve_ik(p_pre, quat, avoid=True) is None:
+            if _ik1(p_pre) is None:
                 self._hv_why["pre IK"] = self._hv_why.get("pre IK", 0) + 1
                 return False
-            if self.solve_ik(p_grasp, quat, avoid=True) is None:
+            if _ik1(p_grasp) is None:
                 self._hv_why["grasp IK"] = self._hv_why.get("grasp IK", 0) + 1
                 return False
             return True
@@ -2565,6 +2585,52 @@ class PregraspDemo(Node):
             + (f" · 탈락: {why}" if why else "")
             + (f" · 옥토맵 {ob}B" if ob > 0 else ""))
         return out
+
+    def reach_noise(self):
+        """[진단] 수확가능 판정을 K 회 반복해 **판정 자체의 흔들림**을 수치로 낸다.
+
+        같은 질문을 K 번 한다 → 편차는 전부 판정 과정에서 온다. 이 편차가 '수확하면 뒤가
+        열린다'(1~2개)보다 크면 그 효과는 측정 자체가 불가능하다.
+
+        실측(인지 장면, 검출 19개): tries=1 → 5,1,4,3,4개 · tries=3 → 5,2,2,3,4개.
+        **재시도로는 안 줄었다.** 대신 **1라운드만 5개·29초로 두 실행 모두 동일**하고 2라운드
+        부터 흔들리며 느려진다 → 순수 무작위가 아니라 **판정이 장면을 건드려 생기는 누적**이
+        섞여 있다는 뜻(판정이 후보마다 구 영역을 넣었다 빼며, 옥토맵 마스킹은 비가역이다)."""
+        k = max(1, int(self.get_parameter("reach_repeat").value))
+        tries = int(self.get_parameter("harvest_ik_tries").value)
+        if self._has_octomap():          # 센싱 장면이면 지도부터 안정화(빈 지도 = 낙관값)
+            b = self._wait_octomap_stable()
+            self.get_logger().info(f"옥토맵 안정화 {b}B → 판정 반복 시작")
+        self.get_logger().info(
+            f"=== 수확가능 판정 잡음 측정: {k}회 반복 · harvest_ik_tries={tries} ===")
+        counts, sets = [], []
+        for i in range(k):
+            t0 = time.time()
+            out = self._harvestable_targets()
+            names = {n for n, _, _ in out}
+            counts.append(len(names))
+            sets.append(names)
+            self.get_logger().info(
+                f"  [{i+1}/{k}] 수확가능 {len(names)}개 ({time.time()-t0:.0f}s) "
+                f"{sorted(names)}")
+        union = set().union(*sets) if sets else set()
+        inter = set.intersection(*sets) if sets else set()
+        always = sorted(inter)
+        sometimes = sorted(union - inter)
+        import statistics as st
+        self.get_logger().info(
+            f"=== 결과: {min(counts)}~{max(counts)}개 (중앙 {st.median(counts)}, "
+            f"평균 {sum(counts)/len(counts):.1f}) ===")
+        self.get_logger().info(f"  항상 수확가능 {len(always)}개: {always}")
+        self.get_logger().info(
+            f"  ⚠ 들쭉날쭉 {len(sometimes)}개(= 판정 잡음): {sometimes}")
+        for n in sometimes:
+            hit = sum(1 for s in sets if n in s)
+            self.get_logger().info(f"     {n}: {hit}/{k}회")
+        self.get_logger().info(
+            "  ⇒ '수확하면 뒤가 열린다'는 신호가 1~2개 규모이므로, 잡음(들쭉날쭉 개수)이 "
+            "그보다 작아야 그 효과를 측정할 수 있다.")
+        return dict(counts=counts, always=always, sometimes=sometimes)
 
     # ══════════════════ 인터랙티브(조작기) 모드 ══════════════════
     def _itarget_list(self):
@@ -2681,6 +2747,11 @@ def main():
             return
         if node.get_parameter("bench_strategy").value:
             node.bench_strategy_compare()      # 전략 × planner 정량 비교(계획만, 재생 없음)
+            node.destroy_node()
+            rclpy.shutdown()
+            return
+        if int(node.get_parameter("reach_repeat").value) > 0:
+            node.reach_noise()          # [진단] 수확가능 판정의 흔들림 측정 후 종료
             node.destroy_node()
             rclpy.shutdown()
             return
