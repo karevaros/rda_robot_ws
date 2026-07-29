@@ -185,6 +185,8 @@ def _setup(context, *args, **kwargs):
                 # 옥토맵·인지 결과가 갱신돼 뒤쪽 열매가 새로 수확 가능해진다.
                 "harvest_remove": (lc("harvest_remove").perform(context).lower()
                                    in ("1", "true", "yes")),
+                "attach_fruit": (lc("attach_fruit").perform(context).lower()
+                                 in ("1", "true", "yes")),
                 "target_source": "perception",
                 "targets_topic": "detected_fruits",
                 # 검출이 쌓이는 데 시간이 걸린다(실측: 첫 메시지 3개 → 30s 후 19개).
@@ -256,6 +258,8 @@ def generate_launch_description():
                               description="구 영역 ρ = 열매반경 + 이 여유[m]. 센싱 장면은 "
                                           "그리퍼 점유공간까지 덮어야 해서 설계값 장면(0.03)보다 "
                                           "커야 한다(Stage 5 실측 최소 ρ=15.7cm)."),
+        DeclareLaunchArgument("attach_fruit", default_value="true",
+                              description="파지한 열매를 그리퍼에 부착해 계획에 반영."),
         DeclareLaunchArgument("harvest_remove", default_value="true",
                               description="수확한 열매를 Gazebo·planning scene 에서 제거 "
                                           "→ 가림이 풀려 뒤쪽 열매가 새로 수확 가능해진다."),

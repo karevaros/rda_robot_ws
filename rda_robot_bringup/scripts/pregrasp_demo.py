@@ -42,7 +42,7 @@ from moveit_msgs.srv import (GetPositionIK, GetMotionPlan, GetCartesianPath,
 from moveit_msgs.msg import (PositionIKRequest, RobotState, MotionPlanRequest,
                              Constraints, JointConstraint, DisplayRobotState,
                              PlanningScene, PlanningSceneComponents, CollisionObject,
-                             AllowedCollisionEntry)
+                             AllowedCollisionEntry, AttachedCollisionObject)
 from shape_msgs.msg import SolidPrimitive
 from std_srvs.srv import Empty
 
@@ -194,6 +194,9 @@ class PregraspDemo(Node):
         # 인지 타깃(det_N)은 이름표가 없어 Gazebo 모델 이름과 다르다 → **위치로 매칭**할 때
         #   허용 오차[m]. 인지 중심오차 중앙값 1.6cm · 한 화방 열매 간격 6cm 사이 값.
         self.declare_parameter("harvest_match_tol", 0.06)
+        # 파지한 열매를 그리퍼에 **부착**해 계획에 반영(손에 든 열매가 옆 줄기를 쓸지 않게).
+        #   끄면 종전처럼 '빈손' 가정으로 후퇴·복귀 경로를 짠다.
+        self.declare_parameter("attach_fruit", True)
         # 센싱 장면에서 **옥토맵이 생길 때까지** 기다리는 한도[s]. 빈 지도 위에서 기준선을
         #   잡으면 전부 '수확 가능'으로 나왔다가 지도가 자라며 사라진다(실측 4 → 0).
         self.declare_parameter("octomap_wait", 60.0)
@@ -290,6 +293,8 @@ class PregraspDemo(Node):
                        history=QoSHistoryPolicy.KEEP_LAST))
         self._del_entity = None      # Gazebo /delete_entity (있을 때만 lazy 생성)
         self._hv_why = {}            # 수확가능 판정 탈락 사유 집계(라운드마다 초기화)
+        self._grip_links = []        # 그리퍼 링크(파지한 열매의 touch_links)
+        self._attached = None        # 현재 그리퍼에 부착된 열매 객체 id
         self._op = _import_sibling("_obstacle_publisher", "obstacle_publisher.py")
         # ★ B: 팔/그리퍼 관절 이름 + A: 접근축을 SRDF/URDF 에서 자동 유도(모델 불문)
         self._setup_model()
@@ -330,6 +335,13 @@ class PregraspDemo(Node):
                     self.ARM = info["arm"]
                 if info["gripper_all"]:
                     self.FINGERS = info["gripper_all"]
+                # 그리퍼 링크 = 파지한 열매의 `touch_links`(붙잡은 열매가 손가락과 닿는 건
+                #   충돌이 아니다). 손(부착 링크)까지 포함.
+                self._grip_links = sorted(
+                    {info["joints"][j]["child"] for j in info["gripper_all"]
+                     if j in info["joints"]}
+                    | {info["joints"][j]["parent"] for j in info["gripper_all"]
+                       if j in info["joints"]})
                 chain = RI.fk_chain(info["joints"], info["child_to_joint"],
                                     self.get_parameter("base_link").value, self.ik_link)
                 if chain:
@@ -2021,6 +2033,7 @@ class PregraspDemo(Node):
     # 새 전략 추가 = 메서드 하나 만들고 아래 _STRATEGIES 에 등록만.
     def _precompute(self, name, p_fruit, r, sol):
         """선택된 strategy 로 전체 데모 궤적을 한 번만 계획해 캐시(이후 반복은 재생만)."""
+        self._detach_fruit()          # 이전 사이클의 부착이 남아 있으면 떼고 시작
         fn = self._STRATEGIES.get(self.strategy)
         if fn is None:
             self.get_logger().warn(
@@ -2064,6 +2077,9 @@ class PregraspDemo(Node):
                    if app_wp else dict(q_grasp_ik))
 
         # ④ home 복귀 (시작 = q_pre, 후퇴=접근 역재생으로 q_pre 도달 후)
+        #    ★ 이 구간은 **열매를 든 상태**로 움직인다 → 먼저 부착하고 계획한다. 안 그러면
+        #      MoveIt 이 빈손인 줄 알고 경로를 짜서, 손에 든 열매가 옆 줄기를 쓸고 지나간다.
+        self._attach_fruit(name, r)
         self._set({j: q_pre.get(j, 0.0) for j in self.ARM})
         home = self.plan_to(q_home)
 
@@ -2095,7 +2111,8 @@ class PregraspDemo(Node):
         # ② 접근 구간 없음(이미 grasp) → 자리표시(역재생 후퇴도 자리표시가 됨; 실제 후퇴는 home 구간)
         app_wp = [[q_grasp[j] for j in self.ARM], [q_grasp[j] for j in self.ARM]]
 
-        # ④ grasp → home 복귀 (자유공간 OMPL)
+        # ④ grasp → home 복귀 (자유공간 OMPL) — 열매를 든 상태로 움직인다(부착 후 계획)
+        self._attach_fruit(name, r)
         self._set({j: q_grasp[j] for j in self.ARM})
         home = self.plan_to(q_home)
 
@@ -2272,6 +2289,86 @@ class PregraspDemo(Node):
                 + " → ".join(str(c) for c in counts))
         return harvested
 
+    # ══════════════════ 파지한 열매를 그리퍼에 부착 ══════════════════
+    #  파지 후에는 **손에 Ø7cm 짜리 열매를 든 상태**로 후퇴·이동한다. 그걸 계획에 알리지 않으면
+    #  MoveIt 은 빈손인 줄 알고 경로를 짜고, 손에 든 열매가 옆 줄기를 쓸고 지나가도 모른다.
+    #  → 파지 시점에 `AttachedCollisionObject` 로 붙이고(그리퍼 링크 기준), 수확이 끝나면 뗀다.
+    #  부착 객체는 링크에 매달리므로 로봇이 움직이면 같이 움직인다(자세와 무관하게 한 번만 걸면 됨).
+    def _attach_fruit(self, name, r):
+        """파지한 열매를 그리퍼(`ik_link`)에 부착. 성공 여부(bool)."""
+        if not bool(self.get_parameter("attach_fruit").value) or self.apply_scene is None:
+            return False
+        self._detach_fruit()                       # 이전 것이 남아 있으면 먼저 뗀다
+        aid = f"grasped_{name}"
+        aco = AttachedCollisionObject()
+        aco.link_name = self.ik_link
+        aco.object.header.frame_id = self.ik_link
+        aco.object.id = aid
+        aco.object.operation = CollisionObject.ADD
+        sp = SolidPrimitive()
+        sp.type = SolidPrimitive.SPHERE
+        sp.dimensions = [float(r)]
+        po = Pose()
+        # 열매 중심은 tcp 에서 **접근축 방향으로 grasp_offset** 만큼 앞(파지 기하 그대로).
+        a = np.asarray(self.approach_axis, float)
+        a = a / max(float(np.linalg.norm(a)), 1e-9)
+        po.position.x, po.position.y, po.position.z = map(float, a * self.grasp_offset)
+        po.orientation.w = 1.0
+        aco.object.primitives.append(sp)
+        aco.object.primitive_poses.append(po)
+        # 손가락·손과 닿는 건 '잡고 있는 것'이지 충돌이 아니다.
+        aco.touch_links = list(self._grip_links) or [self.ik_link]
+        ps = PlanningScene()
+        ps.is_diff = True
+        ps.robot_state.is_diff = True
+        ps.robot_state.attached_collision_objects.append(aco)
+        self._call(self.apply_scene, ApplyPlanningScene.Request(scene=ps), 15.0)
+        if not self._attached_ids(aid):            # 응답을 믿지 않고 재조회로 확인
+            self.get_logger().warn(f"열매 부착 실패({aid}) — 계획이 '빈손'으로 짜인다")
+            return False
+        self._attached = aid
+        # 수확 작업공간이 허용한 객체(자기 화방대 등)는 **부착된 열매와도** 허용해야 한다
+        #   — 열매는 그 화방대에 매달려 있던 것이라 파지 순간 닿아 있다.
+        if self._zone_allowed:
+            self._set_allow(list(self._zone_allowed), True)
+        self.get_logger().info(
+            f"파지한 열매를 그리퍼에 부착: {aid} (r={r*100:.1f}cm, {self.ik_link} 기준 "
+            f"접근축 {self.grasp_offset*100:.1f}cm) → 이후 계획이 '든 상태'로 충돌검사")
+        return True
+
+    def _attached_ids(self, want=None):
+        """현재 부착된 객체 id 목록(조회 실패 시 []). want 를 주면 포함 여부(bool)."""
+        req = GetPlanningScene.Request()
+        req.components.components = PlanningSceneComponents.ROBOT_STATE_ATTACHED_OBJECTS
+        res = self._call(self.scene, req, 10.0)
+        ids = ([a.object.id for a in res.scene.robot_state.attached_collision_objects]
+               if res is not None else [])
+        return (want in ids) if want is not None else ids
+
+    def _detach_fruit(self, remove=True):
+        """부착 해제(+장면에서도 제거). 수확이 끝났거나 다음 사이클을 시작할 때."""
+        aid = self._attached
+        if aid is None or self.apply_scene is None:
+            return False
+        aco = AttachedCollisionObject()
+        aco.link_name = self.ik_link
+        aco.object.id = aid
+        aco.object.operation = CollisionObject.REMOVE      # 부착 해제
+        ps = PlanningScene()
+        ps.is_diff = True
+        ps.robot_state.is_diff = True
+        ps.robot_state.attached_collision_objects.append(aco)
+        if remove:
+            # 떼면 월드 객체로 남는다(손에서 놓은 자리에) → 수확한 것이니 장면에서도 없앤다.
+            co = CollisionObject()
+            co.header.frame_id = self.world
+            co.id = aid
+            co.operation = CollisionObject.REMOVE
+            ps.world.collision_objects.append(co)
+        self._call(self.apply_scene, ApplyPlanningScene.Request(scene=ps), 15.0)
+        self._attached = None
+        return True
+
     # ══════════════════ 수확 완료 → 장면에서 제거 ══════════════════
     def _remove_fruit(self, name, p_fruit=None):
         """수확한 열매를 **장면에서 없앤다**(실제 수확과 같은 상태로 만든다).
@@ -2284,6 +2381,7 @@ class PregraspDemo(Node):
         name = str(name)
         self._harvested.add(name)
         self._tgt_geom.pop(name, None)
+        self._detach_fruit()          # 수확 끝 = 손에서 놓는다(부착 해제 + 장면에서 제거)
         # ① 재발행 제외 통보 — 이걸 먼저 보낸다. planning scene 에서 지우기만 하면
         #    obstacle_publisher 가 다음 주기(1s)에 되살린다.
         self._harvest_pub.publish(String(data=name))
