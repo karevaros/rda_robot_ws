@@ -187,8 +187,15 @@ def _setup(context, *args, **kwargs):
                                    in ("1", "true", "yes")),
                 "target_source": "perception",
                 "targets_topic": "detected_fruits",
+                # 검출이 쌓이는 데 시간이 걸린다(실측: 첫 메시지 3개 → 30s 후 19개).
+                # 개수가 안정될 때까지 기다리게 넉넉히 준다.
+                "targets_wait": 60.0,
                 "min_scene_objects": 0,          # 센싱 장면(옥토맵만) — 명명객체 0개 허용
                 "acm_mode": "region",            # 공간(구 영역) ACM(Stage 5)
+                # ρ = 열매반경 + region_margin. ⚠ 센싱 장면에서는 **그리퍼 점유공간**까지
+                #   덮어야 파지 자세가 성립한다(Stage 5 실측 최소 ρ=15.7cm). 설계값 장면 기본
+                #   3cm(ρ≈6.5cm)로는 손가락이 열매 뒤 옥토맵에 걸려 계획이 안 된다.
+                "region_margin": float(lc("region_margin").perform(context)),
                 "ik_timeout": 0.5,               # 도달권 경계 열매엔 여유
                 "world_frame": "world", "base_link": "link0", "ik_link": "tcp", "group": "arm",
             }, sim]))
@@ -245,6 +252,10 @@ def generate_launch_description():
                               description="run_demo 시 도달 열매를 하나씩 연속 수확(단일 반복 대신)."),
         DeclareLaunchArgument("harvest_max", default_value="5",
                               description="연속 수확 최대 열매 수(harvest_all 시)."),
+        DeclareLaunchArgument("region_margin", default_value="0.13",
+                              description="구 영역 ρ = 열매반경 + 이 여유[m]. 센싱 장면은 "
+                                          "그리퍼 점유공간까지 덮어야 해서 설계값 장면(0.03)보다 "
+                                          "커야 한다(Stage 5 실측 최소 ρ=15.7cm)."),
         DeclareLaunchArgument("harvest_remove", default_value="true",
                               description="수확한 열매를 Gazebo·planning scene 에서 제거 "
                                           "→ 가림이 풀려 뒤쪽 열매가 새로 수확 가능해진다."),

@@ -111,7 +111,22 @@ class PregraspDemo(Node):
         # 전체 초기화는 누적 관측을 날려 지도를 성기게 만들어 측정을 오염시킨다(실측 확인).
         self.declare_parameter("region_clear_octomap", False)
         self.declare_parameter("standoff", 0.15)
-        self.declare_parameter("grasp_offset", 0.10)     # 파지 시 열매 중심 앞 TCP 정지거리
+        # 파지 시 **TCP 가 열매 중심 앞에서 멈추는 거리**. 상수로 두면 그리퍼를 바꿨을 때
+        #   조용히 틀린다 — 손가락이 짧은 그리퍼(예 Robotiq 2F-85, 패드 ~5cm)로 바꾸면 열매가
+        #   손끝 **너머**에 놓여 빈손으로 닫힌다. → `grasp_offset_auto` 로 URDF 에서 유도한다.
+        self.declare_parameter("grasp_offset", 0.10)
+        # true = 그리퍼 손가락이 접근축으로 차지하는 깊이(near,far)를 URDF 에서 재서
+        #   **열매 중심이 패드 사이 grasp_depth 지점에 오도록** grasp_offset 을 계산한다.
+        #   (RG2 실측: 패드 0.091~0.213m → 0.5 면 0.152m)
+        self.declare_parameter("grasp_offset_auto", True)
+        # grasp_depth = 열매 중심을 패드의 어디에 둘지(0=입구·1=손끝).
+        #   ⚠ 깊이는 **공짜가 아니다** — 깊게 물수록 손끝이 열매 **뒤쪽**으로 더 들어가야 한다.
+        #     RG2 에서 0.5(패드 중앙 15.1cm)로 두면 손끝이 열매 중심 뒤 6.1cm 까지 들어가는데,
+        #     센싱(옥토맵) 장면에서는 그 공간이 막혀 파지 자세가 아예 안 나왔다
+        #     (실측: 인지 장면 수확 1회 → 0회, 후보 4개 전부 solve_pregrasp 실패).
+        #   → 기본 0.33 = 패드의 1/3 지점 ≈ 13cm. 종전 상수와 같은 위치라 검증된 동작을 유지한다.
+        #     주변이 트인 곳에서는 0.5 가 파지 안정성에 낫다(그때는 인자로 올릴 것).
+        self.declare_parameter("grasp_depth", 0.33)
         # ── 직선접근 궤적의 '관절 건전성' 검사 (2026-07-29) ─────────────────
         # TCP 가 직선이어도(fraction=1.00) 손목이 특이점 근처를 지나며 관절이 크게 도는 해가
         # 섞여 나온다. 실측: 같은 열매·같은 직선 15cm 에서 접근구간 관절길이가 **0.65rad ↔
@@ -176,6 +191,12 @@ class PregraspDemo(Node):
         self.declare_parameter("harvest_remove", True)
         self.declare_parameter("harvested_topic", "harvested")
         self.declare_parameter("harvest_delete_gazebo", True)
+        # 인지 타깃(det_N)은 이름표가 없어 Gazebo 모델 이름과 다르다 → **위치로 매칭**할 때
+        #   허용 오차[m]. 인지 중심오차 중앙값 1.6cm · 한 화방 열매 간격 6cm 사이 값.
+        self.declare_parameter("harvest_match_tol", 0.06)
+        # 센싱 장면에서 **옥토맵이 생길 때까지** 기다리는 한도[s]. 빈 지도 위에서 기준선을
+        #   잡으면 전부 '수확 가능'으로 나왔다가 지도가 자라며 사라진다(실측 4 → 0).
+        self.declare_parameter("octomap_wait", 60.0)
         # prefer_near_home = pre-grasp 자세 후보를 **home 과 관절거리가 가까운** 것으로 우선 선택
         #   → phase ①(home→pre-grasp)에서 손목/관절이 크게 뒤집혀 도는 동작을 없앤다.
         #   (false 면 종전대로 접근각 자연스러움(prior)만으로 선택)
@@ -268,6 +289,7 @@ class PregraspDemo(Node):
                        durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
                        history=QoSHistoryPolicy.KEEP_LAST))
         self._del_entity = None      # Gazebo /delete_entity (있을 때만 lazy 생성)
+        self._hv_why = {}            # 수확가능 판정 탈락 사유 집계(라운드마다 초기화)
         self._op = _import_sibling("_obstacle_publisher", "obstacle_publisher.py")
         # ★ B: 팔/그리퍼 관절 이름 + A: 접근축을 SRDF/URDF 에서 자동 유도(모델 불문)
         self._setup_model()
@@ -338,13 +360,62 @@ class PregraspDemo(Node):
                     self.approach_axis = ax
             except Exception as e:
                 self.get_logger().warn(f"접근축 자동감지 실패({e}) → 기본 −Y")
+        # C: 파지 거리 — 그리퍼 손가락이 접근축으로 차지하는 실제 깊이에서 유도(모델 불문)
+        self._pad_span = None
+        self.grasp_offset = float(self.get_parameter("grasp_offset").value)
+        if bool(self.get_parameter("grasp_offset_auto").value) and urdf and srdf:
+            try:
+                span = RI.gripper_span(urdf, srdf, self.ik_link, self.approach_axis,
+                                       self.get_parameter("gripper_group").value,
+                                       mesh_resolver=self._resolve_mesh)
+            except Exception as e:                          # noqa: BLE001
+                span, _ = None, self.get_logger().warn(f"그리퍼 깊이 측정 실패({e}) → 상수 사용")
+            # ★ 건전성 검사 — 손가락이 **접근축 방향으로 뻗어야** 이 값이 의미가 있다.
+            #   접근축이 그 그리퍼와 안 맞으면(SRDF 가 옛 그리퍼 기준이면) 깊이가 0 을 중심으로
+            #   대칭으로 나온다(실측: Robotiq 2F-85 에서 −7.4~+7.4cm = 옆으로 잰 값).
+            #   그걸 그대로 쓰면 파지점이 **TCP 원점**이 되어 손목으로 열매를 들이받는다.
+            ok = bool(span) and span[1] > 0.02 and span[1] > abs(span[0]) * 1.5
+            if ok:
+                f = min(max(float(self.get_parameter("grasp_depth").value), 0.0), 1.0)
+                auto = span[0] + f * (span[1] - span[0])
+                self.get_logger().info(
+                    f"파지 거리 자동유도 — 손가락 패드 깊이 {span[0]*100:.1f}~{span[1]*100:.1f}cm"
+                    f"(tcp 기준, 접근축 투영) · grasp_depth={f:.2f} → grasp_offset "
+                    f"{self.grasp_offset*100:.1f} → {auto*100:.1f}cm")
+                self.grasp_offset, self._pad_span = auto, span
+            else:
+                self.get_logger().warn(
+                    "그리퍼 손가락이 접근축 방향으로 뻗지 않는다"
+                    + (f"(깊이 {span[0]*100:.1f}~{span[1]*100:.1f}cm — 0 대칭이면 옆으로 잰 것)"
+                       if span else "(측정 실패)")
+                    + f" → grasp_offset 상수 {self.grasp_offset*100:.1f}cm 유지. "
+                      "그리퍼를 바꿨다면 `gen_srdf.py` 를 다시 돌려 SRDF/접근축을 맞출 것.")
         # 관절 이름이 바뀌었을 수 있으니 현재자세 dict 재구성(그리퍼는 벌림)
         gopen = float(self.get_parameter("gripper_open").value)
         self.cur = {j: 0.0 for j in self.ARM}
         self.cur.update({f: gopen for f in self.FINGERS})
         self.get_logger().info(
             f"모델 자동설정 — arm{self.ARM} gripper{self.FINGERS} "
-            f"접근축(tcp){[round(v,3) for v in self.approach_axis]}")
+            f"접근축(tcp){[round(v,3) for v in self.approach_axis]} "
+            f"파지거리 {self.grasp_offset*100:.1f}cm")
+
+    @staticmethod
+    def _resolve_mesh(uri):
+        """URDF 의 `package://pkg/rel/path` → 로컬 절대경로(없으면 None)."""
+        import os
+        if not uri:
+            return None
+        if uri.startswith("file://"):
+            return uri[7:]
+        if not uri.startswith("package://"):
+            return uri if os.path.exists(uri) else None
+        pkg, _, rel = uri[len("package://"):].partition("/")
+        try:
+            from ament_index_python.packages import get_package_share_directory
+            p = os.path.join(get_package_share_directory(pkg), rel)
+        except Exception:                                   # noqa: BLE001
+            return None
+        return p if os.path.exists(p) else None
 
     def _scene_object_count(self):
         """planning scene 의 world collision object 개수(배경 로드 확인용)."""
@@ -809,8 +880,11 @@ class PregraspDemo(Node):
         self._set_allow([self.ZONE_ID] + list(self._zone_allowed), False)   # 허용을 되돌린다
         self._zone_at, self._zone_allowed = None, []
 
-    def _allow_region(self, center, rho):
-        """목표 열매 중심 반경 ρ 구 영역을 '수확 작업 공간'으로 허용한다."""
+    def _allow_region(self, center, rho, settle=True):
+        """목표 열매 중심 반경 ρ 구 영역을 '수확 작업 공간'으로 허용한다.
+
+        `settle=False` 면 옥토맵 침식 대기를 건너뛴다 — **선별(수확가능 판정)용**. 후보마다
+        2초씩 기다리면 목록 도출이 수십 초 늘어난다(계획 직전에는 항상 True 로 건다)."""
         center = np.asarray(center, float)
         if self._zone_at is not None and float(np.linalg.norm(center - self._zone_at)) < 1e-6:
             return True                                    # 이미 같은 위치에 배치됨
@@ -837,7 +911,7 @@ class PregraspDemo(Node):
         self._zone_at, self._zone_allowed = center, inside
         # 이미 쌓인 옥토맵 복셀은 마스크로 사라지지 않는다(마스크는 새로 들어오는 점만 거른다)
         # → 1회 초기화하면 다음 갱신부터 구 안이 빈 채로 재구축된다.
-        if self._has_octomap():
+        if settle and self._has_octomap():
             if bool(self.get_parameter("region_clear_octomap").value) and \
                     self._clear_octomap.wait_for_service(timeout_sec=1.0):
                 self._call(self._clear_octomap, Empty.Request(), 3.0)
@@ -869,8 +943,10 @@ class PregraspDemo(Node):
     def _remember_target(self, name, p, r):
         self._tgt_geom[str(name)] = (np.asarray(p, float), float(r))
 
-    def _allow_for_target(self, name):
+    def _allow_for_target(self, name, settle=True):
         """접근 계획 전 충돌 허용 적용. 방식은 `acm_mode`(region|stalk|none)로 결정한다.
+
+        `settle=False` = 선별용(옥토맵 침식 대기 생략). 계획 직전 호출은 기본값(True)을 쓴다.
 
         ⚠ 이전에는 이 호출이 `plan_approach`/`_best_straight_candidate` 안에 이름 기반으로
         **하드코딩**돼 있어서, 비교실험의 'ACM 완화 없음' 조건에서도 목표 화방대가 허용됐다
@@ -884,7 +960,7 @@ class PregraspDemo(Node):
         if g is None:                                   # 기하를 모르면 이름 기반으로 폴백
             return self._allow_collision(self._stalk_of(name))
         rho = g[1] + float(self.get_parameter("region_margin").value)
-        return self._allow_region(g[0], rho)
+        return self._allow_region(g[0], rho, settle=settle)
 
     # ══════════════════ 알고리즘: pre-grasp 자세 ══════════════════
     def _perception_targets(self):
@@ -915,8 +991,18 @@ class PregraspDemo(Node):
             wait = float(self.get_parameter("targets_wait").value)
             while not self._det and time.time() - t0 < wait:
                 rclpy.spin_once(self._det_node, timeout_sec=0.2)
+            # ★ 첫 메시지에서 바로 시작하면 검출이 아직 쌓이는 중이다(실측: 3개에서 시작했는데
+            #   곧 19개가 됐다). **개수가 안정될 때까지** 더 기다린다 — 안 그러면 첫 라운드의
+            #   후보가 부당하게 적어 '수확하면 뒤가 열린다'를 볼 수가 없다.
+            n_prev, same = -1, 0
+            while time.time() - t0 < wait and same < 3:
+                rclpy.spin_once(self._det_node, timeout_sec=0.5)
+                n = len(self._det)
+                same = same + 1 if n == n_prev else 0
+                n_prev = n
+                time.sleep(0.5)
             self.get_logger().info(f"인지 열매 {len(self._det)}개 수신"
-                                   f" ({time.time() - t0:.1f}s)")
+                                   f" ({time.time() - t0:.1f}s, 개수 안정화 후)")
         else:
             rclpy.spin_once(self._det_node, timeout_sec=0.0)   # 최신 관측 반영
         return list(self._det)
@@ -985,7 +1071,7 @@ class PregraspDemo(Node):
         후보만 고른다(그래야 Cartesian 이 폴백 없이 곧게 들어간다).
         반환: dict(q_pre, q_grasp, a, p_pre, p_grasp, quat, c) 또는 None."""
         d0 = float(self.get_parameter("standoff").value)
-        goff = float(self.get_parameter("grasp_offset").value)
+        goff = self.grasp_offset      # URDF 에서 유도(또는 파라미터 상수)
         prefer_home = bool(self.get_parameter("prefer_near_home").value)
         yaw = float(self.get_parameter("approach_yaw_deg").value)
         if not math.isnan(yaw):
@@ -1038,7 +1124,7 @@ class PregraspDemo(Node):
             self.get_logger().error("진단: 도달 가능한 열매가 없음."); return
         name, p_fruit, r, sol = sel
         self._allow_for_target(name)     # 수확 작업공간 허용(직선 판정 공정)
-        goff = float(self.get_parameter("grasp_offset").value)
+        goff = self.grasp_offset      # URDF 에서 유도(또는 파라미터 상수)
         d0 = float(self.get_parameter("standoff").value)
         bxy = self._base_xy()
         hv = (p_fruit[:2] - bxy) if bxy is not None else np.array([1.0, 0.0])
@@ -1094,7 +1180,7 @@ class PregraspDemo(Node):
           닿았다). → `approach_jl_max` 초과는 직선으로 인정하지 않고, 동률이면 덜 도는 해 우선."""
         from types import SimpleNamespace
         self._allow_for_target(name)
-        goff = float(self.get_parameter("grasp_offset").value)
+        goff = self.grasp_offset      # URDF 에서 유도(또는 파라미터 상수)
         d0 = float(self.get_parameter("standoff").value)
         bxy = self._base_xy()
         hv = (p_fruit[:2] - bxy) if bxy is not None else np.array([1.0, 0.0])
@@ -1313,7 +1399,7 @@ class PregraspDemo(Node):
         bxy = self._base_xy()
         l0 = np.array([bxy[0], bxy[1], 0.35]) if bxy is not None else np.array([0., 0., 0.35])
         tg.sort(key=lambda t: float(np.linalg.norm(t[1] - l0)))
-        goff = float(self.get_parameter("grasp_offset").value)
+        goff = self.grasp_offset      # URDF 에서 유도(또는 파라미터 상수)
         # 기준 자세 = '열매를 잡는 자세'(충돌 무시 IK). 전/후 측정에 동일하게 쓴다.
         #  도달권 경계 열매는 IK 가 확률적으로 실패하므로, 가까운 열매·여러 접근각을 훑어
         #  **확실히 잡히는 목표**를 고른다(측정 대상 고정이 목적).
@@ -2108,6 +2194,23 @@ class PregraspDemo(Node):
     def run_harvest_all(self):
         """도달 가능한 열매를 가까운 순으로 **하나씩 연속 수확**(harvest_max 개까지). 각 열매마다
         선택 전략으로 계획→실행. 단일 열매 반복(run) 대신 실제 수확 런에 가깝다."""
+        # ★ 센싱 장면에서는 **옥토맵이 안정된 뒤** 기준선을 잡는다. 안 그러면 지도가 비어 있는
+        #   동안 전부 '수확 가능'으로 잡히고, 그 뒤 지도가 자라면서 후보가 사라진다 —
+        #   그걸 '수확해서 줄었다'로 오독하게 된다(실측: 첫 라운드 옥토맵 0B·4개 → 수확 후
+        #   364KB·0개. 줄어든 원인은 수확이 아니라 지도 성장이었다).
+        #   ⚠ 옥토맵이 **아직 생기지도 않았을 수 있다**(센서·업데이터가 뜨는 데 수십 초).
+        #     `_has_octomap()` 만 보고 건너뛰면 바로 그 '빈 지도' 상태에서 재게 된다.
+        if str(self.get_parameter("target_source").value).lower().startswith("percep"):
+            t0, wait = time.time(), float(self.get_parameter("octomap_wait").value)
+            while not self._has_octomap() and time.time() - t0 < wait:
+                time.sleep(2.0)
+        if self._has_octomap():
+            b = self._wait_octomap_stable()
+            self.get_logger().info(f"옥토맵 안정화 대기 완료({b}B) → 이제 기준선을 잡는다")
+        else:
+            self.get_logger().warn(
+                "옥토맵이 없다 — 센싱 장면이라면 지도가 아직 안 쌓인 것이다. "
+                "이 상태의 '수확 가능' 수치는 낙관적이니 그대로 믿지 말 것.")
         # reachable_only(기본): 수확 가능한 열매만(가까운 순). 아니면 전체를 가까운 순.
         want_filter = bool(self.get_parameter("reachable_only").value)
         tg = self._harvestable_targets() if want_filter else self._sorted_targets()
@@ -2154,7 +2257,7 @@ class PregraspDemo(Node):
                 self.get_logger().warn(f"  {name} 수확 실패: {e}")
             if ok:
                 harvested += 1
-                self._remove_fruit(name)      # 딴 열매는 장면에서 사라진다
+                self._remove_fruit(name, p_fruit)   # 딴 열매는 장면에서 사라진다
                 counts.append(len(self._harvestable_targets()) if want_filter
                               else len(self._sorted_targets()))
             else:
@@ -2170,7 +2273,7 @@ class PregraspDemo(Node):
         return harvested
 
     # ══════════════════ 수확 완료 → 장면에서 제거 ══════════════════
-    def _remove_fruit(self, name):
+    def _remove_fruit(self, name, p_fruit=None):
         """수확한 열매를 **장면에서 없앤다**(실제 수확과 같은 상태로 만든다).
 
         딴 열매가 그대로 남아 있으면 ① 계획에선 여전히 장애물(publish_targets 사용 시)이고
@@ -2197,7 +2300,7 @@ class PregraspDemo(Node):
             self._call(self.apply_scene, ApplyPlanningScene.Request(scene=ps), 10.0)
         # ③ Gazebo 에서도 삭제 → 카메라가 더는 못 보고, 옥토맵·인지 결과가 따라 갱신된다.
         #    (설계값 장면이나 시뮬 미구동이면 서비스가 없다 → 조용히 건너뛴다.)
-        gz = self._delete_in_gazebo(name)
+        gz = self._delete_in_gazebo(name, p_fruit)
         # 구 영역이 이 열매에 걸려 있었으면 해제(허용이 유령 객체에 남지 않게)
         self._clear_zone()
         self.get_logger().info(
@@ -2220,7 +2323,50 @@ class PregraspDemo(Node):
         self.get_logger().info(f"장면 원복 — 수확 표시 {n}개 해제(다음 회차부터 다시 등장)")
         return True
 
-    def _delete_in_gazebo(self, name):
+    def _gazebo_name(self, name, p_fruit=None):
+        """Gazebo 모델 이름을 찾는다. 인지 타깃은 이름이 `det_N` 이라 **모델 이름과 다르다**
+        (모델은 `fruit_r0_p2_t0_f1` 처럼 yaml 이름) → **위치로 매칭**한다.
+
+        시뮬 월드가 `obstacles.yaml` 에서 생성되므로(gen_gazebo_world) yaml 의 kind:target
+        중 가장 가까운 것을 고르면 된다. 허용 오차 `harvest_match_tol`(기본 6cm — 인지 중심
+        오차 중앙값이 1.6cm 이고 한 화방 열매 간격이 6cm 이라 그 사이).
+        ※ 실물에서는 딴 열매가 물리적으로 사라지므로 이 매칭 자체가 필요 없다(시뮬 전용)."""
+        if p_fruit is None or not str(name).startswith("det_"):
+            return str(name)                      # yaml 타깃이면 이름이 곧 모델 이름
+        tol = float(self.get_parameter("harvest_match_tol").value)
+        try:
+            import yaml
+            path = self.get_parameter("obstacles_file").value or self._op.default_yaml()
+            data = yaml.safe_load(open(path)) or {}
+            self._op.expand_crops(data)
+        except Exception as e:                     # noqa: BLE001
+            self.get_logger().warn(f"Gazebo 이름 매칭용 yaml 로드 실패({e})")
+            return str(name)
+        cand = sorted(
+            (float(np.linalg.norm(np.array([float(v) for v in o["pose"]["xyz"]])
+                                  - np.asarray(p_fruit, float))), o["name"])
+            for o in data.get("obstacles", []) if o.get("kind") == "target")
+        if not cand or cand[0][0] > tol:
+            self.get_logger().warn(
+                f"{name} 에 해당하는 Gazebo 모델을 못 찾음"
+                + (f"(최근접 {cand[0][1]} {cand[0][0]*100:.1f}cm > 허용 {tol*100:.0f}cm)"
+                   if cand else "") + " → 삭제 생략")
+            return None
+        bd, best = cand[0]
+        # ★ 모호하면 지우지 않는다 — 한 화방 열매는 6cm 간격이라 인지 오차가 크면 **엉뚱한
+        #   열매를 지울** 수 있고, 그건 조용한 오류가 된다. 2등과 충분히 벌어져야 채택.
+        if len(cand) > 1 and (cand[1][0] - bd) < 0.02:
+            self.get_logger().warn(
+                f"{name} 의 Gazebo 모델 매칭이 모호하다({best} {bd*100:.1f}cm vs "
+                f"{cand[1][1]} {cand[1][0]*100:.1f}cm) → 삭제 생략(엉뚱한 열매 삭제 방지)")
+            return None
+        self.get_logger().info(
+            f"인지 타깃 {name} → Gazebo 모델 {best} (거리 {bd*100:.1f}cm, "
+            f"2등 {cand[1][0]*100:.1f}cm)" if len(cand) > 1 else
+            f"인지 타깃 {name} → Gazebo 모델 {best} (거리 {bd*100:.1f}cm)")
+        return best
+
+    def _delete_in_gazebo(self, name, p_fruit=None):
         """Gazebo 에서 모델 삭제. 서비스가 없으면(설계값 장면·시뮬 미구동) False."""
         if not bool(self.get_parameter("harvest_delete_gazebo").value):
             return False
@@ -2232,8 +2378,11 @@ class PregraspDemo(Node):
             self._del_entity = self.create_client(DeleteEntity, "delete_entity")
         if not self._del_entity.wait_for_service(timeout_sec=1.0):
             return False
+        gz = self._gazebo_name(name, p_fruit)
+        if gz is None:
+            return False
         req = DeleteEntity.Request()
-        req.name = str(name)
+        req.name = str(gz)
         res = self._call(self._del_entity, req, 5.0)
         if res is None or not res.success:
             self.get_logger().warn(
@@ -2257,13 +2406,14 @@ class PregraspDemo(Node):
           비용을 아끼려고 **2단계**로 본다: 허용 없이 통과하면 그대로 통과(빠름), 실패한
           것만 구 영역을 걸고 한 번 더 본다(열매마다 장면 조작을 하면 목록 도출이 느려진다)."""
         bxy = self._base_xy()
-        goff = float(self.get_parameter("grasp_offset").value)
+        goff = self.grasp_offset      # URDF 에서 유도(또는 파라미터 상수)
         d0 = float(self.get_parameter("standoff").value)
         reach = float(self.get_parameter("arm_reach").value)
         if bxy is not None:
             l0 = np.array([bxy[0], bxy[1], 0.35])       # link0 world(≈팔 base)
             d = float(np.linalg.norm(p_fruit - l0))
             if d > reach + goff + 0.05 or d < 0.15:      # 명백히 밖/안 → 제외
+                self._hv_why["기하"] = self._hv_why.get("기하", 0) + 1
                 return False
             hv = p_fruit[:2] - bxy
         else:
@@ -2277,8 +2427,12 @@ class PregraspDemo(Node):
         def _ik_ok():
             self._set({j: 0.0 for j in self.ARM})       # IK 시드 = home
             if self.solve_ik(p_pre, quat, avoid=True) is None:
+                self._hv_why["pre IK"] = self._hv_why.get("pre IK", 0) + 1
                 return False
-            return self.solve_ik(p_grasp, quat, avoid=True) is not None
+            if self.solve_ik(p_grasp, quat, avoid=True) is None:
+                self._hv_why["grasp IK"] = self._hv_why.get("grasp IK", 0) + 1
+                return False
+            return True
 
         if _ik_ok():
             return True
@@ -2286,7 +2440,7 @@ class PregraspDemo(Node):
         if name is None or getattr(self, "_acm_mode", "region") == "none":
             return False
         self._remember_target(name, p_fruit, r)
-        if not self._allow_for_target(name):
+        if not self._allow_for_target(name, settle=False):   # 선별 — 옥토맵 대기 생략
             return False
         return _ik_ok()
 
@@ -2302,8 +2456,16 @@ class PregraspDemo(Node):
     def _harvestable_targets(self):
         """워크스페이스 내 수확 가능한 열매만 도출(가까운 순). 기하 프리필터 후 IK 로 확정."""
         tg = self._sorted_targets()
+        self._hv_why = {}                    # 탈락 사유 집계(이 라운드)
         out = [(n, p, r) for (n, p, r) in tg if self._is_harvestable(p, r, n)]
-        self.get_logger().info(f"수확 가능 열매 {len(out)} / 전체 {len(tg)} (워크스페이스 필터)")
+        why = " · ".join(f"{k} {v}" for k, v in sorted(self._hv_why.items(),
+                                                       key=lambda x: -x[1]))
+        # 옥토맵 크기를 같이 남긴다 — 수확 후 후보가 줄면 '지도가 불어난 탓'인지 바로 갈린다.
+        ob = self._octomap_bytes()
+        self.get_logger().info(
+            f"수확 가능 열매 {len(out)} / 전체 {len(tg)} (워크스페이스 필터)"
+            + (f" · 탈락: {why}" if why else "")
+            + (f" · 옥토맵 {ob}B" if ob > 0 else ""))
         return out
 
     # ══════════════════ 인터랙티브(조작기) 모드 ══════════════════
@@ -2369,7 +2531,7 @@ class PregraspDemo(Node):
         c2 = self._precompute(name, p, r, sol)
         ok = self._play_cycle(name, p, r, c2)
         if ok:
-            self._remove_fruit(name)      # 딴 열매는 장면에서 사라진다(다음 목록에서 제외)
+            self._remove_fruit(name, p)   # 딴 열매는 장면에서 사라진다(다음 목록에서 제외)
         self.get_logger().info(f"[{name}] 수확 {'완료' if ok else '실패'}. 다음 명령 대기…")
 
     def run_interactive(self):

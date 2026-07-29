@@ -118,6 +118,9 @@ def _setup(context, *args, **kwargs):
     demo_params = {
         "standoff": float(lc("standoff").perform(context)),
         "grasp_offset": float(lc("grasp_offset").perform(context)),
+        # 파지 거리를 그리퍼 손가락 깊이에서 유도(상수는 폴백) — 그리퍼 스왑 시 자동 대응
+        "grasp_offset_auto": lc("grasp_offset_auto").perform(context).lower() in ("1", "true", "yes"),
+        "grasp_depth": float(lc("grasp_depth").perform(context)),
         "target_index": int(lc("target_index").perform(context)),
         "auto_reachable": lc("auto_reachable").perform(context).lower() in ("1", "true", "yes"),
         "loop": lc("loop").perform(context).lower() in ("1", "true", "yes"),
@@ -213,7 +216,17 @@ def generate_launch_description():
         DeclareLaunchArgument("standoff", default_value="0.12",
                               description="pre-grasp 가 grasp 에서 뒤로 떨어진 거리(=직선 접근 이동거리)"),
         DeclareLaunchArgument("grasp_offset", default_value="0.13",
-                              description="파지 시 TCP 가 열매 중심 앞에 멈추는 거리(손끝이 열매 표면에 닿게)"),
+                              description="파지 시 TCP 가 열매 중심 앞에 멈추는 거리. "
+                                          "grasp_offset_auto:=true(기본)면 URDF 의 손가락 "
+                                          "깊이에서 유도한 값이 이 상수를 대신한다."),
+        DeclareLaunchArgument("grasp_offset_auto", default_value="true",
+                              description="파지 거리를 그리퍼 손가락 실제 깊이에서 유도(모델 불문). "
+                                          "끄면 grasp_offset 상수를 그대로 쓴다."),
+        DeclareLaunchArgument("grasp_depth", default_value="0.33",
+                              description="열매 중심을 손가락 패드의 어디에 둘지(0=입구·1=손끝). "
+                                          "RG2 실측 패드 9.1~21.3cm → 0.33 이면 13.1cm. "
+                                          "깊게(0.5) 물수록 손끝이 열매 뒤로 더 들어가야 해서 "
+                                          "센싱 장면에서는 파지 자세가 안 나올 수 있다."),
         DeclareLaunchArgument("loop", default_value="true"),
         DeclareLaunchArgument("scan_all", default_value="false",
                               description="true=데모 대신 전체 열매 도달 리포트 후 종료(RViz 자동 off)"),
