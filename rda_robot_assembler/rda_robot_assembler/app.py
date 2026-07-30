@@ -461,9 +461,33 @@ class Assembler(QtWidgets.QMainWindow):
         self.btn_open_models.setToolTip(self.act_open_models.toolTip())
         self.btn_open_models.clicked.connect(self._open_models_dir)
         lv.addWidget(self.btn_open_models)
+        self.btn_panel = QtWidgets.QPushButton("🍅 수확 패널 열기")
+        self.btn_panel.setToolTip(
+            "실행 제어·모니터링 패널을 별도 창으로 띄운다.\n"
+            "수확 노드(pregrasp_demo interactive:=true)가 떠 있어야 목록이 보인다.")
+        self.btn_panel.clicked.connect(self._open_harvest_panel)
+        lv.addWidget(self.btn_panel)
         lv.addWidget(self._build_base_placement())
         lv.addStretch(1)
         return left
+
+    def _open_harvest_panel(self):
+        """수확 실행 패널을 **별도 프로세스**로 띄운다.
+
+        🔴 이 앱 안에서 직접 띄우지 않는 이유 — 어셈블러는 rclpy 를 쓰지 않는
+        **오프라인 모델링 도구**다(ROS 그래프 없이도 떠야 한다. 모델을 조립하는 데
+        로봇이 필요하지 않다). 패널을 여기에 심으면 어셈블러가 ROS 에 묶이고
+        '모델링'과 '실기 조작'이 한 프로세스에 섞인다.
+        ⇒ 여는 것만 해 준다(사용자 입장에선 통합, 코드 상으론 분리)."""
+        try:
+            subprocess.Popen(["ros2", "run", "rda_robot_bringup", "harvest_panel.py"])
+            self._set_status("수확 패널을 띄웠습니다(별도 창).")
+        except FileNotFoundError:
+            self._set_status(
+                "ros2 명령을 찾지 못했습니다 — 터미널에서 환경을 source 한 뒤 "
+                "이 앱을 실행하세요.", error=True)
+        except Exception as e:                       # noqa: BLE001
+            self._set_status(f"수확 패널 실행 실패: {e}", error=True)
 
     def _build_base_placement(self):
         """배경(환경) 기준 로봇 베이스 위치/방향 컨트롤."""

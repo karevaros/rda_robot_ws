@@ -41,6 +41,7 @@ install(PROGRAMS
   scripts/harvest_operator.py
   scripts/gripper_adapter.py
   scripts/safety_monitor.py
+  scripts/harvest_panel.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
