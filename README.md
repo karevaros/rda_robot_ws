@@ -2,6 +2,7 @@
 
 ROS2 Humble 기반. **모바일 베이스 + 로봇팔 + 엔드이펙터 + 뎁스 카메라**를 하나의 로봇으로
 조립하고, 온실 환경을 세우고, 카메라로 토마토를 찾아 집으러 가는 것까지 다룬다.
+시뮬에서 **실제로 구동**하고(3-7), 같은 스택을 **실기 로봇 배선**으로 띄우는 것(3-8)까지 포함한다.
 (한국기계연구원 교육파견 프로젝트)
 
 이 문서는 **위에서부터 순서대로 복사·붙여넣기** 하면 그대로 돌아가도록 썼다.
@@ -19,6 +20,8 @@ ROS2 Humble 기반. **모바일 베이스 + 로봇팔 + 엔드이펙터 + 뎁스
 | 3-4 | 집기 데모 | 도달 가능한 토마토를 골라 `접근 → 파지 → 후퇴` 를 애니메이션으로 재생 |
 | 3-5 | Gazebo + 센싱 | 시뮬 카메라가 본 포인트클라우드가 **그대로 충돌 장애물(옥토맵)** 이 되고, 빨간 열매를 3D 로 인지 |
 | 3-6 | 인지 → 집기 | yaml 좌표가 아니라 **카메라가 찾은 열매**를 목표로 집기 |
+| 3-7 | 실제 구동 + 연속 수확 | 계획을 **컨트롤러로 실행**해 Gazebo 팔이 실제로 움직이고, 딴 열매는 장면에서 사라진다 |
+| 3-8 | 실기 연동(레인보우 제어박스) | 같은 스택을 **실제 로봇 배선**으로 — 하드웨어 없이도 `use_fake_hardware` 로 검증 가능 |
 
 ---
 
@@ -100,14 +103,31 @@ bash src/docs/scripts/setup_vendor_models.sh     # clone + 벤더 description �
 받은 것은 `src/vendor/` 에 그대로 두고(원본 수정 없음), 우리 저장소에는 포함하지 않는다
 (`.gitignore`). 즉 **벤더 코드는 각자의 저장소에서 각자의 라이선스로 받아 쓰는 구조**다.
 
-### 2-4. 조립기용 파이썬 패키지
+### 2-4. 레인보우 SDK — 실기 연동을 할 때만 (3-8)
+
+실제 로봇(레인보우 제어박스)에 붙일 때만 필요하다. 시뮬만 쓸 거면 건너뛰어도 된다.
+
+```bash
+bash ~/robot_ws/src/docs/scripts/setup_rbpodo_sdk.sh
+# /usr/local 에 설치하려면(sudo 필요):
+# SYSTEM_INSTALL=1 bash ~/robot_ws/src/docs/scripts/setup_rbpodo_sdk.sh
+```
+
+레인보우 C++ SDK(`rbpodo`, Apache-2.0)를 받아 빌드하고, 그것을 필요로 하는
+`rbpodo_hardware`(실기 하드웨어 인터페이스)와 `cb_safety_publisher`(안전 상태 발행)를 빌드한다.
+
+> ⚠ SDK 는 apt 에 없다. **안 깔면 두 노드가 빌드에서 조용히 빠진다** — `colcon` 은 해당
+> 패키지만 실패시키고 나머지는 성공으로 끝내므로, 실기 모드로 띄울 때 `plugin ... not found`
+> 로 뒤늦게 드러난다. 스크립트가 그 경로를 고정해 준다.
+
+### 2-5. 조립기용 파이썬 패키지
 
 ```bash
 python3 -m pip install --user pyvista pyvistaqt trimesh yourdfpy pycollada python-fcl
 ```
 조립기 GUI 의 3D 뷰와 실시간 자충돌 검사에 쓰인다(rosdep 으로는 안 깔린다).
 
-### 2-5. 빌드
+### 2-6. 빌드
 
 ```bash
 source /opt/ros/humble/setup.bash
@@ -124,7 +144,7 @@ colcon build --symlink-install --packages-select \
 > ⚠ 벤더 패키지에 `--symlink-install` 을 **섞지 말 것.** 캐시가 깨져 이후 평범한 빌드까지
 > 실패한다. 복구는 `rm -rf build/<패키지>` 후 재빌드.
 
-### 2-6. 환경 소싱 — **새 터미널을 열 때마다**
+### 2-7. 환경 소싱 — **새 터미널을 열 때마다**
 
 ```bash
 source /opt/ros/humble/setup.bash
@@ -137,7 +157,7 @@ echo 'source /opt/ros/humble/setup.bash' >> ~/.bashrc
 echo 'source ~/robot_ws/install/setup.bash' >> ~/.bashrc
 ```
 
-### 2-7. 설치 확인
+### 2-8. 설치 확인
 
 ```bash
 source /opt/ros/humble/setup.bash && source ~/robot_ws/install/setup.bash
@@ -229,13 +249,13 @@ ros2 launch rda_robot_moveit_config moveit_demo.launch.py
 ```
 
 ![3-3 MoveIt 경로계획](docs/images/3-3_moveit.png)
-*왼쪽 MotionPlanning 패널에서 `Plan`. `Execute` 가 회색인 것은 의도된 것이다(컨트롤러 미연결).*
+*왼쪽 MotionPlanning 패널에서 `Plan`. 이 launch 는 계획 전용이라 `Execute` 가 회색이다.*
 
 RViz 의 **MotionPlanning** 패널에서 목표 자세를 마우스로 끌고 `Plan` 을 누르면 온실 구조와
 작물을 피하는 궤적이 나온다.
 
-> ⚠ **`Execute` 는 아직 동작하지 않는다** — 실제 컨트롤러가 없어 `allow_trajectory_execution=false`
-> 로 명시해 두었다(6주차 통합제어에서 연결). 계획까지가 현재 범위다.
+> ⚠ 이 launch 는 **계획 전용**이다(`allow_trajectory_execution=false`) — `Execute` 는 회색이다.
+> 실제로 실행하려면 컨트롤러가 붙은 **3-7**(Gazebo) 또는 **3-8**(실기) 로 띄운다.
 
 ### 3-4. 집기 데모 — 토마토를 골라 접근·파지·후퇴
 
@@ -275,7 +295,8 @@ ros2 launch rda_robot_moveit_config pregrasp_demo.launch.py diag_straight:=true
 ros2 launch rda_robot_moveit_config pregrasp_demo.launch.py rviz:=false
 ```
 
-> ⚠ 계획한 궤적을 `/joint_states` 로 흘려 **재생**하는 것이지 실제 구동이 아니다(6주차).
+> ⚠ 이 모드는 계획한 궤적을 `/joint_states` 로 흘려 **재생**만 한다. 컨트롤러로 실제 실행하려면
+> **3-7** 을 본다(`execute:=true`).
 > ⚠ 이 팔(reach 0.93m)로는 고설 재배 토마토 74개 중 **최전열 최하단 3~5개**만 닿는다(실측).
 > 더 닿게 하려면 조립기에서 로봇을 작물 쪽으로 옮겨 저장하면 된다.
 
@@ -398,8 +419,85 @@ ros2 launch rda_robot_moveit_config pregrasp_demo.launch.py target_source:=perce
 > `det_13` 의 좌표 (0.83, 0.13, 0.98) 은 설계값 `fruit_r0_p3_t0_f0` (0.83, 0.133, 0.983) 과
 > **0.7cm** 차이다 — 카메라만으로 찾은 위치로 집으러 갔다는 뜻이다.
 
-> ⚠ 위 3-5 의 주의와 같은 이유로, 실제 로봇 관절이 도는 6주차 전까지 이 조합은 **각각
-> 따로 확인**하는 용도다(시뮬 렌더는 고정, 데모는 TF 만 움직임).
+> ⚠ 이 모드는 재생만 하므로 시뮬 카메라 시점이 고정이다. 팔이 실제로 돌며 손끝 카메라가
+> 장면을 갱신하는 것은 **3-7**(`execute:=true`) 부터다.
+
+### 3-7. 실제로 구동하기 — 계획을 컨트롤러로 실행하고 연속 수확
+
+여기서부터는 **재생이 아니라 실제 구동**이다. Gazebo 로봇에 `ros2_control` 을 붙여
+MoveIt `execute` 로 궤적을 흘리고, 수확한 열매는 장면에서 지운다.
+
+```bash
+source /opt/ros/humble/setup.bash && source ~/robot_ws/install/setup.bash
+ros2 launch rda_robot_moveit_config perception_demo.launch.py \
+  execute:=true run_demo:=true harvest_all:=true harvest_max:=5 harvest_remove:=true \
+  gui:=true rviz:=true sensors:=d435i world:=greenhouse detect:=true
+```
+
+`home → pre-grasp → 직선 접근 → 파지 → 후퇴` 를 컨트롤러로 실행한다. 한 개를 따면
+**목록을 다시 뽑아** 다음 열매로 넘어간다(딴 열매는 재인지 대상에서 사라진다).
+
+```bash
+# 접근 전략 비교 — harvest_linear(기본) vs direct
+… strategy:=direct
+
+# 손으로 조작 (터미널 조작기)
+ros2 run rda_robot_bringup harvest_operator.py
+
+# 판정이 흔들리는지 진단 / 수확 전후 추적
+… reach_repeat:=5
+… probe_after_harvest:=5 screen_why_detail:=true
+```
+
+> ⚠ **`sensors:=d435i` 로만** 쓴다 — 센서를 2개 켜면 MoveIt 의 shape_mask 가 깨진다.
+> ⚠ 이 모드는 로봇 링크의 **중력·충돌을 끈다**(kinematic 이동만 쓰므로). 물리 파지는 범위 밖.
+
+### 3-8. 실기 연동 — 레인보우 제어박스에 붙이기
+
+같은 스택을 실제 로봇 배선으로 띄운다. **하드웨어가 없어도 배선 검증은 된다.**
+
+```bash
+source /opt/ros/humble/setup.bash && source ~/robot_ws/install/setup.bash
+
+# ⓐ 하드웨어 없이 배선만 검증 (제어박스 불필요)
+ros2 launch rda_robot_description real_robot.launch.py use_fake_hardware:=true \
+  gripper_dry_run:=true
+
+# ⓑ 제어박스에 접속 — 팔은 움직이지 않음(제어박스 Simulation 모드)
+ros2 launch rda_robot_description real_robot.launch.py robot_ip:=10.0.2.7 cb_simulation:=true
+
+# ⓒ 실제 구동 🔴
+ros2 launch rda_robot_description real_robot.launch.py robot_ip:=10.0.2.7 cb_simulation:=false \
+  safety:=true
+```
+
+ⓐ 로 확인되는 것: 컨트롤러 2종 활성 · `/joint_states` 8관절(팔6+손가락2) · 손가락 TF ·
+`FollowJointTrajectory` 액션 왕복. **MoveIt `execute` 가 쓰는 경로 전체**다.
+
+```bash
+# 궤적을 직접 하나 보내 보기
+ros2 action send_goal /arm_controller/follow_joint_trajectory \
+  control_msgs/action/FollowJointTrajectory \
+  "{trajectory: {joint_names: [base, shoulder, elbow, wrist1, wrist2, wrist3],
+                 points: [{positions: [0.0, -0.5, 0.0, 0.0, 0.0, 0.0],
+                           time_from_start: {sec: 3}}]}}"
+```
+
+**선행 조건**: 레인보우 SDK 를 깔아야 `rbpodo_hardware` 가 빌드된다 → **2-4** 참조.
+
+> 🔴 **`cb_simulation:=true` 는 오프라인 모드가 아니다.** 제어박스에 **실제로 접속**하고
+> 제어박스의 동작 모드만 Simulation 이다. 하드웨어 없는 검증은 `use_fake_hardware:=true` 다.
+> 제어박스가 없는데 실기 모드로 띄우면 하드웨어 인터페이스가 조용히 무한 대기하므로,
+> launch 가 **먼저 TCP 5000/5001 을 확인해 3초 만에 원인을 알리고 멈춘다**(`preflight:=false` 로 끌 수 있다).
+
+> 🔴 **그리퍼 명령은 아직 미확정이다.** 실기 RG2 는 제어박스 스크립트(`gripper_macro`)로
+> 움직이는데, 레인보우 UI Script 문서에 OnRobot 항목이 없다(SDK enum 에는 `OnRobot_RG2=12` 가
+> 있다). 그래서 명령 문자열을 **파라미터로 빼 두었다** — 티치펜던트에서 쓰는 실제 문자열을
+> `cmd_move` 에 넣으면 코드 변경 없이 동작한다.
+
+> ⚠ **실행 감시(`safety:=true`)는 기본 꺼짐이다.** 제어박스 충돌·E-stop 을 읽는 노드가
+> 데이터 채널에 **두 번째 연결**을 여는데, 다중 접속 허용 여부를 확인하지 못했다. 실기 첫
+> 연결에서 ①단독 ②동시 순으로 확인한 뒤 켜는 것을 권한다. 꺼진 채 뜨면 launch 가 경고한다.
 
 ---
 
@@ -407,11 +505,11 @@ ros2 launch rda_robot_moveit_config pregrasp_demo.launch.py target_source:=perce
 
 | 패키지 | 내용 |
 |--------|------|
-| `rda_robot_description` | 모델 라이브러리(`config/models/`), mesh, 결합설정(`config/mounts.yaml`), 온실·작물 정의(`config/obstacles.yaml`), 표시·Gazebo launch |
+| `rda_robot_description` | 모델 라이브러리(`config/models/`), mesh, 결합설정(`config/mounts.yaml`), 온실·작물 정의(`config/obstacles.yaml`), 컨트롤러 설정(`config/controllers*.yaml`), 관절 토크(`config/joint_effort.yaml`), 표시·Gazebo·**실기** launch |
 | `rda_robot_assembler` | 조립 GUI + **통합 URDF 컴포저**(`compose_urdf`) + `mesh2urdf` |
-| `rda_robot_bringup` | 자충돌 모니터, 장애물 발행, 집기 데모, Gazebo 월드 생성, **열매 인지**(`fruit_detector.py`) |
+| `rda_robot_bringup` | 자충돌 모니터, 장애물 발행, 집기 데모, Gazebo 월드 생성, **열매 인지**(`fruit_detector.py`), 수확 조작기, **그리퍼 어댑터·안전 감시**(실기) |
 | `rda_robot_moveit_config` | MoveIt2 설정(SRDF/ACM/OMPL/3D센서) + `moveit_demo`·`pregrasp_demo`·`perception_demo` launch |
-| `rda_robot_msgs` | (예정) 메시지 정의 |
+| `rda_robot_msgs` | 메시지 정의 — `SafetyState`(제어박스 안전 상태) |
 
 데이터 흐름:
 
@@ -422,11 +520,16 @@ config/models/<슬롯>/*.yaml ──────────────┤  →
                                           ▼
                             compose_urdf (Python 컴포저)
                                           │
-          ┌───────────────┬───────────────┴───────┬───────────────────┐
-          ▼               ▼                       ▼                   ▼
-  rda_robot_display  moveit_demo          pregrasp_demo        perception_demo
-    (3-1 표시)      (3-3 경로계획)         (3-4 집기)          (3-5 센싱·인지)
+     ┌────────────┬────────────┬─────┴──────┬─────────────┬────────────┐
+     ▼            ▼            ▼            ▼             ▼            ▼
+rda_robot_    moveit_      pregrasp_    perception_   perception_   real_robot
+ display       demo          demo          demo      demo+execute
+(3-1 표시)  (3-3 계획)    (3-4 집기)   (3-5 센싱)    (3-7 구동)    (3-8 실기)
 ```
+
+시뮬과 실기는 **같은 통합 URDF** 를 쓴다. 차이는 URDF 안의 `ros2_control` 블록 하나뿐이다 —
+`gazebo_sim` 은 벤더 블록을 **GazeboSystem 으로 교체**하고, `real_robot` 은 그 블록을
+**그대로 보존**한다(즉 실기 경로는 처음부터 통합 URDF 안에 있었다).
 
 온실 구조와 작물은 `rda_robot_description/config/obstacles.yaml` **하나가 단일 진실원**이다.
 RViz/MoveIt 의 planning scene(`obstacle_publisher.py`)과 Gazebo 월드(`gen_gazebo_world.py`)가
@@ -503,6 +606,16 @@ python3 src/docs/scripts/gen_srdf.py /tmp/rda_robot.urdf \
 > 벤더가 준 SRDF(`rbpodo.srdf`)는 쓰지 말 것 — `Never`(절대 충돌 안 함)로 적힌 6쌍 중 4쌍이
 > 실제로는 충돌한다(`docs/기구학-분석.md` 6장). 우리 SRDF 는 URDF 에서 직접 생성한다.
 
+**관절 토크 표도 같이 다시 만든다.** `config/joint_effort.yaml` 은 특정 팔에서 유도한 값이라,
+팔이 바뀌면 컴포저가 **적용하지 않고 그 사실을 알린다**(`model:` 필드로 판별).
+
+```bash
+python3 src/docs/scripts/joint_effort_derive.py /tmp/rda_robot.urdf \
+        --payload <그 팔의 정격 kg> --prefix <슬롯 접두사> \
+        --yaml src/rda_robot_description/config/joint_effort.yaml
+# 생성된 yaml 에 model: <그 팔의 모델 id> 를 적어 준다
+```
+
 ### 6-3. 회귀 테스트
 
 ```bash
@@ -535,11 +648,15 @@ cd ~/robot_ws/src && git add -A && git commit -m "메시지" && git push origin 
 | 증상 | 원인·해결 |
 |------|-----------|
 | 조립기 드롭다운에 모델은 보이는데 **로드 실패** | `src/vendor/` 가 없다 → **2-3** 실행 |
-| `colcon build` 가 21개 패키지에서 연쇄 실패 | 인자 없이 전체를 빌드했다 → `--packages-select` 로 우리 패키지만(**2-5**) |
+| `colcon build` 가 21개 패키지에서 연쇄 실패 | 인자 없이 전체를 빌드했다 → `--packages-select` 로 우리 패키지만(**2-6**) |
 | 벤더를 빌드한 뒤 평범한 빌드까지 실패 | 벤더에 `--symlink-install` 을 섞었다 → `rm -rf build/<패키지>` 후 재빌드 |
 | 소스를 고쳤는데 launch 에 반영이 안 됨 | `--symlink-install` 없이 빌드했다 → **6-4** |
 | MoveIt 이 `group 'arm' does not exist` | 팔/그리퍼를 바꾸고 SRDF 를 안 만들었다 → **6-2** |
-| RViz 에서 `Execute` 가 안 됨 | 의도된 동작. 컨트롤러 미연결(6주차 예정) |
+| `moveit_demo` 에서 `Execute` 가 회색 | 그 launch 는 계획 전용이다 → 실행은 **3-7**(Gazebo) 또는 **3-8**(실기) |
+| 실기 모드가 `Connecting to robot at ...` 에서 멈춘 채 아무 말이 없음 | 제어박스에 접속이 안 되는 것이다(에러도 타임아웃도 안 난다) → launch 의 사전 점검이 3초 만에 알려 준다. 하드웨어 없이 볼 거면 `use_fake_hardware:=true` |
+| 실기 모드에서 컨트롤러가 활성화되지 않음(`State interface ... not found`) | 시뮬용 `controllers.yaml` 을 쓴 것이다. 벤더 하드웨어는 `velocity` **상태**를 주지 않는다 → `controllers_real.yaml` |
+| `plugin rbpodo_hardware/RBPodoHardwareInterface not found` | 레인보우 SDK 가 없어 그 패키지가 빌드에서 빠졌다 → **2-4** |
+| 새로 만든 파이썬 노드를 `ros2 run` 이 못 찾음 | `--symlink-install` 은 원본 파일 권한을 그대로 쓴다 → 소스에 `chmod +x` |
 | Gazebo 를 다시 켰더니 **엉뚱한 로봇**이 뜸 | 이전 `robot_state_publisher` 가 살아 옛 URDF 를 발행 중 → `ros2 launch` 부모 PID 를 kill |
 | 옥토맵이 계속 **비어 있음** | 노드의 `use_sim_time` 이 빠졌다 → TF 시각 불일치로 클라우드가 통째로 버려진다 |
 | 열매가 **하나도 검출되지 않음**(에러도 없음) | 클라우드 `rgb` 바이트 순서 문제. Gazebo 는 PCL 관례의 역순이라 기본값이 `bgr` 이다. 실기 카메라라면 `-p rgb_order:=rgb` |
@@ -552,6 +669,11 @@ cd ~/robot_ws/src && git add -A && git commit -m "메시지" && git push origin 
   (`arm_base_link`·`sensor1_camera_link` …) — 모델끼리 `base_link` 이름이 겹치기 때문이다.
 - **결합값(mount)은 아직 추정치다.** 도면·실측을 반영하기 전까지 통합 로봇의 형상은 확정이
   아니고, 그 위에서 잰 도달권·경로 수치도 잠정값이다.
+- **관절 토크(effort)는 유도값이다.** 벤더 URDF 는 6축 전부 10 Nm(자기 팔도 못 드는
+  플레이스홀더)인데, 레인보우 공식 제원에 **축별 토크가 없다.** 그래서 URDF 의 질량·관성에서
+  요구 토크를 계산해(`docs/scripts/joint_effort_derive.py`) 안전계수를 곱한 값을 조립 단계에서
+  덮어쓴다(`config/joint_effort.yaml`). **물리 시뮬에서 팔이 처지지 않게 하는 용도**이고,
+  토크 기반 제어나 안전 정격 주장에는 쓸 수 없다 — 그건 제조사 값이 필요하다.
 - **상판 적재 약 22~23kg**(URDF 실측) → Dingo(20kg)·TurtleBot4(9kg)는 참고용이지 실사용 불가.
 - **옥토맵 프레임은 `base_link` 로 강제된다** — `octomap_frame` 을 지정해도 MoveIt 이 로봇
   모델 프레임으로 덮어쓴다. 베이스가 정지 상태라 지금은 무해하지만 주행이 붙으면 재검토 대상.
@@ -568,6 +690,10 @@ cd ~/robot_ws/src && git add -A && git commit -m "메시지" && git push origin 
 **외부에서 받아 오는 로봇 모델** — `src/vendor/` 로 clone 해서 쓰고 저장소에는 넣지 않는다.
 저장소 목록·브랜치·라이선스는 위 [2-3](#2-3-벤더-모델-받기-필수) 표에 있다. 원본은 수정하지
 않으며, 각 저장소의 라이선스(Apache-2.0 / BSD-2·3 / MIT)를 그대로 따른다.
+관절 토크처럼 벤더 값을 바꿔 써야 할 때도 **벤더 파일을 고치지 않고** 조립 단계에서 덮어쓴다.
+
+**외부에서 받아 오는 SDK** — 레인보우 C++ SDK([`RainbowRobotics/rbpodo`](https://github.com/RainbowRobotics/rbpodo),
+Apache-2.0)는 `thirdparty/` 로 clone·빌드하며 저장소에는 넣지 않는다([2-4](#2-4-레인보우-sdk--실기-연동을-할-때만-3-8)).
 
 **저장소에 포함된 외부 산출물(추출·편입)**
 
@@ -600,5 +726,6 @@ mesh 에 별도 제한이 걸려 있다.
 | 4 | 온실 환경 + 기구학 분석 + MoveIt 셋업 | ✅ |
 | 5 | 경로 생성 — pre-grasp 자세 추정, 줄기 회피 접근, 집기 데모 | ✅ |
 | — | Gazebo 시뮬 + 센싱 옥토맵 + 열매 인지 | ✅ |
-| 6 | 통합 제어 — ros2_control 로 **실제 궤적 실행** | 예정 |
-| 7 | 가상환경 컨버팅 | 예정 |
+| 6 | 통합 제어 — ros2_control 실구동·MoveIt `execute`·연속 수확(3-7) | ✅ |
+| — | 실기 연동 준비 — 레인보우 제어박스 배선·그리퍼 어댑터·실행 감시·토크 유도(3-8) | ✅ |
+| 7 | 가상환경 컨버팅 — Gazebo ✅ / Isaac Sim·Unity 예정 | 진행 중 |
