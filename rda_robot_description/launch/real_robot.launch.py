@@ -140,10 +140,11 @@ def _setup(context, *args, **kwargs):
              remappings=[("~/robot_description", "/robot_description"),
                          ("joint_states", "arm/joint_states")]),
 
-        # ③ 팔 상태 + URDF 나머지 관절(그리퍼 손가락 등) 기본값을 합쳐 /joint_states 발행
+        # ③ 팔 상태 + 그리퍼 어댑터 상태 + URDF 나머지 관절 기본값을 합쳐 /joint_states 발행
         Node(package="joint_state_publisher", executable="joint_state_publisher",
-             parameters=[{"source_list": ["arm/joint_states"], "rate": 30,
-                          "use_sim_time": False}], output="log"),
+             parameters=[{"source_list": ["arm/joint_states",
+                                          "gripper_controller/joint_states"],
+                          "rate": 30, "use_sim_time": False}], output="log"),
 
         Node(package="controller_manager", executable="spawner",
              arguments=["joint_state_broadcaster", "-c", "/controller_manager"],
@@ -151,6 +152,16 @@ def _setup(context, *args, **kwargs):
         Node(package="controller_manager", executable="spawner",
              arguments=["arm_controller", "-c", "/controller_manager"],
              output="screen"),
+
+        # ④ 그리퍼 어댑터 — 실기 RG2 는 ros2_control 관절이 아니라 제어박스 명령 소관.
+        #    시뮬의 gripper_controller 와 **같은 이름의 액션 서버**를 흉내내므로
+        #    수확 시퀀스(pregrasp_demo)는 코드 변경 없이 그대로 동작한다.
+        #    ⚠ 명령 문자열은 미검증 추정값이다(gripper_adapter.py 상단 주석 참조).
+        Node(package="rda_robot_bringup", executable="gripper_adapter.py",
+             name="gripper_adapter", namespace="gripper_controller", output="screen",
+             parameters=[{"dry_run": LaunchConfiguration("gripper_dry_run"),
+                          "use_sim_time": False}],
+             condition=IfCondition(LaunchConfiguration("gripper"))),
     ]
 
     rviz_cfg = os.path.join(share, "config", "rda_robot.rviz")
@@ -178,6 +189,11 @@ def generate_launch_description():
         DeclareLaunchArgument("controllers", default_value="",
                               description="컨트롤러 yaml(생략 시 controllers_real.yaml)"),
         DeclareLaunchArgument("rviz", default_value="false"),
+        DeclareLaunchArgument("gripper", default_value="true",
+                              description="그리퍼 어댑터 실행(제어박스 명령으로 RG2 제어)"),
+        DeclareLaunchArgument("gripper_dry_run", default_value="false",
+                              description="true=그리퍼 명령을 보내지 않고 로그만 "
+                                          "(use_fake_hardware 로 배선 볼 때 함께 켠다)"),
         DeclareLaunchArgument("preflight", default_value="true",
                               description="실기 모드에서 제어박스 접속 가능 여부를 먼저 확인 "
                                           "(false 로 끄면 접속 실패 시 조용히 무한 대기)"),
