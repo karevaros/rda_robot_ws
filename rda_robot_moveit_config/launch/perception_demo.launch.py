@@ -194,6 +194,11 @@ def _setup(context, *args, **kwargs):
                 "reach_repeat": int(lc("reach_repeat").perform(context)),
                 "screen_why_detail": (lc("screen_why_detail").perform(context).lower()
                                       in ("1", "true", "yes")),
+                # 실행 중 재계획 트리거(6주차 '피드백 루프'). 팔이 움직이며 옥토맵이 자라면
+                # 계획 당시의 경로가 막힐 수 있다 → 남은 구간을 재검사해 다시 계획한다.
+                "replan": (lc("replan").perform(context).lower() in ("1", "true", "yes")),
+                "replan_period": float(lc("replan_period").perform(context)),
+                "replan_max": int(lc("replan_max").perform(context)),
                 "probe_after_harvest": int(lc("probe_after_harvest").perform(context)),
                 "probe_interval": float(lc("probe_interval").perform(context)),
                 "target_source": "perception",
@@ -281,6 +286,13 @@ def generate_launch_description():
                                           "('뒤가 열리는가 vs 새 복셀이 막는가' 판정)."),
         DeclareLaunchArgument("probe_interval", default_value="20.0",
                               description="probe_after_harvest 추적 간격[s]."),
+        DeclareLaunchArgument("replan", default_value="true",
+                              description="실행 중 남은 경로를 재검사해 막히면 다시 계획 "
+                                          "(false=종전 동작: 보내고 끝까지 기다리기만 함)"),
+        DeclareLaunchArgument("replan_period", default_value="0.5",
+                              description="실행 중 재검사 주기(초)"),
+        DeclareLaunchArgument("replan_max", default_value="2",
+                              description="한 구간당 재계획 시도 횟수"),
         DeclareLaunchArgument("reach_repeat", default_value="0",
                               description="[진단] 수확가능 판정을 K회 반복해 흔들림을 재고 "
                                           "종료. 0=사용 안 함."),

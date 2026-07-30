@@ -32,7 +32,7 @@ from rclpy.qos import (QoSDurabilityPolicy, QoSHistoryPolicy, QoSProfile,
 from builtin_interfaces.msg import Duration as DurationMsg
 from geometry_msgs.msg import Pose, PoseStamped, Point
 from sensor_msgs.msg import JointState
-from std_msgs.msg import String
+from std_msgs.msg import Bool, String
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 from control_msgs.action import FollowJointTrajectory
 from visualization_msgs.msg import Marker, MarkerArray
@@ -180,6 +180,19 @@ class PregraspDemo(Node):
         self.declare_parameter("execute", False)
         self.declare_parameter("arm_controller", "arm_controller")
         self.declare_parameter("gripper_controller", "gripper_controller")
+        # ── 실행 중 감시·재계획 트리거 (6주차 '피드백 루프')
+        #   execute 모드에서 궤적을 흘리고 끝까지 기다리기만 하면, 실행 도중 센서로 장면이
+        #   바뀌어도(팔이 움직이며 eye-in-hand 카메라가 새 복셀을 쌓는다) 알 수가 없다.
+        #   실행 중 **남은 웨이포인트**를 현재 장면으로 재검사해, 막히면 멈추고 다시 계획한다.
+        #   ⚠ 검사는 계획 때와 **같은 ACM**(구 영역 허용이 걸린 상태)에서 해야 한다 —
+        #     아니면 계획이 정당하게 허용한 접촉까지 '막혔다'로 읽혀 매번 트리거된다.
+        self.declare_parameter("replan", True)             # false=종전 동작(감시 없음)
+        self.declare_parameter("replan_period", 0.5)       # 검사 주기 s
+        self.declare_parameter("replan_sample", 3)         # 남은 웨이포인트 N개마다 1개 검사
+        self.declare_parameter("replan_lookahead", 0.05)   # 진행률 여유(현재 지점 바로 뒤는 건너뜀)
+        self.declare_parameter("replan_max", 2)            # 한 구간당 재계획 시도 횟수
+        # 안전 감시(safety_monitor)가 결함을 래치하면 실행을 즉시 포기한다.
+        self.declare_parameter("abort_topic", "/safety_monitor/abort")
         # harvest_all = 도달 가능한 열매를 하나씩 **연속 수확**(단일 열매 반복 대신). harvest_max 개까지.
         self.declare_parameter("harvest_all", False)
         self.declare_parameter("harvest_max", 5)
@@ -297,6 +310,15 @@ class PregraspDemo(Node):
         self._sv = self.create_client(GetStateValidity, "check_state_validity")
         if not self._sv.wait_for_service(timeout_sec=3.0):
             self._sv = None
+
+        # 안전 감시(safety_monitor)의 결함 래치를 따라간다. 실기에서만 발행되지만
+        # 구독은 항상 걸어 둔다 — 없으면 조용히 안 걸리고, 있으면 즉시 반영된다.
+        # (TRANSIENT_LOCAL 래치라 늦게 붙어도 이미 난 결함을 받는다.)
+        self._aborted = False
+        _qos = QoSProfile(depth=1, durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+                          reliability=QoSReliabilityPolicy.RELIABLE)
+        self.create_subscription(Bool, str(gp("abort_topic").value),
+                                 self._on_abort, _qos)
         # Stage 5: 공간 기반 ACM 상태
         self._clear_octomap = self.create_client(Empty, "clear_octomap")
         self._acm_mode = str(gp("acm_mode").value).strip().lower()
@@ -489,6 +511,11 @@ class PregraspDemo(Node):
             if k in self.cur:
                 self.cur[k] = float(v)
 
+    def _on_abort(self, msg):
+        if bool(msg.data) and not self._aborted:
+            self.get_logger().error("안전 감시 결함 래치 수신 — 이후 실행을 중단한다")
+        self._aborted = bool(msg.data)
+
     def _hold(self, sec):
         """sec 초 동안 현재 자세를 계속 발행(정지 구간)."""
         dt = 1.0 / self.rate
@@ -503,10 +530,9 @@ class PregraspDemo(Node):
         """waypts = [pos_array,...] (각 array 는 names 순서). duration 초에 걸쳐 선형보간 재생.
         execute 모드면 재생 대신 컨트롤러(FollowJointTrajectory)로 실제 실행."""
         if not waypts:
-            return
+            return self.DONE
         if self.execute:
-            self._execute_traj(names, waypts, duration)
-            return
+            return self._execute_traj(names, waypts, duration)
         dt = 1.0 / self.rate
         nsteps = max(1, int(duration * self.rate))
         segs = len(waypts) - 1
@@ -524,10 +550,113 @@ class PregraspDemo(Node):
             self._publish_js()
             rclpy.spin_once(self, timeout_sec=0.0)
             time.sleep(dt)
+        return self.DONE      # 재생 모드는 장면과 무관하므로 항상 완주
+
+    #: _execute_traj / _play_waypoints 반환값
+    DONE, REPLAN, FAILED = "done", "replan", "failed"
+    #: 감시 1회에 검사할 웨이포인트 최대 개수(위 step 계산 참조)
+    REPLAN_MAX_CHECKS = 6
+
+    def _sync_actual_joints(self, timeout=2.0):
+        """🔴 execute 모드에서 궤적을 중간에 끊은 뒤 **실제 관절값을 한 번 읽어** `self.cur` 에 넣는다.
+
+        왜 필요한가 — 이 노드는 execute 모드에서 `/joint_states` 를 **구독하지 않는다**.
+        계획을 미리(upfront) 해 두고 캐시한 궤적을 실행하며, `self.cur` 는 '로봇이 계획을
+        그대로 따랐다' 는 가정 위의 **가상 상태**다(상단 __init__ 주석 참조 — 상시 구독은
+        `_precompute` 의 가상 시작상태를 덮어써 방해한다).
+        그런데 재계획은 **끊긴 실제 자세에서** 시작해야 한다. 가상 상태로 계획하면 로봇이
+        있지도 않은 자세에서 출발하는 궤적이 나오고, 실행 순간 관절이 튄다.
+        ⇒ 상시 구독은 하지 않고, **끊은 그 순간에만** 한 번 읽는다(그 시점엔 캐시 궤적을
+        이미 버리는 것이므로 가상 상태를 덮어써도 잃을 게 없다).
+        """
+        if not self.execute:
+            return True          # 재생 모드는 가상 상태가 곧 진실
+        try:
+            from rclpy.wait_for_message import wait_for_message
+        except ImportError:      # 아주 오래된 rclpy
+            self.get_logger().error("wait_for_message 를 쓸 수 없다 → 실제 자세 동기화 불가")
+            return False
+        ok, msg = wait_for_message(JointState, self, "joint_states",
+                                   time_to_wait=float(timeout))
+        if not ok or msg is None:
+            self.get_logger().error(
+                f"실제 관절값을 읽지 못했다(/joint_states {timeout}s) → 재계획을 포기한다"
+                "(틀린 시작상태로 계획하면 관절이 튄다)")
+            return False
+        moved = 0.0
+        for n, p in zip(msg.name, msg.position):
+            if n in self.cur:
+                moved = max(moved, abs(float(p) - float(self.cur[n])))
+                self.cur[n] = float(p)
+        self.get_logger().info(
+            f"실제 자세 동기화 — 가정했던 자세와 최대 {moved:.3f}rad 차이")
+        return True
+
+    def _retreat_safely(self, goals, name):
+        """구간 중간에서 중단됐을 때 팔을 빼낸다. goals = [(관절dict, 라벨), …] 순서대로 시도.
+
+        어디쯤에서 멈췄는지 모르므로 역재생을 쓸 수 없다 → 현재 자세에서 다시 계획한다.
+        🔴 전부 실패하면 **움직이지 않는다.** 갈 길을 모르는 채로 관절을 돌리는 것이
+        작물 사이에서 가장 위험하다 — 사람이 보고 판단하도록 그 자리에 세워 두고 알린다.
+        ⚠ 다음 사이클이 '지금 home 에 있다' 고 가정하므로, 이탈 성공/실패를 반환해
+        호출자가 그 가정을 쓸 수 있는지 알 수 있게 한다."""
+        if not self._sync_actual_joints():
+            self.get_logger().error(
+                f"[{name}] 🔴 실제 자세를 모르는 채로는 이탈 계획을 세우지 않는다 — 정지 유지")
+            return False
+        for goal, label in goals:
+            plan = self.plan_to(goal)
+            if plan is None:
+                continue
+            self.get_logger().info(f"[{name}] 중단 지점에서 {label} 로 이탈")
+            if self._play_waypoints(*plan, float(self.get_parameter("dur_home").value)) \
+                    == self.DONE:
+                self._set(dict(goal))
+                return True
+        self.get_logger().error(
+            f"[{name}] 🔴 이탈 경로를 찾지 못했다 — 팔을 그 자리에 세워 둔다. "
+            "장면(옥토맵)과 팔 자세를 사람이 확인해야 한다.")
+        return False
+
+    def _play_replan(self, names, waypts, duration, replan_fn, what):
+        """구간을 실행하고, 실행 중 막히면 `replan_fn()` 으로 다시 계획해 재시도한다.
+
+        replan_fn() → (names, waypts) 또는 None(계획 실패).
+        반환: DONE · REPLAN(재시도를 다 썼는데도 막힘) · FAILED
+
+        🔴 왜 구간마다 다르게 다루나
+          자유공간 구간(home↔pre-grasp)은 다시 계획하면 된다. 반면 **직선 접근 구간은
+          재계획 대상이 아니다** — 열매를 향해 곧게 들어가는 게 그 구간의 정의라서,
+          중간에 경로를 바꾸면 파지 기하가 깨진다. 그 경우는 이 열매를 포기하는 게 맞다
+          (호출자가 replan_fn=None 으로 넘겨 REPLAN 을 그대로 받는다)."""
+        tries = max(0, int(self.get_parameter("replan_max").value))
+        for attempt in range(tries + 1):
+            st = self._play_waypoints(names, waypts, duration)
+            if st != self.REPLAN:
+                return st
+            if replan_fn is None:
+                return self.REPLAN
+            if attempt >= tries:
+                self.get_logger().error(
+                    f"[{what}] 재계획 {tries}회를 다 썼는데도 막혔다 → 포기")
+                return self.REPLAN
+            self.get_logger().info(
+                f"[{what}] 재계획 {attempt + 1}/{tries} — 현재 자세에서 다시 계획한다")
+            new = replan_fn()
+            if new is None:
+                self.get_logger().error(f"[{what}] 재계획 실패(계획 자체가 안 나온다) → 포기")
+                return self.REPLAN
+            names, waypts = new
+        return self.REPLAN
 
     def _execute_traj(self, names, waypts, duration):
-        """execute 모드: waypts 를 FollowJointTrajectory 로 컨트롤러에 보내 실제 실행·완료 대기.
-        names 가 그리퍼 조인트면 gripper_controller, 아니면 arm_controller 로 라우팅."""
+        """execute 모드: waypts 를 FollowJointTrajectory 로 컨트롤러에 보내 실제 실행.
+
+        반환: DONE(완주) · REPLAN(장면이 막혀 중단 — 다시 계획해야 함) · FAILED(보낼 수 없었음)
+
+        완료를 그냥 기다리지 않고 **실행 중 남은 경로를 재검사**한다(replan=true 기본).
+        팔이 움직이면 eye-in-hand 카메라가 새 복셀을 쌓아 장면이 계획 당시와 달라지는데,
+        기다리기만 하면 그 사실을 알 방법이 없다."""
         nameset = set(names)
         if nameset & set(self.FINGERS):
             ac, ctrl_joints = self._grip_ac, ["rg2_finger_joint1"]  # 나머지 finger 는 mimic
@@ -536,7 +665,7 @@ class PregraspDemo(Node):
         idx = {n: names.index(n) for n in ctrl_joints if n in names}
         js = [j for j in ctrl_joints if j in idx]
         if not js:
-            return
+            return self.DONE
         traj = JointTrajectory()
         traj.joint_names = js
         n = len(waypts)
@@ -549,7 +678,7 @@ class PregraspDemo(Node):
         if not ac.wait_for_server(timeout_sec=10.0):
             self.get_logger().error(
                 "컨트롤러 액션 서버 없음 — gazebo 가 control 모드(execute:=true)로 떴는지 확인.")
-            return
+            return self.FAILED
         goal = FollowJointTrajectory.Goal()
         goal.trajectory = traj
         gh_fut = ac.send_goal_async(goal)
@@ -557,9 +686,68 @@ class PregraspDemo(Node):
         gh = gh_fut.result()
         if gh is None or not gh.accepted:
             self.get_logger().warn("궤적 goal 거부/무응답.")
-            return
+            return self.FAILED
+
         rf = gh.get_result_async()
-        rclpy.spin_until_future_complete(self, rf, timeout_sec=duration + 20.0)
+        # 그리퍼 구간은 감시하지 않는다 — 손가락만 닫는 동작이라 재계획할 경로가 없다.
+        watch = (bool(self.get_parameter("replan").value)
+                 and self._sv is not None and not (nameset & set(self.FINGERS)))
+        if not watch:
+            rclpy.spin_until_future_complete(self, rf, timeout_sec=duration + 20.0)
+            return self.DONE
+
+        period = float(self.get_parameter("replan_period").value)
+        sample = max(1, int(self.get_parameter("replan_sample").value))
+        look = float(self.get_parameter("replan_lookahead").value)
+        t0 = time.time()
+        deadline = t0 + duration + 20.0
+        next_check = t0 + period
+        while not rf.done() and time.time() < deadline:
+            rclpy.spin_once(self, timeout_sec=0.05)
+            now = time.time()
+            if now < next_check:
+                continue
+            next_check = now + period
+
+            if self._aborted:
+                self.get_logger().error("안전 감시가 결함을 알렸다 → 실행 중단")
+                gh.cancel_goal_async()
+                for _ in range(10):
+                    rclpy.spin_once(self, timeout_sec=0.05)
+                self._sync_actual_joints()
+                return self.FAILED
+
+            # 진행률로 남은 구간을 잡는다(컨트롤러 피드백 대신 경과시간 — 컨트롤러가
+            # 시간 파라미터화대로 따라간다는 가정. 정밀하지 않아도 lookahead 로 덮인다).
+            frac = min(1.0, (now - t0) / max(1e-6, duration)) + look
+            start = int(frac * len(waypts))
+            rest = waypts[start:]
+            if len(rest) < 2:
+                continue
+            # ⚠ 검사 1회의 비용을 묶는다. `_invalid_waypoints` 는 웨이포인트마다
+            #   check_state_validity 를 **동기 호출**(최대 3s)한다 — 남은 점이 많으면 한 번의
+            #   검사가 구간 길이보다 오래 걸려 감시가 실행을 앞질러 버린다.
+            step = max(sample, -(-len(rest) // self.REPLAN_MAX_CHECKS))
+            pairs = {}
+            bad = self._invalid_waypoints(names, rest, sample=step, pairs=pairs)
+            if bad:
+                top = sorted(pairs.items(), key=lambda kv: -kv[1])[:3]
+                self.get_logger().warn(
+                    f"실행 중 장면 변화 감지 — 남은 {len(rest)}점 중 {bad}점이 막혔다"
+                    f"(진행 {frac*100:.0f}%) · 접촉: "
+                    + ", ".join(f"{k}×{v}" for k, v in top))
+                gh.cancel_goal_async()
+                # 취소가 반영될 틈을 준다(안 주면 다음 계획의 시작 상태가 아직 움직이는 중이다)
+                for _ in range(20):
+                    rclpy.spin_once(self, timeout_sec=0.05)
+                # 🔴 그 다음 반드시 실제 자세를 읽는다 — self.cur 는 가상 상태다.
+                if not self._sync_actual_joints():
+                    return self.FAILED
+                return self.REPLAN
+        if not rf.done():
+            self.get_logger().warn("궤적 결과 대기 타임아웃.")
+            return self.FAILED
+        return self.DONE
 
     def _traj_to_waypts(self, joint_traj):
         names = list(joint_traj.joint_names)
@@ -2196,14 +2384,33 @@ class PregraspDemo(Node):
         self.cur.update({f: gopen for f in self.FINGERS})
         self._publish_js()
 
-        # ── ① home → pre-grasp ──
+        # ── ① home → pre-grasp ── (자유공간 → 막히면 현재 자세에서 다시 계획)
         pn, pwp = c["pre"]
-        self._play_waypoints(pn, pwp, float(self.get_parameter("dur_approach_plan").value))
+        st = self._play_replan(pn, pwp,
+                              float(self.get_parameter("dur_approach_plan").value),
+                              lambda: self.plan_to(q_pre), f"{name} ①pre-grasp")
+        if st != self.DONE:
+            self.get_logger().error(f"[{name}] ① 구간에서 중단 — 이 열매를 건너뛴다")
+            # ⚠ 다음 사이클은 '지금 home' 을 가정하고 시작한다(아래 `self.cur = 0` ).
+            #   중간에서 멈춘 채 넘기면 그 가정이 거짓이 되므로 home 으로 빼낸다.
+            self._retreat_safely([({j: 0.0 for j in self.ARM}, "home")], name)
+            return False
         self._set({j: q_pre[j] for j in self.ARM})
         self._hold(float(self.get_parameter("pause").value))
 
         # ── ② pre-grasp → grasp : 줄기 회피 접근 궤적 재생 [5주차 2차] ──
-        self._play_waypoints(app_n, app_wp, float(self.get_parameter("dur_approach_line").value))
+        #   🔴 이 구간은 재계획하지 않는다(replan_fn=None). 열매를 향해 곧게 들어가는 것이
+        #      이 구간의 정의라서 경로를 바꾸면 파지 기하가 깨진다 → 막히면 이 열매를 포기.
+        st = self._play_replan(app_n, app_wp,
+                              float(self.get_parameter("dur_approach_line").value),
+                              None, f"{name} ②접근")
+        if st != self.DONE:
+            self.get_logger().error(
+                f"[{name}] ② 직선 접근 중 장면이 막혔다 — 접근 경로는 바꿀 수 없으므로 "
+                "이 열매를 건너뛴다(후퇴는 아래에서 처리)")
+            self._retreat_safely([(q_pre, "pre-grasp"), ({j: 0.0 for j in self.ARM}, "home")],
+                                 name)
+            return False
         self._set({j: q_grasp.get(j, self.cur[j]) for j in self.ARM})
         self._hold(float(self.get_parameter("pause").value))
 
@@ -2213,16 +2420,29 @@ class PregraspDemo(Node):
                              float(self.get_parameter("dur_gripper").value))
 
         # ── ④ 후퇴(접근 궤적 역재생 → 충돌free 경로로 안전 이탈) → home ──
-        self._play_waypoints(app_n, list(reversed(app_wp)),
-                             float(self.get_parameter("dur_retreat").value))
+        #   후퇴도 역재생이라 경로를 바꾸지 않는다. 막히면 알리기만 하고 계속 뺀다 —
+        #   열매를 든 채 접근 자세에 멈춰 있는 게 더 위험하다.
+        st = self._play_replan(app_n, list(reversed(app_wp)),
+                              float(self.get_parameter("dur_retreat").value),
+                              None, f"{name} ④후퇴")
+        if st == self.REPLAN:
+            self.get_logger().warn(
+                f"[{name}] 후퇴 중 장면 변화 감지 — 역재생 경로는 유지한다"
+                "(들어온 길이라 나갈 수는 있다)")
+            self._play_waypoints(app_n, list(reversed(app_wp)),
+                                 float(self.get_parameter("dur_retreat").value))
         self._set({j: q_pre.get(j, self.cur[j]) for j in self.ARM})
         if c["home"] is not None:
             hn, hwp = c["home"]
-            self._play_waypoints(hn, hwp, float(self.get_parameter("dur_home").value))
+            self._play_replan(hn, hwp, float(self.get_parameter("dur_home").value),
+                              lambda: self.plan_to({j: 0.0 for j in self.ARM}),
+                              f"{name} ④home")
         else:
-            self._play_waypoints(self.ARM,
-                                 [[q_pre[j] for j in self.ARM], [0.0] * len(self.ARM)],
-                                 float(self.get_parameter("dur_home").value))
+            self._play_replan(self.ARM,
+                              [[q_pre[j] for j in self.ARM], [0.0] * len(self.ARM)],
+                              float(self.get_parameter("dur_home").value),
+                              lambda: self.plan_to({j: 0.0 for j in self.ARM}),
+                              f"{name} ④home")
         self._set({j: 0.0 for j in self.ARM})
         self._hold(float(self.get_parameter("pause").value))
         self.get_logger().info(f"[{name}] 수확 사이클 완료.")
@@ -2839,10 +3059,12 @@ class PregraspDemo(Node):
         plan = self.plan_to({j: 0.0 for j in self.ARM})
         dur = float(self.get_parameter("dur_home").value)
         if plan is not None:
-            self._play_waypoints(plan[0], plan[1], dur)
+            self._play_replan(plan[0], plan[1], dur,
+                              lambda: self.plan_to({j: 0.0 for j in self.ARM}), "home 복귀")
         else:
-            self._play_waypoints(self.ARM,
-                                 [[self.cur[j] for j in self.ARM], [0.0] * len(self.ARM)], dur)
+            self._play_replan(self.ARM,
+                              [[self.cur[j] for j in self.ARM], [0.0] * len(self.ARM)], dur,
+                              lambda: self.plan_to({j: 0.0 for j in self.ARM}), "home 복귀")
         self._set({j: 0.0 for j in self.ARM})
 
     def _handle_cmd(self, cmd):
