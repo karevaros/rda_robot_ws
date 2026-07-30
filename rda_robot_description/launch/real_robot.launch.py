@@ -164,6 +164,30 @@ def _setup(context, *args, **kwargs):
              condition=IfCondition(LaunchConfiguration("gripper"))),
     ]
 
+    # ⑤ 실행 감시 — 발행 노드와 감시 노드는 **한 단위**다.
+    #    감시만 켜면 상태가 안 들어와 결함으로 잡히고(require_state), 발행만 켜면
+    #    아무도 반응하지 않는다. 그래서 인자 하나(safety)로 둘을 함께 켠다.
+    #    🔴 기본 꺼짐 — cb_safety_publisher 가 데이터 채널에 **두 번째 연결**을 열기 때문.
+    #       다중 접속 허용 여부를 문서로 확인하지 못했고, 만약 안 되면 하드웨어
+    #       인터페이스의 상태 수신(팔 제어)에 영향이 갈 수 있다.
+    #       실기 첫 연결 때 ①단독 ②동시 순으로 확인한 뒤 기본값을 켜는 게 맞다.
+    if cfg("safety").lower() in ("true", "1"):
+        if fake:
+            print("[real_robot] ⚠ safety:=true 인데 use_fake_hardware 입니다 — "
+                  "제어박스가 없어 안전 상태가 들어오지 않습니다(감시는 결함으로 판정).")
+        nodes += [
+            Node(package="rda_robot_bringup", executable="cb_safety_publisher",
+                 name="cb_safety_publisher", output="screen",
+                 parameters=[{"robot_ip": cfg("robot_ip"), "use_sim_time": False}],
+                 remappings=[("~/safety_state", "/safety_monitor/safety_state")]),
+            Node(package="rda_robot_bringup", executable="safety_monitor.py",
+                 name="safety_monitor", output="screen",
+                 parameters=[{"use_sim_time": False}]),
+        ]
+    else:
+        print("[real_robot] ⚠ 실행 감시가 꺼져 있습니다(safety:=false) — "
+              "충돌·E-stop 시 자동 정지하지 않습니다.")
+
     rviz_cfg = os.path.join(share, "config", "rda_robot.rviz")
     if os.path.exists(rviz_cfg):
         nodes.append(Node(package="rviz2", executable="rviz2", output="log",
@@ -194,6 +218,10 @@ def generate_launch_description():
         DeclareLaunchArgument("gripper_dry_run", default_value="false",
                               description="true=그리퍼 명령을 보내지 않고 로그만 "
                                           "(use_fake_hardware 로 배선 볼 때 함께 켠다)"),
+        DeclareLaunchArgument("safety", default_value="false",
+                              description="실행 감시(제어박스 충돌·E-stop → 즉시 정지). "
+                                          "🔴 기본 꺼짐 — 데이터 채널 두 번째 연결이 "
+                                          "미검증이라 실기 첫 연결 때 확인 후 켤 것"),
         DeclareLaunchArgument("preflight", default_value="true",
                               description="실기 모드에서 제어박스 접속 가능 여부를 먼저 확인 "
                                           "(false 로 끄면 접속 실패 시 조용히 무한 대기)"),

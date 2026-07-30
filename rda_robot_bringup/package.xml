@@ -15,6 +15,9 @@
   <exec_depend>std_srvs</exec_depend>
   <exec_depend>visualization_msgs</exec_depend>
   <exec_depend>rda_robot_description</exec_depend>
+  <depend>rclcpp</depend>
+  <depend>rda_robot_msgs</depend>
+  <exec_depend>control_msgs</exec_depend>
   <!-- pip 설치 필요(rosdep 밖): yourdfpy, trimesh, python-fcl, scipy -->
 
   <test_depend>ament_lint_auto</test_depend>
