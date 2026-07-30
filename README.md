@@ -441,7 +441,10 @@ ros2 launch rda_robot_moveit_config perception_demo.launch.py \
 # 접근 전략 비교 — harvest_linear(기본) vs direct
 … strategy:=direct
 
-# 손으로 조작 (터미널 조작기)
+# 손으로 조작 — GUI 패널(권장) 또는 터미널 조작기
+#   패널은 연결 상태·안전 상태·타깃·관절을 함께 보여주고 '정지' 버튼이 있다.
+#   (어셈블러 GUI 의 "🍅 수확 패널 열기" 버튼으로도 열린다)
+ros2 run rda_robot_bringup harvest_panel.py
 ros2 run rda_robot_bringup harvest_operator.py
 
 # 판정이 흔들리는지 진단 / 수확 전후 추적
@@ -507,7 +510,7 @@ ros2 action send_goal /arm_controller/follow_joint_trajectory \
 |--------|------|
 | `rda_robot_description` | 모델 라이브러리(`config/models/`), mesh, 결합설정(`config/mounts.yaml`), 온실·작물 정의(`config/obstacles.yaml`), 컨트롤러 설정(`config/controllers*.yaml`), 관절 토크(`config/joint_effort.yaml`), 표시·Gazebo·**실기** launch |
 | `rda_robot_assembler` | 조립 GUI + **통합 URDF 컴포저**(`compose_urdf`) + `mesh2urdf` |
-| `rda_robot_bringup` | 자충돌 모니터, 장애물 발행, 집기 데모, Gazebo 월드 생성, **열매 인지**(`fruit_detector.py`), 수확 조작기, **그리퍼 어댑터·안전 감시**(실기) |
+| `rda_robot_bringup` | 자충돌 모니터, 장애물 발행, 집기 데모, Gazebo 월드 생성, **열매 인지**(`fruit_detector.py`), 수확 조작기·**GUI 실행 패널**(`harvest_panel.py`), **그리퍼 어댑터·안전 감시**(실기) |
 | `rda_robot_moveit_config` | MoveIt2 설정(SRDF/ACM/OMPL/3D센서) + `moveit_demo`·`pregrasp_demo`·`perception_demo` launch |
 | `rda_robot_msgs` | 메시지 정의 — `SafetyState`(제어박스 안전 상태) |
 
@@ -726,6 +729,6 @@ mesh 에 별도 제한이 걸려 있다.
 | 4 | 온실 환경 + 기구학 분석 + MoveIt 셋업 | ✅ |
 | 5 | 경로 생성 — pre-grasp 자세 추정, 줄기 회피 접근, 집기 데모 | ✅ |
 | — | Gazebo 시뮬 + 센싱 옥토맵 + 열매 인지 | ✅ |
-| 6 | 통합 제어 — ros2_control 실구동·MoveIt `execute`·연속 수확(3-7) | ✅ |
+| 6 | 통합 제어 — ros2_control 실구동·MoveIt `execute`·연속 수확·재계획 트리거·GUI 실행 패널(3-7) | ✅ |
 | — | 실기 연동 준비 — 레인보우 제어박스 배선·그리퍼 어댑터·실행 감시·토크 유도(3-8) | ✅ |
 | 7 | 가상환경 컨버팅 — Gazebo ✅ / Isaac Sim·Unity 예정 | 진행 중 |
