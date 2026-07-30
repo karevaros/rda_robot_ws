@@ -217,8 +217,15 @@ def _prefixed(slot_prefix, name):
     return (slot_prefix + name) if slot_prefix else name
 
 
-def compose(mounts_path, robot_name="rda_robot"):
-    """mounts.yaml 경로 → 통합 URDF XML 문자열."""
+def compose(mounts_path, robot_name="rda_robot", model_args=None):
+    """mounts.yaml 경로 → 통합 URDF XML 문자열.
+
+    model_args: {slot: {key: value}} — 그 슬롯 모델의 xacro 인자를 덮어쓴다.
+      실기 연동(7주차 준비)에서 팔의 `robot_ip`·`cb_simulation`·`use_fake_hardware` 를
+      launch 인자로 넘기기 위해 뚫은 경로. 등록 모델의 `args` 를 파괴하지 않고
+      **복사본에만** 병합한다(BUILTIN_MODELS 는 프로세스 전역 dict 라 오염되면
+      같은 프로세스의 다음 compose 까지 조용히 영향받는다).
+    """
     with open(mounts_path) as f:
         y = yaml.safe_load(f) or {}
     sel = y.get("models") or {}
@@ -244,6 +251,10 @@ def compose(mounts_path, robot_name="rda_robot"):
         mid = chosen[slot]
         model = _model_or_fail(mid, slot, models)
         what = f"{slot} 슬롯 모델 '{mid}'"
+        extra = (model_args or {}).get(slot)
+        if extra:
+            model = dict(model)
+            model["args"] = {**(model.get("args") or {}), **extra}
         try:
             urdf_path = ul.xacro_to_urdf(model)
         except Exception as e:
@@ -342,13 +353,31 @@ def main(argv=None):
     ap.add_argument("--mounts", help="mounts.yaml 경로 (생략 시 정본 소스의 config/mounts.yaml)")
     ap.add_argument("-o", "--out", help="출력 파일 (생략 시 stdout)")
     ap.add_argument("--name", default="rda_robot", help="robot name")
+    ap.add_argument("--model-arg", action="append", default=[], metavar="SLOT:KEY=VALUE",
+                    help="슬롯 모델의 xacro 인자 덮어쓰기(반복 가능). "
+                         "예: --model-arg arm:robot_ip=10.0.2.7")
     a = ap.parse_args(argv)
+
+    model_args = {}
+    for spec in a.model_arg:
+        try:
+            slot, kv = spec.split(":", 1)
+            key, val = kv.split("=", 1)
+        except ValueError:
+            print(f"error: --model-arg 형식은 SLOT:KEY=VALUE 입니다 (받은 값: {spec!r})",
+                  file=sys.stderr)
+            return 2
+        if slot not in reg.SLOTS:
+            print(f"error: 알 수 없는 슬롯 '{slot}' (가능: {', '.join(reg.SLOTS)})",
+                  file=sys.stderr)
+            return 2
+        model_args.setdefault(slot, {})[key] = val
 
     mounts = a.mounts
     if not mounts:
         mounts = os.path.join(os.path.dirname(reg.models_dir()), "mounts.yaml")
     try:
-        xml = compose(mounts, a.name)
+        xml = compose(mounts, a.name, model_args=model_args)
     except ComposeError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2

@@ -1,0 +1,45 @@
+# ros2_control 컨트롤러 설정 — **실기(Rainbow 제어박스 연동)** 전용
+# real_robot.launch.py 가 controller_manager 에 직접 넘긴다.
+#
+# ⚠ 시뮬용 controllers.yaml 과 왜 따로인가 (섞으면 컨트롤러가 활성화되지 않는다)
+#   ① state_interface 가 다르다.
+#      벤더 ros2_control 블록(rb_6dof.ros2_control.xacro)은 관절마다
+#        command: effort·velocity·position / state: **position·effort**
+#      만 export 한다 — **velocity 상태가 없다.** 시뮬용 controllers.yaml 은
+#      `state_interfaces: [position, velocity]` 를 요구하므로 그대로 쓰면
+#      JTC 가 활성화에 실패한다("State interface ... not found").
+#   ② 그리퍼가 ros2_control 관절이 아니다.
+#      시뮬에선 gazebo_sim.launch.py 가 rg2_finger_joint1 을 ros2_control 블록에
+#      **주입**하지만, 실기 RG2 는 레인보우 제어박스 명령(gripper_macro)으로 움직인다.
+#      따라서 여기엔 gripper_controller 가 없다. 그리퍼는 별도 어댑터 노드가 맡는다.
+#   ③ use_sim_time 을 쓰지 않는다(실시간).
+
+controller_manager:
+  ros__parameters:
+    # 하드웨어 인터페이스 내부 상태 수신은 500Hz(robot.hpp kStateUpdateRate).
+    # 벤더 bringup 은 30Hz 로 잡아 뒀다 — 통신이 불안정하면 30 으로 낮출 것.
+    update_rate: 100
+
+    joint_state_broadcaster:
+      type: joint_state_broadcaster/JointStateBroadcaster
+
+    arm_controller:
+      type: joint_trajectory_controller/JointTrajectoryController
+
+arm_controller:
+  ros__parameters:
+    joints:
+      - base
+      - shoulder
+      - elbow
+      - wrist1
+      - wrist2
+      - wrist3
+    command_interfaces:
+      - position
+    state_interfaces:
+      - position          # ⚠ velocity 를 넣지 말 것 — 벤더 블록에 없다(위 ① 참조)
+    allow_partial_joints_goal: false
+    constraints:
+      stopped_velocity_tolerance: 0.01
+      goal_time: 0.0
