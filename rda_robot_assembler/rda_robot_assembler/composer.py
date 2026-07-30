@@ -217,7 +217,63 @@ def _prefixed(slot_prefix, name):
     return (slot_prefix + name) if slot_prefix else name
 
 
-def compose(mounts_path, robot_name="rda_robot", model_args=None):
+def _apply_effort(out, effort_path, mounts_path, arm_model=None):
+    """관절 effort 한계를 yaml 값으로 덮어쓴다 (없으면 아무것도 안 한다).
+
+    🔴 왜 조립 단계에서 하나
+      벤더 `rbpodo_description/robots/rb5_850e/joint.yaml` 은 6축 전부 `effort: 10` 이다 —
+      자기 팔조차 들 수 없는 플레이스홀더다(요구 하한 대비 최대 31배 부족).
+      그런데 벤더 파일을 고치면 벤더 클론이 더러워지고 업데이트 때 충돌한다.
+      통합 URDF 를 만드는 이 지점에서 덮어쓰면 **모든 소비자(RViz·MoveIt·Gazebo·Isaac)가
+      같은 값을 본다**.
+    ⚠ 값의 성격과 유도 근거는 `config/joint_effort.yaml` 머리말과
+      `docs/scripts/joint_effort_derive.py` 참조. **제조사 정격이 아니다.**
+    ⚠ 바꾼 내용은 stderr 로 알린다 — stdout 은 URDF 라 섞으면 안 되고,
+      조용히 바뀌면 나중에 '왜 이 값이지' 를 추적할 수 없다.
+    """
+    if effort_path is None:
+        effort_path = os.path.join(os.path.dirname(mounts_path), "joint_effort.yaml")
+    if not os.path.exists(effort_path):
+        return
+    with open(effort_path) as f:
+        doc = yaml.safe_load(f) or {}
+    table = doc.get("effort") or {}
+    if not table:
+        return
+
+    # 표는 특정 팔 모델에서 유도한 값이다(관절명·질량·관성이 모델마다 다르다).
+    # 모델이 다르면 **적용하지 않는다** — 관절명이 우연히 겹치면 엉뚱한 값이 들어가고,
+    # 안 겹치면 매 조립마다 무의미한 경고가 뜬다. 어느 쪽도 좋지 않다.
+    want = doc.get("model")
+    if want and arm_model and want != arm_model:
+        print(f"[compose] joint_effort.yaml 은 '{want}' 용 — 현재 팔은 '{arm_model}' "
+              "이라 적용하지 않습니다(그 팔의 표를 새로 생성하세요: "
+              "docs/scripts/joint_effort_derive.py).", file=sys.stderr)
+        return
+
+    changed, missing = [], []
+    for name, val in table.items():
+        j = out.find(f"joint[@name='{name}']")
+        if j is None:
+            missing.append(name)
+            continue
+        lim = j.find("limit")
+        if lim is None:
+            missing.append(name)
+            continue
+        old = lim.get("effort")
+        lim.set("effort", str(float(val)))
+        changed.append(f"{name} {old}→{val}")
+    if changed:
+        print(f"[compose] effort 덮어씀({os.path.basename(effort_path)}): "
+              + ", ".join(changed), file=sys.stderr)
+    if missing:
+        # 조용히 무시하면 '적용된 줄 알았는데 아니었다' 가 된다(이 프로젝트의 반복 실패 유형).
+        print(f"[compose] ⚠ effort 표에 있으나 URDF 에 없는 관절: {', '.join(missing)}"
+              " — 팔 모델을 바꿨다면 joint_effort.yaml 을 다시 생성하세요.", file=sys.stderr)
+
+
+def compose(mounts_path, robot_name="rda_robot", model_args=None, effort_path=None):
     """mounts.yaml 경로 → 통합 URDF XML 문자열.
 
     model_args: {slot: {key: value}} — 그 슬롯 모델의 xacro 인자를 덮어쓴다.
@@ -340,6 +396,9 @@ def compose(mounts_path, robot_name="rda_robot", model_args=None):
         ET.SubElement(j, "child", {"link": parts[slot]["anchor"]})
         j.append(_origin_el(m.get("xyz") or [0, 0, 0], m.get("rpy") or [0, 0, 0]))
 
+    # 4-1) effort(토크) 한계 덮어쓰기 — 벤더 파일을 고치지 않고 조립 단계에서만 바꾼다.
+    _apply_effort(out, effort_path, mounts_path, arm_model=chosen.get("arm"))
+
     # 5) 최종 검사 — 단일 트리인가
     find_root(out, "통합 URDF")
 
@@ -353,6 +412,9 @@ def main(argv=None):
     ap.add_argument("--mounts", help="mounts.yaml 경로 (생략 시 정본 소스의 config/mounts.yaml)")
     ap.add_argument("-o", "--out", help="출력 파일 (생략 시 stdout)")
     ap.add_argument("--name", default="rda_robot", help="robot name")
+    ap.add_argument("--joint-effort", metavar="YAML",
+                    help="관절 effort 한계 덮어쓰기 yaml "
+                         "(생략 시 mounts.yaml 옆 joint_effort.yaml · 없으면 원본 유지)")
     ap.add_argument("--model-arg", action="append", default=[], metavar="SLOT:KEY=VALUE",
                     help="슬롯 모델의 xacro 인자 덮어쓰기(반복 가능). "
                          "예: --model-arg arm:robot_ip=10.0.2.7")
@@ -377,7 +439,8 @@ def main(argv=None):
     if not mounts:
         mounts = os.path.join(os.path.dirname(reg.models_dir()), "mounts.yaml")
     try:
-        xml = compose(mounts, a.name, model_args=model_args)
+        xml = compose(mounts, a.name, model_args=model_args,
+                      effort_path=a.joint_effort)
     except ComposeError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
