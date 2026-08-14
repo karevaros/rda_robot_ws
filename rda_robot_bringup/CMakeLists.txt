@@ -37,6 +37,7 @@ install(PROGRAMS
   scripts/pregrasp_demo.py
   scripts/robot_introspect.py
   scripts/gen_gazebo_world.py
+  scripts/gen_usd_scene.py
   scripts/fruit_detector.py
   scripts/harvest_operator.py
   scripts/gripper_adapter.py
