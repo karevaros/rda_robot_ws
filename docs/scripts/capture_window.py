@@ -1,0 +1,88 @@
+#!/usr/bin/env python3
+"""창 캡처 — 보고서·README 용 스크린샷 (7주차 마무리)
+
+이 PC 에는 `import`(ImageMagick)·`scrot`·`gnome-screenshot`·`ffmpeg` 이 없다. 대신 조립기 GUI 때문에
+**PyQt5 가 이미 깔려 있어** `QScreen.grabWindow()` 로 창을 그대로 뜬다(추가 설치 없음).
+
+사용:
+  python3 docs/scripts/capture_window.py --name RViz --out docs/images/3-7_execute.png
+  python3 docs/scripts/capture_window.py --full --out /tmp/screen.png
+  python3 docs/scripts/capture_window.py --list          # 잡히는 창 목록만 보기
+
+⚠ 캡처 대상 창이 가려져 있으면 X11 에서 옛 내용이 찍힐 수 있다 → 기본으로 창을 앞으로 올린 뒤
+   `--settle` 만큼 기다렸다 찍는다(`--no-raise` 로 끌 수 있다).
+"""
+import argparse
+import os
+import subprocess
+import sys
+import time
+
+
+def windows():
+    """xdotool 로 (id, 이름) 목록. 이름 없는 창·크기 0 은 뺀다."""
+    out = subprocess.run(["xdotool", "search", "--onlyvisible", "--name", "."],
+                         capture_output=True, text=True).stdout.split()
+    res = []
+    for wid in out:
+        name = subprocess.run(["xdotool", "getwindowname", wid],
+                              capture_output=True, text=True).stdout.strip()
+        geo = subprocess.run(["xdotool", "getwindowgeometry", wid],
+                             capture_output=True, text=True).stdout
+        if not name:
+            continue
+        res.append((wid, name, geo.replace("\n", " ")))
+    return res
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--name", help="창 이름(부분 일치)")
+    ap.add_argument("--winid", help="창 id 직접 지정")
+    ap.add_argument("--full", action="store_true", help="화면 전체")
+    ap.add_argument("--out", default="/tmp/capture.png")
+    ap.add_argument("--delay", type=float, default=0.0, help="시작 전 대기(초)")
+    ap.add_argument("--settle", type=float, default=0.8, help="창을 올린 뒤 대기(초)")
+    ap.add_argument("--no-raise", action="store_true")
+    ap.add_argument("--list", action="store_true")
+    a = ap.parse_args()
+
+    if a.list:
+        for wid, name, geo in windows():
+            print(f"{wid:>10}  {name}   [{geo.strip()}]")
+        return
+
+    if a.delay:
+        time.sleep(a.delay)
+
+    wid = 0
+    if not a.full:
+        if a.winid:
+            wid = int(a.winid)
+        else:
+            cands = [w for w in windows() if a.name.lower() in w[1].lower()]
+            if not cands:
+                print(f"[capture] '{a.name}' 창을 못 찾음. --list 로 확인할 것", file=sys.stderr)
+                sys.exit(2)
+            cands.sort(key=lambda w: len(w[1]))
+            wid = int(cands[0][0])
+            print(f"[capture] 창 선택: {cands[0][1]} (id {wid})", file=sys.stderr)
+        if not a.no_raise:
+            subprocess.run(["xdotool", "windowactivate", "--sync", str(wid)],
+                           capture_output=True)
+            subprocess.run(["xdotool", "windowraise", str(wid)], capture_output=True)
+            time.sleep(a.settle)
+
+    from PyQt5.QtWidgets import QApplication
+    app = QApplication([])                       # noqa: F841 — grabWindow 에 필요
+    screen = QApplication.primaryScreen()
+    pix = screen.grabWindow(wid)
+    os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
+    if not pix.save(a.out):
+        print("[capture] 저장 실패", file=sys.stderr)
+        sys.exit(1)
+    print(f"[capture] {a.out}  {pix.width()}x{pix.height()}")
+
+
+if __name__ == "__main__":
+    main()

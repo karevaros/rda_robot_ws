@@ -85,6 +85,12 @@ def build_world(obstacles_yaml):
     <include><uri>model://sun</uri></include>
     <include><uri>model://ground_plane</uri></include>
     <scene><ambient>0.5 0.5 0.5 1</ambient><background>0.7 0.8 0.9 1</background></scene>
+    <gui>
+      <!-- 기본 시점: 로봇(원점)과 목표 열매(x≈0.85, z≈1.0)가 함께 크게 잡히는 각도.
+           Gazebo 기본 시점은 너무 멀어 팔·열매가 점으로 보인다(데모 캡처·시연용).
+           카메라 (-1.6,-1.8,1.9) → 타깃 (0.8,0,1.0): yaw=atan2(1.8,2.4)=0.644, pitch=atan2(0.9,3.0)=0.292 -->
+      <camera name="user_camera"><pose>-1.6 -1.8 1.9 0 0.292 0.644</pose></camera>
+    </gui>
 {body}
   </world>
 </sdf>

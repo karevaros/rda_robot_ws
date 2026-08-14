@@ -387,6 +387,11 @@ ros2 launch rda_robot_moveit_config pregrasp_demo.launch.py target_source:=perce
 `obstacles.yaml` 의 이름표(`fruit_r0_p3_t0_f2`)가 아니라 **카메라가 찾은 열매**(`det_13` …)를
 목표로 삼는다. 실환경에는 이름표가 없으니 이쪽이 최종 형태다.
 
+![3-6 인지된 열매와 옥토맵](docs/images/3-6_detect.png)
+
+빨간 구슬이 인지 결과(`/detected_fruits`), 색 상자가 두 카메라(D435i·eye-in-hand D405)가
+누적한 옥토맵이다. **이름표는 하나도 쓰지 않았다** — 저 장면만으로 계획이 선다.
+
 ```bash
 # 인지된 열매 중 어떤 게 닿는지만 확인
 ros2 launch rda_robot_moveit_config pregrasp_demo.launch.py target_source:=perception scan_all:=true
@@ -437,6 +442,14 @@ ros2 launch rda_robot_moveit_config perception_demo.launch.py \
 `home → pre-grasp → 직선 접근 → 파지 → 후퇴` 를 컨트롤러로 실행한다. 한 개를 따면
 **목록을 다시 뽑아** 다음 열매로 넘어간다(딴 열매는 재인지 대상에서 사라진다).
 
+![3-7 Gazebo 에서 실제로 움직이는 팔](docs/images/3-7_execute.png)
+
+같은 순간의 RViz. **초록 구**가 목표 열매 주변의 ACM 허용 영역(ρ)이고, 그 안쪽 옥토맵
+복셀이 지워져 있다 — 이름표 없는 센싱 장면에서 "이 열매만 만져도 된다"를 공간으로 표현한 것이다.
+빨간 구슬은 인지된 열매(`/detected_fruits`), 색 상자는 두 카메라가 만든 옥토맵이다.
+
+![3-7 실행 중 RViz — 구 영역과 옥토맵](docs/images/3-7_rviz_region.png)
+
 ```bash
 # 접근 전략 비교 — harvest_linear(기본) vs direct
 … strategy:=direct
@@ -446,6 +459,14 @@ ros2 launch rda_robot_moveit_config perception_demo.launch.py \
 #   (어셈블러 GUI 의 "🍅 수확 패널 열기" 버튼으로도 열린다)
 ros2 run rda_robot_bringup harvest_panel.py
 ros2 run rda_robot_bringup harvest_operator.py
+```
+
+![3-7 GUI 수확 패널](docs/images/3-7_panel.png)
+
+> 위 화면의 `안전 감시`·`타깃 목록`이 빨간 것은 정상이다 — 안전 감시(`safety_monitor`)는
+> 실기용이라 시뮬 기본 구성에서 안 뜨고, 타깃 목록은 수확 노드가 발행할 때만 채워진다.
+
+```bash
 
 # 판정이 흔들리는지 진단 / 수확 전후 추적
 … reach_repeat:=5
