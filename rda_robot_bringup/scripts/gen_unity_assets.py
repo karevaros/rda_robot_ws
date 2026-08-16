@@ -165,13 +165,31 @@ public static class RdaBatch
             .SelectMany(a => { try { return a.GetTypes(); } catch { return new Type[0]; } })
             .First(t => t.FullName == "Unity.Robotics.UrdfImporter.ImportSettings");
         var settings = Activator.CreateInstance(settingsType);
+        // 충돌체 분해는 unity(Convex) 로. 기본값이 vHACD 인데 mesh 23개에 매우 오래 걸린다.
+        var convexField = settingsType.GetField("convexMethod");
+        if (convexField != null) {
+            var unityVal = Enum.Parse(convexField.FieldType, "unity");
+            convexField.SetValue(settings, unityVal);
+        }
         var create = ext.GetMethods(BindingFlags.Public | BindingFlags.Static)
             .First(m => m.Name == "Create" && m.GetParameters().Length >= 2);
-        var args = create.GetParameters().Length == 2
-            ? new object[] { Path.GetFullPath(Urdf), settings }
-            : new object[] { Path.GetFullPath(Urdf), settings, false };
-        create.Invoke(null, args);
-        var go = GameObject.Find("rda_robot") ?? GameObject.FindObjectsOfType<GameObject>()
+        // 🔴 리플렉션은 C# 기본값 인자를 채워 주지 않는다 — 선언된 개수만큼 다 넘겨야 한다.
+        //    v0.5.2 = Create(string, ImportSettings, bool loadStatus, bool forceRuntimeMode) 4개.
+        //    개수를 가정하지 말고 선언에서 읽어 뒤를 false 로 채운다.
+        var ps = create.GetParameters();
+        var args = new object[ps.Length];
+        args[0] = Path.GetFullPath(Urdf);
+        args[1] = settings;
+        for (int i = 2; i < ps.Length; i++) args[i] = false;
+        var ret = create.Invoke(null, args);
+        // 🔴 Create 는 IEnumerator<GameObject> 를 돌려주는 코루틴이라 호출만으로는 아무 일도 안 난다.
+        //    loadStatus=false 면 중간에 양보하지 않으므로 MoveNext 로 끝까지 돌리면 동기 완료된다.
+        GameObject imported = null;
+        if (ret is System.Collections.IEnumerator it) {
+            while (it.MoveNext()) { if (it.Current is GameObject g) imported = g; }
+            if (it.Current is GameObject last) imported = last;
+        }
+        var go = imported ?? GameObject.Find("rda_robot") ?? GameObject.FindObjectsOfType<GameObject>()
             .FirstOrDefault(g => g.transform.parent == null && g.name != GreenhouseBuilder.Root);
         if (go == null) throw new Exception("임포트된 로봇 오브젝트를 찾지 못했다");
         return go;
@@ -269,6 +287,10 @@ def build(out_dir, urdf_path, obstacles, mesh_search):
         "com.unity.modules.physics": "1.0.0",
         "com.unity.modules.imgui": "1.0.0",
         "com.unity.modules.jsonserialize": "1.0.0",
+        # URDF Importer 의 UnityMeshImporter 가 Texture2D.LoadImage 를 쓴다.
+        # 빠지면 패키지 컴파일이 error CS1061 로 깨져 배치모드가 통째로 실패한다
+        # (2026-08-16 Unity 2022.3.62f3 실행에서 실측 — 로컬 검증으론 안 잡혔다).
+        "com.unity.modules.imageconversion": "1.0.0",
     }}, open(os.path.join(out_dir, "Packages", "manifest.json"), "w"), indent=2)
     open(os.path.join(out_dir, "ProjectSettings", "ProjectVersion.txt"), "w").write(
         f"m_EditorVersion: {UNITY_VERSION}\n")
