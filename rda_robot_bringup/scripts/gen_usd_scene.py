@@ -543,7 +543,41 @@ def build_greenhouse(out_file, obstacles_yaml, include_targets=True):
     return n
 
 
-def build_scene(out_file, robot_file, world_file, robot_name="rda_robot"):
+def base_placement(urdf_path, mounts_path=None):
+    """로봇의 월드 배치 (x, y, ground+z, yaw_rad) — ROS/Gazebo 와 **같은 규칙**.
+
+    🔴 2026-08-16 발견: 세 생성기(Gazebo 월드·USD·Unity)가 모두 이 값을 빠뜨려, 로봇이 온실 대비
+       **90° 돌아가고 0.235m 낮게** 서 있었다(사용자가 Unity 화면에서 지적).
+       ROS 쪽은 `world→base_link` 정적 TF 로, Gazebo 는 스폰 자세(`-Y`)로 이 값을 건다.
+       ground = base_footprint 조인트 z 의 부호 반전(바닥을 z=0 으로 맞추는 오프셋).
+    """
+    import math
+    bp = {"x": 0.0, "y": 0.0, "z": 0.0, "yaw_deg": 0.0}
+    if mounts_path is None:
+        src = os.path.abspath(os.path.join(_here, "..", ".."))
+        mounts_path = os.path.join(src, "rda_robot_description", "config", "mounts.yaml")
+    try:
+        import yaml as _yaml
+        d = _yaml.safe_load(open(mounts_path)) or {}
+        for k in bp:
+            if k in (d.get("base_placement") or {}):
+                bp[k] = float(d["base_placement"][k])
+    except Exception as e:                                     # noqa: BLE001
+        sys.stderr.write(f"[gen_usd_scene] base_placement 읽기 실패: {e}\n")
+    ground = 0.0
+    try:
+        import xml.etree.ElementTree as _ET
+        for j in _ET.parse(urdf_path).getroot().findall("joint"):
+            ch = j.find("child")
+            if ch is not None and ch.get("link") == "base_footprint":
+                ground = -float(j.find("origin").get("xyz").split()[2])
+                break
+    except Exception as e:                                     # noqa: BLE001
+        sys.stderr.write(f"[gen_usd_scene] ground offset 계산 실패: {e}\n")
+    return bp["x"], bp["y"], ground + bp["z"], math.radians(bp["yaw_deg"])
+
+
+def build_scene(out_file, robot_file, world_file, robot_name="rda_robot", placement=None):
     stage = Usd.Stage.CreateNew(out_file)
     UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.z)
     UsdGeom.SetStageMetersPerUnit(stage, 1.0)
@@ -557,6 +591,11 @@ def build_scene(out_file, robot_file, world_file, robot_name="rda_robot"):
     for name, f in (("greenhouse", world_file), (_sane(robot_name), robot_file)):
         p = UsdGeom.Xform.Define(stage, f"/World/{name}")
         p.GetPrim().GetReferences().AddReference("./" + os.path.basename(f))
+        # 로봇에는 월드 배치를 건다(온실은 이미 월드 좌표로 만들어져 있다).
+        if name == _sane(robot_name) and placement is not None:
+            px, py, pz, yaw = placement
+            p.AddTranslateOp().Set(Gf.Vec3d(float(px), float(py), float(pz)))
+            p.AddRotateZOp().Set(float(math.degrees(yaw)))
 
     UsdLux.DomeLight.Define(stage, "/World/dome").CreateIntensityAttr(1000.0)
     stage.GetRootLayer().Save()
@@ -694,7 +733,7 @@ def main():
 
     stats = build_robot(robot_f, urdf, a.mesh_path, fix_base=not a.no_fix_base)
     nprims = build_greenhouse(world_f, obstacles, include_targets=not a.no_targets)
-    build_scene(scene_f, robot_f, world_f)
+    build_scene(scene_f, robot_f, world_f, placement=base_placement(urdf))
     write_readme(out_dir, stats, nprims, a)
     isaac_py = os.path.join(out_dir, "isaac_load_scene.py")
     open(isaac_py, "w").write(ISAAC_SCRIPT)

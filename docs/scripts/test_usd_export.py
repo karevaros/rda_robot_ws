@@ -246,8 +246,17 @@ def main():
           and abs(g.GetGravityMagnitudeAttr().Get() - 9.81) < 1e-6
           and list(g.GetGravityDirectionAttr().Get()) == [0.0, 0.0, -1.0])
     if tcp:                                   # 합성 스테이지에서도 tcp 위치가 URDF 와 같은가
-        e = float(np.abs(world_tf(tcp[0]) - W["tcp"]).max())
-        check("합성 스테이지 tcp 위치 = URDF FK", e < 1e-5,
+        # 🔴 합성 스테이지에는 로봇의 **월드 배치**(mounts.yaml base_placement + 지면 오프셋)가
+        #    걸려 있다. 그걸 빼고 비교하면 '로봇만 보면 맞고 온실과의 상대 배치는 틀린' 상태가
+        #    통과한다(2026-08-16 Unity 에서 실제로 그랬다 — 사용자가 화면에서 발견).
+        px, py, pz, yaw = G.base_placement(urdf)
+        T_wb = np.eye(4)
+        T_wb[:3, :3] = np.array([[np.cos(yaw), -np.sin(yaw), 0.0],
+                                 [np.sin(yaw),  np.cos(yaw), 0.0],
+                                 [0.0,          0.0,         1.0]])
+        T_wb[:3, 3] = [px, py, pz]
+        e = float(np.abs(world_tf(tcp[0]) - T_wb @ W["tcp"]).max())
+        check("합성 스테이지 tcp 위치 = URDF FK(월드 배치 반영)", e < 1e-5,
               f"{np.round(world_tf(tcp[0])[:3, 3], 4).tolist()} (오차 {e:.2e})")
 
     # 8. USD 무결성 — pip `usd-core` 에는 usdchecker/ComplianceChecker 가 없어 직접 훑는다

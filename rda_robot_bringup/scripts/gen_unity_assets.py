@@ -26,6 +26,7 @@ import os
 import re
 import shutil
 import sys
+import xml.etree.ElementTree as ET
 
 import numpy as np
 import yaml
@@ -42,6 +43,20 @@ def _import_sibling(mod_name, file_name):
 
 
 G = _import_sibling("_gen_usd_scene", "gen_usd_scene.py")   # URDF 조립·파싱·mesh 해석 재사용
+
+def _default_mounts():
+    """mounts.yaml 경로 — compose_urdf 와 같은 규칙(소스 트리 우선, 없으면 share)."""
+    src = os.path.abspath(os.path.join(_here, "..", ".."))
+    p = os.path.join(src, "rda_robot_description", "config", "mounts.yaml")
+    if os.path.exists(p):
+        return p
+    try:
+        from ament_index_python.packages import get_package_share_directory
+        return os.path.join(get_package_share_directory("rda_robot_description"),
+                            "config", "mounts.yaml")
+    except Exception:                                          # noqa: BLE001
+        return None
+
 
 UNITY_VERSION = "2022.3.62f3"
 URDF_IMPORTER = ("https://github.com/Unity-Technologies/URDF-Importer.git"
@@ -366,6 +381,7 @@ public static class RdaBatch
         try {
             EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Single);
             var robot = ImportRobot();
+            PlaceRobot(robot);                       // 월드 배치(base_placement) — 검사도 이 기준이다
             var green = GreenhouseBuilder.Build();
             WriteReport(robot, green);
             Debug.Log("[RDA] 완료");
@@ -468,6 +484,37 @@ public static class RdaBatch
         return null;
     }
 
+    // ───────────────────────────── 로봇 월드 배치(2026-08-16 신설)
+
+    /// 🔴 로봇을 **월드에** 놓는다 — 종전에는 URDF 원점에 그냥 뒀다.
+    ///    ROS 쪽은 `world→base_link` 정적 TF 로 (x, y, ground+z, yaw) 를 걸고 Gazebo 는 같은 값을
+    ///    스폰 자세(`-Y`)로 준다. 이걸 빠뜨려 Unity 로봇이 온실 대비 **90° 돌아가고 0.235m 낮게**
+    ///    서 있었다(2026-08-16 사용자 지적: "z축 기준 시계방향 90도 회전돼야 해").
+    ///    ⚠ 프레임 검사(tcp = URDF FK)는 **로봇 내부 기준**이라 이 결함을 못 잡는다 —
+    ///       로봇만 보면 맞고, 온실과의 상대 배치가 틀린 것이다.
+    static void PlaceRobot(GameObject robot)
+    {
+        var ta = Resources.Load<TextAsset>("base_placement");
+        if (ta == null) { Debug.LogWarning("[RDA] base_placement.json 없음 — 원점에 둔다"); return; }
+        float x = 0f, y = 0f, z = 0f, yawDeg = 0f, ground = 0f;
+        foreach (var pair in ta.text.Split(','))
+        {
+            var kv = pair.Split(':');
+            if (kv.Length != 2) continue;
+            var k = kv[0].Trim().Trim('{', '}', '"', ' ', '\n', '\r', '\t');
+            if (!float.TryParse(kv[1].Trim().Trim('{', '}', '"', ' ', '\n', '\r', '\t'), out var v)) continue;
+            if (k == "x") x = v; else if (k == "y") y = v; else if (k == "z") z = v;
+            else if (k == "yaw_deg") yawDeg = v; else if (k == "ground") ground = v;
+        }
+        // ROS world 자세 → Unity. 변환은 온실과 **같은 함수**를 쓴다(경로가 갈리면 또 어긋난다).
+        robot.transform.position = GreenhouseBuilder.RosToUnity(x, y, ground + z);
+        float h = yawDeg * Mathf.Deg2Rad * 0.5f;
+        var qRos = new Quaternion(0f, 0f, Mathf.Sin(h), Mathf.Cos(h));   // ROS Z축 yaw
+        robot.transform.rotation = GreenhouseBuilder.RosToUnity(qRos);
+        Debug.Log($"[RDA] 로봇 배치: ROS(x={x}, y={y}, z={ground + z}, yaw={yawDeg}°) "
+                  + $"→ Unity pos {robot.transform.position} rot {robot.transform.eulerAngles}");
+    }
+
     // ───────────────────────────── ROS 연동(2026-08-16 신설)
     const string ScenePath = "Assets/Scenes/RdaScene.unity";
 
@@ -500,6 +547,7 @@ public static class RdaBatch
         try {
             EditorSceneManager.NewScene(NewSceneSetup.DefaultGameObjects, NewSceneMode.Single);
             var robot = ImportRobot();
+            PlaceRobot(robot);
             GreenhouseBuilder.Build();
 
             // 보여 주기용 시점 — 기본 카메라는 원점을 보고 있어 로봇·온실이 화면에 안 들어온다.
@@ -555,7 +603,7 @@ public static class RdaBatch
 '''
 
 
-def build(out_dir, urdf_path, obstacles, mesh_search):
+def build(out_dir, urdf_path, obstacles, mesh_search, mounts_path=None):
     assets = os.path.join(out_dir, "Assets", "RdaRobot")
     editor = os.path.join(out_dir, "Assets", "Editor")
     os.makedirs(assets, exist_ok=True)
@@ -623,6 +671,31 @@ def build(out_dir, urdf_path, obstacles, mesh_search):
         if j["type"] != "fixed":
             jmap[jn] = j["child"]
     json.dump(jmap, open(os.path.join(res, "joint_map.json"), "w"), indent=1)
+
+    # 🔴 로봇의 **월드 배치**(base_placement) — Gazebo·데모는 적용하는데 생성기들이 빠뜨렸다.
+    #    ROS 쪽은 `world→base_link` 정적 TF 로 (x, y, ground+z, yaw) 를 걸고 Gazebo 는 같은 값을
+    #    `-Y` 스폰 자세로 준다. Unity 는 로봇을 URDF 원점에 그냥 놓아서 **온실 대비 90° 돌아가고
+    #    0.235m 낮게** 서 있었다(2026-08-16 사용자 지적으로 발견).
+    #    ground = base_footprint 조인트 z 의 부호 반전(= 바닥을 z=0 으로 맞추는 오프셋).
+    bp = {"x": 0.0, "y": 0.0, "z": 0.0, "yaw_deg": 0.0}
+    try:
+        md = yaml.safe_load(open(mounts_path)) or {} if mounts_path else {}
+        for k in bp:
+            if k in (md.get("base_placement") or {}):
+                bp[k] = float(md["base_placement"][k])
+    except Exception as e:                                    # noqa: BLE001
+        sys.stderr.write(f"[gen_unity_assets] base_placement 읽기 실패: {e}\n")
+    ground = 0.0
+    try:
+        for j in ET.fromstring(urdf).findall("joint"):
+            ch = j.find("child")
+            if ch is not None and ch.get("link") == "base_footprint":
+                ground = -float(j.find("origin").get("xyz").split()[2])
+                break
+    except Exception as e:                                    # noqa: BLE001
+        sys.stderr.write(f"[gen_unity_assets] ground offset 계산 실패: {e}\n")
+    bp["ground"] = ground
+    json.dump(bp, open(os.path.join(res, "base_placement.json"), "w"), indent=1)
     json.dump({"dependencies": {
         "com.unity.robotics.urdf-importer": URDF_IMPORTER,
         "com.unity.robotics.ros-tcp-connector": ROS_TCP_CONNECTOR,
@@ -691,6 +764,7 @@ def main():
     ap.add_argument("--urdf", default=None, help="생략하면 mounts.yaml 로 즉석 조립")
     ap.add_argument("--obstacles", default=None)
     ap.add_argument("--mesh-path", action="append", default=[])
+    ap.add_argument("--mounts", default=None, help="base_placement 를 읽을 mounts.yaml")
     a = ap.parse_args()
 
     out_dir = os.path.abspath(os.path.expanduser(a.out))
@@ -711,7 +785,7 @@ def main():
         obstacles = os.path.join(get_package_share_directory("rda_robot_description"),
                                  "config", "obstacles.yaml")
 
-    st = build(out_dir, urdf, obstacles, a.mesh_path)
+    st = build(out_dir, urdf, obstacles, a.mesh_path, mounts_path=a.mounts or _default_mounts())
     open(os.path.join(out_dir, "README.md"), "w").write(
         README.format(ver=UNITY_VERSION, n=st["items"]))
     sys.stderr.write(f"[gen_unity_assets] mesh {st['meshes']}개 복사 · 온실 {st['items']}개 · "

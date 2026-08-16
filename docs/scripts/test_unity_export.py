@@ -47,6 +47,35 @@ def ros_to_unity_pos(v):
     return np.array([-v[1], v[2], v[0]])
 
 
+def _base_placement_tf(project, urdf_path):
+    """world→base_link 4×4 — mounts.yaml base_placement(x, y, z, yaw_deg) + 지면 오프셋.
+
+    지면 오프셋 = base_footprint 조인트 z 의 부호 반전(바닥을 z=0 으로 맞추는 값).
+    launch(`perception_demo._ground_offset`)와 **같은 규칙**이어야 한다.
+    """
+    import xml.etree.ElementTree as _ET
+    bp = {"x": 0.0, "y": 0.0, "z": 0.0, "yaw_deg": 0.0, "ground": 0.0}
+    p = os.path.join(project, "Assets", "Resources", "base_placement.json")
+    if os.path.exists(p):
+        bp.update(json.load(open(p)))
+    else:                                   # 생성물이 없으면 URDF 에서 지면만이라도 구한다
+        try:
+            for j in _ET.parse(urdf_path).getroot().findall("joint"):
+                ch = j.find("child")
+                if ch is not None and ch.get("link") == "base_footprint":
+                    bp["ground"] = -float(j.find("origin").get("xyz").split()[2])
+                    break
+        except Exception:                                      # noqa: BLE001
+            pass
+    th = np.radians(float(bp["yaw_deg"]))
+    T = np.eye(4)
+    T[:3, :3] = np.array([[np.cos(th), -np.sin(th), 0.0],
+                          [np.sin(th),  np.cos(th), 0.0],
+                          [0.0,         0.0,        1.0]])
+    T[:3, 3] = [float(bp["x"]), float(bp["y"]), float(bp["ground"]) + float(bp["z"])]
+    return T
+
+
 def _rpy_matrix(r, p, y):
     """URDF rpy(고정축 XYZ, = Rz·Ry·Rx) → 3×3 회전행렬."""
     cr, sr = np.cos(r), np.sin(r)
@@ -179,11 +208,16 @@ def main():
               r.get("revolute") == len(movable), f"{r.get('revolute')} vs {len(movable)}")
         check("Unity 온실 오브젝트 수", r.get("greenhouse") == len(items),
               f"{r.get('greenhouse')} vs {len(items)}")
+        # 🔴 로봇의 **월드 배치**(mounts.yaml base_placement)를 반영해서 비교해야 한다.
+        #    ROS 쪽은 world→base_link 정적 TF 로 (x, y, ground+z, yaw) 를 걸고 Gazebo 도 같은 값을
+        #    스폰 자세로 준다. 이걸 빼고 비교하면 **로봇만 보면 맞고 온실과의 상대 배치가 틀린**
+        #    상태가 통과한다(2026-08-16 사용자가 화면에서 발견한 결함이 정확히 그것이었다).
+        T_wb = _base_placement_tf(P, urdf_path)
         fbad = []
         for name, pos in (r.get("frames") or {}).items():
             if name not in W:
                 continue
-            want = ros_to_unity_pos(W[name][:3, 3])
+            want = ros_to_unity_pos((T_wb @ np.append(W[name][:3, 3], 1.0))[:3])
             if np.abs(np.array(pos) - want).max() > 1e-3:
                 fbad.append(f"{name}: {np.round(pos,4).tolist()} vs {np.round(want,4).tolist()}")
         check("Unity 프레임 위치 = URDF FK(좌표 변환 적용)", not fbad, "; ".join(fbad))
