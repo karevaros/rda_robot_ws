@@ -104,6 +104,15 @@ public class RdaRosBridge : MonoBehaviour
     void Start()
     {
         _t0 = Time.time;
+        // 커맨드라인 덮어쓰기 — 화면으로 볼 때는 오래 띄우고, 검증할 때는 짧게 끝내야 한다.
+        //   ./RdaPlayer --quit-after 300 --ros-ip 127.0.0.1
+        var argv = System.Environment.GetCommandLineArgs();
+        for (int i = 0; i < argv.Length - 1; i++)
+        {
+            if (argv[i] == "--quit-after" && float.TryParse(argv[i + 1], out var qa)) quitAfter = qa;
+            if (argv[i] == "--ros-ip") rosIP = argv[i + 1];
+        }
+
         // 🔴 루트 아티큘레이션을 고정하지 않으면 로봇이 통째로 중력에 떨어진다.
         //    (실측: tcp 가 [0,1.2119,0.2074] 대신 [0.709,0.941,0.681] 로 나왔다 — 넘어지는 중)
         //    이 노드는 **미러**라 베이스는 월드에 고정돼 있어야 한다. 모바일 베이스 주행까지
@@ -313,10 +322,13 @@ public static class GreenhouseBuilder
             go.name = it.name;
             go.transform.SetParent(root.transform, false);
             go.transform.localPosition = RosToUnity(it.xyz[0], it.xyz[1], it.xyz[2]);
-            var q = RosToUnity(FromRpy(it.rpy[0], it.rpy[1], it.rpy[2]));
-            if (it.type == "cylinder")                      // ROS 원기둥 축 Z → Unity 축 Y 보정
-                q = q * Quaternion.Euler(90f, 0f, 0f);
-            go.transform.localRotation = q;
+            // 🔴 원기둥에 축 보정을 걸면 안 된다(2026-08-16 실측으로 잡은 결함).
+            //    좌표 변환 (x,y,z)→(−y,z,x) 이 **ROS 로컬 +Z 를 이미 Unity +Y 로 보낸다**.
+            //    Unity 원기둥 프리미티브의 축도 +Y 이므로 추가 회전이 필요 없다.
+            //    종전 코드는 여기에 Quaternion.Euler(90,0,0) 을 더 곱해 원기둥을 눕혀 놓았다
+            //    (rail_L0 축 기대 [1,0,0] ↔ 실측 [0,0,1], |cos|=0.000 — 거터와 직각으로 깔렸다).
+            //    ⚠ 개수만 세는 검사(186개)로는 안 잡힌다 → test_unity_export 가 축·치수까지 본다.
+            go.transform.localRotation = RosToUnity(FromRpy(it.rpy[0], it.rpy[1], it.rpy[2]));
             go.isStatic = true;
             if (it.color != null && it.color.Length >= 3) {
                 var mr = go.GetComponent<MeshRenderer>();
@@ -426,7 +438,26 @@ public static class RdaBatch
             found.Add($"    \"{n}\": [{p.x:F6}, {p.y:F6}, {p.z:F6}]");
         }
         sb.Append(string.Join(",\n", found));
-        sb.Append("\n  }\n}\n");
+        sb.Append("\n  },\n");
+
+        // 🔴 온실 '형상'검사 — 종전에는 개수(186)만 셌다. 개수만 세면 원기둥이 눕거나
+        //    상자가 돌아가 있어도 통과한다(2026-08-16 사용자가 화면에서 발견한 결함).
+        //    각 표본의 world 위치 · **로컬 축(원기둥 축 = transform.up)** · world AABB 를 남겨
+        //    obstacles.yaml 과 대조할 수 있게 한다.
+        sb.Append("  \"greenhouse_samples\": [\n");
+        var samples = new List<string>();
+        foreach (Transform ch in green.transform)
+        {
+            var r = ch.GetComponent<Renderer>();
+            var b = r != null ? r.bounds.size : Vector3.zero;
+            var p = ch.position; var up = ch.up;
+            samples.Add($"    {{\"name\": \"{ch.name}\", "
+                        + $"\"pos\": [{p.x:F6}, {p.y:F6}, {p.z:F6}], "
+                        + $"\"axis\": [{up.x:F6}, {up.y:F6}, {up.z:F6}], "
+                        + $"\"bounds\": [{b.x:F6}, {b.y:F6}, {b.z:F6}]}}");
+        }
+        sb.Append(string.Join(",\n", samples));
+        sb.Append("\n  ]\n}\n");
         File.WriteAllText(Report, sb.ToString());
     }
 
@@ -470,6 +501,19 @@ public static class RdaBatch
             EditorSceneManager.NewScene(NewSceneSetup.DefaultGameObjects, NewSceneMode.Single);
             var robot = ImportRobot();
             GreenhouseBuilder.Build();
+
+            // 보여 주기용 시점 — 기본 카메라는 원점을 보고 있어 로봇·온실이 화면에 안 들어온다.
+            // Gazebo 기본 시점(gen_gazebo_world 의 <gui><camera>)과 비슷한 각도로 맞춘다.
+            var cam = Camera.main;
+            if (cam == null) {
+                var cg = new GameObject("Main Camera");
+                cg.tag = "MainCamera";
+                cam = cg.AddComponent<Camera>();
+            }
+            cam.transform.position = new Vector3(2.2f, 2.0f, -1.6f);
+            cam.transform.LookAt(new Vector3(0.0f, 1.05f, 0.55f));
+            cam.farClipPlane = 200f;
+            cam.backgroundColor = new Color(0.16f, 0.18f, 0.20f);
 
             var go = new GameObject("RdaRosBridge");
             var br = go.AddComponent<RdaRosBridge>();

@@ -47,6 +47,18 @@ def ros_to_unity_pos(v):
     return np.array([-v[1], v[2], v[0]])
 
 
+def _rpy_matrix(r, p, y):
+    """URDF rpy(고정축 XYZ, = Rz·Ry·Rx) → 3×3 회전행렬."""
+    cr, sr = np.cos(r), np.sin(r)
+    cp, sp = np.cos(p), np.sin(p)
+    cy, sy = np.cos(y), np.sin(y)
+    return np.array([
+        [cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr],
+        [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
+        [-sp,     cp * sr,                cp * cr],
+    ])
+
+
 def ros_to_unity_quat(q):
     """q = (x, y, z, w) → Unity (x, y, z, w)."""
     x, y, z, w = q
@@ -175,6 +187,45 @@ def main():
             if np.abs(np.array(pos) - want).max() > 1e-3:
                 fbad.append(f"{name}: {np.round(pos,4).tolist()} vs {np.round(want,4).tolist()}")
         check("Unity 프레임 위치 = URDF FK(좌표 변환 적용)", not fbad, "; ".join(fbad))
+
+        # 🔴 온실 '형상' 검사 — 개수만 세면 원기둥이 눕거나 상자가 돌아가도 통과한다.
+        #    실제로 그런 결함이 있었다(2026-08-16, 사용자가 화면에서 발견):
+        #    좌표 변환이 ROS 로컬 +Z 를 이미 Unity +Y 로 보내는데 GreenhouseBuilder 가
+        #    원기둥에 Quaternion.Euler(90,0,0) 를 더 곱해 **레일이 거터와 직각으로** 깔렸다
+        #    (rail_L0 축 기대 [1,0,0] ↔ 실측 [0,0,1]). 그래서 축·치수까지 여기서 본다.
+        samples = {s["name"]: s for s in (r.get("greenhouse_samples") or [])}
+        if not samples:
+            print("ℹ 리포트에 greenhouse_samples 가 없다 — 생성기를 갱신하고 RunAll 을 다시 돌릴 것")
+        else:
+            byname = {it["name"]: it for it in items}
+            pbad, abad, sbad = [], [], []
+            for nm, s in samples.items():
+                it = byname.get(nm)
+                if it is None:
+                    continue
+                want_p = ros_to_unity_pos(np.asarray(it["xyz"], float))
+                if np.abs(np.asarray(s["pos"], float) - want_p).max() > 1e-3:
+                    pbad.append(nm)
+                b = np.asarray(s["bounds"], float)
+                if it["type"] == "cylinder":
+                    # 원기둥 축 = 오브젝트 로컬 +Y(transform.up). ROS 로컬 +Z 를 rpy 로 돌린 뒤 변환.
+                    ax = _rpy_matrix(*it["rpy"]) @ np.array([0.0, 0.0, 1.0])
+                    want_a = ros_to_unity_pos(ax)
+                    got_a = np.asarray(s["axis"], float)
+                    na, ng = np.linalg.norm(want_a), np.linalg.norm(got_a)
+                    if na > 0 and ng > 0 and abs(float(np.dot(want_a / na, got_a / ng))) < 0.999:
+                        abad.append(f"{nm}: 기대 {np.round(want_a,3).tolist()} vs {np.round(got_a,3).tolist()}")
+                    # world AABB 의 최대변 = 원기둥 길이(축이 좌표축에 정렬된 경우)
+                    if abs(float(b.max()) - float(it["height"])) > 1e-2:
+                        sbad.append(f"{nm}: 길이 {b.max():.3f} vs {it['height']:.3f}")
+                elif it["type"] == "box":
+                    want_b = np.abs(ros_to_unity_pos(np.asarray(it["size"], float)))
+                    if np.abs(np.sort(b) - np.sort(want_b)).max() > 1e-2:
+                        sbad.append(f"{nm}: {np.round(b,3).tolist()} vs {np.round(want_b,3).tolist()}")
+            check("Unity 온실 위치 = obstacles.yaml", not pbad, f"{len(pbad)}개 불일치: {pbad[:3]}")
+            check("Unity 온실 원기둥 축 = obstacles.yaml", not abad,
+                  f"{len(abad)}개 불일치: {abad[:2]}")
+            check("Unity 온실 치수 = obstacles.yaml", not sbad, f"{len(sbad)}개 불일치: {sbad[:3]}")
 
     print(f"\n통과 {len(_ok)} / 실패 {len(_fail)}  (총 {len(_ok) + len(_fail)})")
     if _fail:
