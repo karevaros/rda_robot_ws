@@ -2628,7 +2628,15 @@ class PregraspDemo(Node):
         self._detach_fruit()          # 수확 끝 = 손에서 놓는다(부착 해제 + 장면에서 제거)
         # ① 재발행 제외 통보 — 이걸 먼저 보낸다. planning scene 에서 지우기만 하면
         #    obstacle_publisher 가 다음 주기(1s)에 되살린다.
-        self._harvest_pub.publish(String(data=name))
+        # 🔴 **해소된 모델 이름**을 보낸다(2026-08-16 수정). 인지 타깃은 `det_N` 이라
+        #    yaml/Gazebo 모델 이름과 다른데, 종전에는 그 `det_N` 을 그대로 보냈다.
+        #    ⇒ obstacle_publisher 의 재발행 제외가 **인지 모드에서 한 번도 안 먹었다**
+        #      (이름이 안 맞으니 조용히 무시된다 — 이번에 Unity 연동하며 발견한 잠재 결함).
+        #    ⇒ Unity 온실도 yaml 이름이라 같은 이유로 열매를 못 지웠다.
+        #    `_gazebo_name` 은 위치로 매칭하고 **모호하면 None** 을 준다(엉뚱한 열매 방지) →
+        #    해소 실패 시에는 종전대로 원래 이름을 보낸다.
+        model = self._gazebo_name(name, p_fruit) or name
+        self._harvest_pub.publish(String(data=model))
         # ② planning scene 에서 즉시 REMOVE(재발행 주기를 기다리지 않게)
         if self.apply_scene is not None:
             co = CollisionObject()

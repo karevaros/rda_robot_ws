@@ -87,6 +87,7 @@ using System.IO;
 using UnityEngine;
 using Unity.Robotics.ROSTCPConnector;
 using RosMessageTypes.Sensor;
+using RosMessageTypes.Std;
 
 public class RdaRosBridge : MonoBehaviour
 {
@@ -94,6 +95,8 @@ public class RdaRosBridge : MonoBehaviour
     public string rosIP = "127.0.0.1";
     public int rosPort = 10000;
     public string jointStatesTopic = "/joint_states";
+    [Tooltip("수확된 객체 이름(std_msgs/String). 그 이름의 온실 오브젝트를 끈다.")]
+    public string harvestedTopic = "/harvested";
     [Tooltip("헤드리스 검증용 기록 파일(비우면 기록 안 함)")]
     public string reportPath = "";
     [Tooltip("이 시간(초) 동안 돌고 스스로 종료. 0 이면 계속.")]
@@ -113,6 +116,8 @@ public class RdaRosBridge : MonoBehaviour
     int _msgs = 0;
     float _t0;
     StreamWriter _log;
+    readonly List<string> _harvested = new List<string>();
+    readonly List<string> _harvestMiss = new List<string>();
     string[] _lastNames = new string[0];
     double[] _lastPos = new double[0];
 
@@ -187,6 +192,17 @@ public class RdaRosBridge : MonoBehaviour
             root.GetDofStartIndices(starts);
             _dofIndex[ab] = (ab.index >= 0 && ab.index < starts.Count) ? starts[ab.index] : -1;
         }
+        // 🔴 미러이므로 **로봇 콜라이더도 끈다.** 켜 두면 접힌 자세에서 자기충돌이 생겨 PhysX 가
+        //    관절을 밀어내고, 그 어긋남이 **누적**된다(실측 2026-08-16: 같은 자세를 세 번 재는데
+        //    tcp 오차가 5.5mm → 23mm → 36.5mm 로 커졌다. 관절값은 매번 정확히 일치했다).
+        //    재현에 접촉 해석은 필요 없다 — 물리·충돌은 Gazebo 몫이다.
+        //    ⚠ 온실 콜라이더는 그대로 둔다(정적이라 로봇을 밀지 않고, 나중에 쓸 수 있다).
+        int offCol = 0;
+        foreach (var ab in FindObjectsOfType<ArticulationBody>(true))
+            foreach (var col in ab.GetComponentsInChildren<Collider>(true))
+                if (col.enabled) { col.enabled = false; offCol++; }
+        Debug.Log($"[RdaRosBridge] 로봇 콜라이더 {offCol}개 비활성(미러 — 접촉 해석 불필요)");
+
         // 미러이므로 중력은 끈다 — 켜 두면 메시지 사이 프레임마다 팔이 처져 '재현' 이 아니게 된다.
         foreach (var ab in FindObjectsOfType<ArticulationBody>(true)) ab.useGravity = false;
 
@@ -202,6 +218,7 @@ public class RdaRosBridge : MonoBehaviour
         ros.RosPort = rosPort;
         ros.Connect();
         ros.Subscribe<JointStateMsg>(jointStatesTopic, OnJointState);
+        ros.Subscribe<StringMsg>(harvestedTopic, OnHarvested);
         Debug.Log($"[RdaRosBridge] {rosIP}:{rosPort} 구독 {jointStatesTopic}");
     }
 
@@ -236,6 +253,37 @@ public class RdaRosBridge : MonoBehaviour
         foreach (var root in touched) root.SetJointPositions(_dofBuf[root]);
     }
 
+    /// 수확 통보 — 그 이름의 온실 오브젝트를 끈다(Destroy 대신 SetActive(false):
+    /// 되돌릴 수 있고, 검사에서 "사라졌다"를 활성 개수로 셀 수 있다).
+    /// 🔴 이름이 맞아야 한다 — 인지 타깃은 `det_N` 이라 온실 yaml 이름과 다르다.
+    ///    그래서 ROS 쪽(`pregrasp_demo._remove_fruit`)이 **해소된 모델 이름**을 보내도록 고쳤다.
+    ///    'reset' 이면 전부 되살린다(데모 재시작용 — obstacle_publisher 와 같은 규약).
+    void OnHarvested(StringMsg msg)
+    {
+        var nm = (msg.data ?? "").Trim();
+        if (nm.Length == 0) return;
+        var root = GameObject.Find("Greenhouse");
+        if (root == null) { Debug.LogWarning("[RdaRosBridge] Greenhouse 루트 없음"); return; }
+        if (nm == "reset" || nm == "*")
+        {
+            foreach (Transform ch in root.transform) ch.gameObject.SetActive(true);
+            _harvested.Clear();
+            Debug.Log("[RdaRosBridge] 수확 표시 해제 — 온실 원복");
+            return;
+        }
+        var t = root.transform.Find(nm);
+        if (t == null)
+        {
+            if (!_harvestMiss.Contains(nm)) _harvestMiss.Add(nm);
+            Debug.LogWarning($"[RdaRosBridge] 수확 통보 '{nm}' 에 해당하는 온실 오브젝트가 없다"
+                             + " (인지 이름 det_N 이 그대로 온 것일 수 있다)");
+            return;
+        }
+        t.gameObject.SetActive(false);
+        if (!_harvested.Contains(nm)) _harvested.Add(nm);
+        Debug.Log($"[RdaRosBridge] 수확 반영 — {nm} 제거 (누적 {_harvested.Count}개)");
+    }
+
     void Update()
     {
         if (quitAfter > 0f && Time.time - _t0 > quitAfter)
@@ -259,6 +307,12 @@ public class RdaRosBridge : MonoBehaviour
         var sb = new System.Text.StringBuilder();
         sb.Append("{\n");
         sb.Append($"  \"received\": {_msgs},\n");
+        int active = 0;
+        var gh = GameObject.Find("Greenhouse");
+        if (gh != null) foreach (Transform ch in gh.transform) if (ch.gameObject.activeSelf) active++;
+        sb.Append($"  \"greenhouse_active\": {active},\n");
+        sb.Append($"  \"harvested\": [{string.Join(", ", _harvested.ConvertAll(x => $"\"{x}\""))}],\n");
+        sb.Append($"  \"harvest_unmatched\": [{string.Join(", ", _harvestMiss.ConvertAll(x => $"\"{x}\""))}],\n");
         sb.Append($"  \"joints_in_scene\": {_joints.Count},\n");
         sb.Append("  \"last\": {");
         var parts = new List<string>();

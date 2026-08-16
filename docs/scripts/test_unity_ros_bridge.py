@@ -77,12 +77,17 @@ def main():
         pts = ", ".join(str(v) for v in a.pose)
         msg = ("{joint_names: [" + ", ".join(names) + "], points: [{positions: ["
                + pts + "], time_from_start: {sec: 4}}]}")
-        # ⚠ --once 는 구독자 연결 전에 끝나 유실된다 → -w 1(구독자 대기) -t 3(3회)
-        subprocess.run(["ros2", "topic", "pub", "-w", "1", "-t", "3",
+        # ⚠ --once 만 쓰면 구독자 연결 전에 끝나 명령이 조용히 유실된다 → `-w 1`(구독자 대기).
+        #    🔴 그렇다고 `-t 3` 으로 여러 번 보내면 **궤적이 그때마다 재실행**된다.
+        #       종전에 그렇게 두고 6초만 기다려 **팔이 움직이는 중에 측정**했고, tcp 가 관절값보다
+        #       한두 스텝 뒤처져 오차가 4mm~27mm 로 들쭉날쭉했다(2026-08-16 실측).
+        #       배치가 틀린 줄 알았으나 **측정자가 틀린 것**이었다 — 정지 후에 재면 1e-06 이다.
+        subprocess.run(["ros2", "topic", "pub", "-w", "1", "--once",
                         "/arm_controller/joint_trajectory",
                         "trajectory_msgs/msg/JointTrajectory", msg],
                        capture_output=True, timeout=60)
-        subprocess.run(["sleep", "6"])
+        # 궤적 4초 + 정지 확인 여유. 움직이는 중에 재면 위 오차가 그대로 들어온다.
+        subprocess.run(["sleep", "10"])
 
     if os.path.exists(report):
         os.remove(report)
@@ -107,21 +112,36 @@ def main():
     g = _imp("_gen_usd_scene", "gen_usd_scene.py")
     RI = _imp("_robot_introspect", "robot_introspect.py")
     sys.path.insert(0, _HERE)
-    from test_unity_export import ros_to_unity_pos          # noqa: E402
+    from test_unity_export import ros_to_unity_pos, _base_placement_tf   # noqa: E402
 
     urdf = os.path.join(proj, "rda_robot.urdf")
     links, joints = g.parse_urdf(urdf)
     c2j = {j["child"]: nm for nm, j in joints.items()}
     chain = RI.fk_chain(joints, c2j, "base_link", "tcp")
     p_base = RI.fk_pos(joints, chain, q)
-    _, W = g.link_world_tf(links, joints)
-    p_world = (W["base_link"] @ np.append(p_base, 1.0))[:3]
+    # 🔴 로봇의 **월드 배치**(mounts.yaml base_placement + 지면 오프셋)를 반드시 반영한다.
+    #    빼면 오차가 정확히 지면 오프셋(0.235m)+yaw 만큼 난다 — 2026-08-16 실측으로 확인.
+    p_world = (_base_placement_tf(proj, urdf) @ np.append(p_base, 1.0))[:3]
 
     want = np.asarray(ros_to_unity_pos(p_world), float)
     got = np.asarray(rep.get("tcp") or [np.nan] * 3, float)
     err = float(np.abs(got - want).max())
     check("Unity tcp = 수신 관절각의 URDF FK", err <= a.tol,
           f"오차 {err:.3e} m (허용 {a.tol:g}) · FK {np.round(want, 6).tolist()} vs Unity {np.round(got, 6).tolist()}")
+
+    # 수확 반영(2026-08-16 신설) — 리포트에 있으면 검사한다.
+    #    ROS 는 `/harvested` 로 **해소된 모델 이름**(det_N → fruit_r0_…)을 보내고 Unity 가 그
+    #    이름의 온실 오브젝트를 끈다. 종전에는 det_N 이 그대로 와서 **조용히 아무것도 안 지워졌다**
+    #    (같은 이유로 obstacle_publisher 의 재발행 제외도 인지 모드에서 무효였다).
+    if "greenhouse_active" in rep:
+        miss = rep.get("harvest_unmatched") or []
+        check("수확 통보 이름이 온실 오브젝트와 맞는다", not miss,
+              f"불일치 {len(miss)}개: {miss[:3]}" if miss
+              else "불일치 0 (det_N 이 그대로 오면 여기서 걸린다)")
+        hv = rep.get("harvested") or []
+        act = int(rep["greenhouse_active"])
+        check("Unity 온실 활성 개수 = 186 − 수확 수", act == 186 - len(hv),
+              f"활성 {act} · 수확 {len(hv)}개 {hv[:3]}")
 
     if not a.no_move:
         moved = max(abs(float(q.get(k, 0.0)) - v)
