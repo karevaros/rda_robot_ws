@@ -1,0 +1,6 @@
+# Scout 2.0 + 500mm 스탠드 — 팔 베이스를 높여 상단 화방 도달권을 넓히는 시험용 구성.
+# 링크명 계약(base_link) 보존을 위해 prefix 없음. 팔은 mounts 에서 parent_frame: stand_top 으로 붙인다.
+label: "Agilex Scout 2.0 + 500mm 스탠드 (도달권 시험용)"
+file: scout_v2_stand50.xacro
+anchor: base_link
+prefix: ""

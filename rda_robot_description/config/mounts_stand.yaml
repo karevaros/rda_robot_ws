@@ -1,0 +1,78 @@
+# 스탠드(500mm) 구성 — 팔 베이스를 높여 상단 화방 도달권을 넓히는 시험용 (2026-08-18)
+#
+#   정본은 mounts.yaml 이다. 이 파일은 **시험용 별도 구성**이며 기본 산출물에 영향을 주지 않는다.
+#   차이는 두 곳뿐:
+#     · models.base      : base__scout_v2_stand50  (scout + 원통 라이저 0.5m)
+#     · mounts.arm       : parent_frame stand_top · xyz z 0.115 → 0.0
+#       (0.115 오프셋은 스탠드가 자기 안에 갖고 있다 → link0 가 정확히 +0.5m 올라간다)
+#
+#   조립: ros2 run rda_robot_assembler compose_urdf --mounts <이 파일> -o <out.urdf>
+#   ⚠ SRDF/ACM 은 링크·형상에 묶여 있다 — 이 구성으로 계획하려면 gen_srdf.py 재실행 필요.
+base_placement:
+  x: 0.0
+  y: 0.0
+  yaw_deg: -90.0
+  z: 0.0
+initial_pose:
+  base: 0.0
+  elbow: 0.0
+  rg2_finger_joint1: 0.0
+  shoulder: 0.0
+  wrist1: 0.0
+  wrist2: 0.0
+  wrist3: 0.0
+models:
+  arm: rb5_850e
+  base: base__scout_v2_stand50
+  endeffector: onrobot_rg2
+  sensor1: d405
+  sensor2: d435i
+mounts:
+  arm:
+    model: rb5_850e
+    parent_frame: stand_top
+    parent_slot: base
+    rpy:
+    - 0.0
+    - 0.0
+    - 1.570796
+    xyz:
+    - 0.0
+    - 0.0
+    - 0.0
+  endeffector:
+    model: onrobot_rg2
+    parent_frame: tcp
+    parent_slot: arm
+    rpy:
+    - 0.0
+    - 0.0
+    - -1.570796
+    xyz:
+    - 0.0
+    - 0.0
+    - 0.0
+  sensor1:
+    model: d405
+    parent_frame: rg2_hand
+    parent_slot: endeffector
+    rpy:
+    - 0.0
+    - 0.0
+    - 0.0
+    xyz:
+    - 0.02
+    - 0.0
+    - 0.03
+  sensor2:
+    model: d435i
+    parent_frame: base_link
+    parent_slot: base
+    rpy:
+    - 0.0
+    - 0.300197
+    - 1.570796
+    xyz:
+    - 0.0
+    - -0.34
+    - 0.6

@@ -1280,6 +1280,25 @@ class PregraspDemo(Node):
         except Exception:
             return None
 
+    def _base_xyz(self):
+        """팔 베이스(link0) 의 **world 3D 위치**. 거리 계산·정렬·도달 사전필터가 쓴다.
+
+        🔴 종전에는 xy 만 TF 로 읽고 **z 를 0.35 로 하드코딩**했다(RB5 를 Scout 상판에 바로
+           얹었을 때의 값). 팔 베이스 높이가 달라지는 구성(예: 스탠드/라이저를 끼운 구성)에서는
+           그 값이 틀리고, 그러면 `_is_harvestable` 의 사전 필터가 **닿는 열매를 배제**한다
+           (2026-08-18 실측으로 드러남: 스탠드 50cm 구성에서 거리 지표가 최대 0.5m 어긋났다).
+           TF 에 이미 z 가 들어 있으므로 그냥 같이 읽는다.
+        """
+        self._ensure_tf()
+        try:
+            tf = self._tf.lookup_transform(self.world,
+                                           self.get_parameter("base_link").value,
+                                           rclpy.time.Time())
+            t = tf.transform.translation
+            return np.array([t.x, t.y, t.z])
+        except Exception:
+            return None
+
     def solve_pregrasp(self, p_fruit, r):
         """자연스러운 접근 기하 + 후보 샘플링.
 
@@ -1533,7 +1552,9 @@ class PregraspDemo(Node):
         if bxy is not None:
             # link0(≈base xy, z 0.35) 로부터 **3D 거리**로 정렬 → 가장 낮고 가까운(도달 쉬운)
             #  열매 우선. (수평거리만 쓰면 팔 한계인 높은 열매를 골라 접근이 어려움.)
-            l0 = np.array([bxy[0], bxy[1], 0.35])
+            l0 = self._base_xyz()
+            if l0 is None:
+                l0 = np.array([bxy[0], bxy[1], 0.35])
             tg.sort(key=lambda t: float(np.linalg.norm(t[1] - l0)))
         n = int(self.get_parameter("max_scan").value)
         self.get_logger().info(f"도달 가능한 열매 탐색(가까운 {min(n, len(tg))}개, 전체 {len(tg)})…")
@@ -1558,9 +1579,13 @@ class PregraspDemo(Node):
             self.get_logger().error("kind:target 열매가 없음 — obstacles.yaml 확인.")
             return
         bxy = self._base_xy()
-        l0 = np.array([bxy[0], bxy[1], 0.35]) if bxy is not None else np.array([0.0, 0.0, 0.35])
+        l0 = self._base_xyz()
+        if l0 is None:
+            l0 = np.array([bxy[0], bxy[1], 0.35]) if bxy is not None else np.array([0.0, 0.0, 0.35])
         tg.sort(key=lambda t: float(np.linalg.norm(t[1] - l0)))
-        self.get_logger().info(f"=== 도달 스캔 시작: 전체 {len(tg)}개 열매 (base link0 xy={l0[:2]}) ===")
+        self.get_logger().info(
+            f"=== 도달 스캔 시작: 전체 {len(tg)}개 열매 "
+            f"(팔 베이스 link0 world = [{l0[0]:.3f}, {l0[1]:.3f}, {l0[2]:.3f}]) ===")
         reach = []
         for name, p, r in tg:
             d = float(np.linalg.norm(p - l0))
@@ -1617,7 +1642,9 @@ class PregraspDemo(Node):
             self.get_logger().error("목표 열매가 없음.")
             return
         bxy = self._base_xy()
-        l0 = np.array([bxy[0], bxy[1], 0.35]) if bxy is not None else np.array([0., 0., 0.35])
+        l0 = self._base_xyz()
+        if l0 is None:
+            l0 = np.array([bxy[0], bxy[1], 0.35]) if bxy is not None else np.array([0., 0., 0.35])
         tg.sort(key=lambda t: float(np.linalg.norm(t[1] - l0)))
         goff = self.grasp_offset      # URDF 에서 유도(또는 파라미터 상수)
         # 기준 자세 = '열매를 잡는 자세'(충돌 무시 IK). 전/후 측정에 동일하게 쓴다.
@@ -1968,7 +1995,9 @@ class PregraspDemo(Node):
         self._bench_wait_scene_stable()
         tg = self._all_targets()
         bxy = self._base_xy()
-        l0 = np.array([bxy[0], bxy[1], 0.35]) if bxy is not None else np.array([0.0, 0.0, 0.35])
+        l0 = self._base_xyz()
+        if l0 is None:
+            l0 = np.array([bxy[0], bxy[1], 0.35]) if bxy is not None else np.array([0.0, 0.0, 0.35])
         tg.sort(key=lambda t: float(np.linalg.norm(t[1] - l0)))
         nmax = int(self.get_parameter("bench_n").value)
         fixed = [t for t in (self.get_parameter("bench_targets").value or []) if t]
@@ -2760,7 +2789,10 @@ class PregraspDemo(Node):
         d0 = float(self.get_parameter("standoff").value)
         reach = float(self.get_parameter("arm_reach").value)
         if bxy is not None:
-            l0 = np.array([bxy[0], bxy[1], 0.35])       # link0 world(≈팔 base)
+            l0 = self._base_xyz()
+            if l0 is None:
+                l0 = np.array([bxy[0], bxy[1], 0.35])   # TF 실패 시에만 종전 상수
+            # link0 world(팔 베이스) — 높이는 URDF/TF 에서 온다(스탠드 구성 대응)
             d = float(np.linalg.norm(p_fruit - l0))
             if d > reach + goff + 0.05 or d < 0.15:      # 명백히 밖/안 → 제외
                 self._hv_why["기하"] = self._hv_why.get("기하", 0) + 1
@@ -2836,7 +2868,9 @@ class PregraspDemo(Node):
         tg = self._all_targets()
         bxy = self._base_xy()
         if bxy is not None and tg:
-            l0 = np.array([bxy[0], bxy[1], 0.35])
+            l0 = self._base_xyz()
+            if l0 is None:
+                l0 = np.array([bxy[0], bxy[1], 0.35])
             tg.sort(key=lambda t: float(np.linalg.norm(t[1] - l0)))
         return tg
 

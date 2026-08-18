@@ -1,0 +1,71 @@
+<?xml version="1.0"?>
+<!-- Scout 2.0 + 500mm 스탠드(라이저) — 팔 베이스를 높여 상단 화방까지 닿게 한다.
+
+     ■ 왜 만들었나 (2026-08-18, 사용자 요청)
+       RB5-850e 는 link0 기준 tcp 최대반경 1.138m 다. 통로↔작물행 가로거리 0.83m(거터 STEP
+       실측이라 고정) + 거터 상면 0.92m 조합에서 이 팔은 z≲1.05m 까지만 닿는다.
+       그래서 obstacles.yaml 의 `truss.first_z` 를 현실값 0.35 에서 **0.10 으로 낮춰** 최하단
+       화방만 겨우 도달권에 넣어 둔 상태였다(그 파일 주석에 기록돼 있다).
+       팔 베이스를 올리면 그 제약이 풀린다 — 이 모델이 그 시험용이다.
+
+     ■ 구조
+       scout base_link ─(fixed, z=0.115)─ stand_link(원통 Ø0.24 × 0.5m) ─ stand_top(빈 프레임)
+       · z=0.115 는 종전 arm 마운트 지점(mounts.yaml 의 arm.xyz z)과 같다 —
+         스탠드가 정확히 "팔이 있던 자리"에서 시작해 0.5m 올린다.
+       · stand_top 에 팔을 붙이면 link0 가 종전보다 정확히 **+0.5m** 올라간다.
+
+     ■ 형상 근거 (임의값이 아니라는 뜻은 아니다 — 아래 ⚠)
+       · 반경 0.12m : 팔 베이스 플랜지(link0 반경 약 0.1m)를 덮는 최소 크기.
+       · 질량 12kg  : 강재 파이프 Ø240×5t×0.5m ≈ 14.5kg 에서 플랜지 포함 개략치.
+       ⚠ **실물 도면이 아니라 시험용 개략 모델이다.** 좌굴·전도 안정성·볼트 체결부는
+         전혀 반영돼 있지 않다. 도달권 변화를 재기 위한 기하 대역일 뿐이다.
+-->
+<robot xmlns:xacro="http://ros.org/wiki/xacro" name="scout_v2_stand50">
+  <xacro:include filename="$(find scout_description)/urdf/scout_v2.xacro"/>
+
+  <xacro:property name="stand_h" value="0.5"/>
+  <xacro:property name="stand_r" value="0.12"/>
+  <xacro:property name="stand_m" value="12.0"/>
+  <!-- 종전 팔 마운트 지점(mounts.yaml arm.xyz z) -->
+  <xacro:property name="stand_base_z" value="0.115"/>
+
+  <link name="stand_link">
+    <visual>
+      <origin xyz="0 0 ${stand_h/2}" rpy="0 0 0"/>
+      <geometry>
+        <cylinder radius="${stand_r}" length="${stand_h}"/>
+      </geometry>
+      <material name="stand_material">
+        <color rgba="0.45 0.47 0.50 1.0"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 ${stand_h/2}" rpy="0 0 0"/>
+      <geometry>
+        <cylinder radius="${stand_r}" length="${stand_h}"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <origin xyz="0 0 ${stand_h/2}" rpy="0 0 0"/>
+      <mass value="${stand_m}"/>
+      <!-- 균질 원통 -->
+      <inertia ixx="${stand_m*(3*stand_r*stand_r + stand_h*stand_h)/12}" ixy="0.0" ixz="0.0"
+               iyy="${stand_m*(3*stand_r*stand_r + stand_h*stand_h)/12}" iyz="0.0"
+               izz="${stand_m*stand_r*stand_r/2}"/>
+    </inertial>
+  </link>
+
+  <joint name="stand_fixed" type="fixed">
+    <parent link="base_link"/>
+    <child link="stand_link"/>
+    <origin xyz="0 0 ${stand_base_z}" rpy="0 0 0"/>
+  </joint>
+
+  <!-- 팔이 붙는 자리. 빈 프레임이라 질량·형상이 없다(강체 하나 안의 좌표 표식). -->
+  <link name="stand_top"/>
+  <joint name="stand_top_fixed" type="fixed">
+    <parent link="stand_link"/>
+    <child link="stand_top"/>
+    <origin xyz="0 0 ${stand_h}" rpy="0 0 0"/>
+  </joint>
+</robot>
