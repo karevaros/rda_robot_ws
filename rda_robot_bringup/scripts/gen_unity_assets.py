@@ -337,6 +337,272 @@ public class RdaRosBridge : MonoBehaviour
 
 
 # ────────────────────────────────────────────────────────── C# (에디터 스크립트)
+
+# ─────────────────── C# (런타임 — 물리 거동 시험, 2026-08-18 신설)
+PHYSICS_CS = r'''// 물리 거동 시험 — **중력에서 팔이 처지는가.** (RDA 7주차 M4 후속, 자동 생성물)
+// 생성기 = rda_robot_bringup/scripts/gen_unity_assets.py
+//
+// ■ 왜 이게 따로 있나
+//   RdaRosBridge 는 **미러**라서 중력과 로봇 콜라이더를 **끈다**. Gazebo 도 control 모드에서
+//   같은 이유로 중력을 끄고 collision 을 제거한다. Isaac 은 프로젝트 범위 밖이다.
+//   ⇒ 2026-07-30 에 URDF 질량·관성에서 유도한 effort 값(base 64 / shoulder 314 / elbow 121 /
+//      wrist 22 Nm)이 **중력에서 팔을 실제로 버티는지**는 3종 어디에서도 확인된 적이 없었다.
+//      이 프로브는 그 한 가지만 본다.
+//
+// ■ 무엇을 재나
+//   ① 관절을 목표 자세로 **순간 세팅**하고 ② 드라이브 목표도 같은 값으로 둔 뒤
+//   ③ 중력을 켠 채 settleSec 만큼 물리를 돌려 ④ 목표에서 얼마나 밀렸는지(도)와
+//   ⑤ tcp 가 얼마나 내려앉았는지(m)를 남긴다. 버티면 0 근처, 못 버티면 팔이 무너진다.
+//
+// ■ 무엇을 재지 않나 (정직하게)
+//   · 접촉/충돌 응답 — 로봇 콜라이더는 끈다. 켜면 자기충돌을 PhysX 가 밀어내며 생기는 오차와
+//     중력 처짐이 섞여 **원인을 못 가른다**(2026-08-16 미러에서 실측된 현상).
+//   · 드라이브 게인 자체의 타당성 — stiffness/damping 은 플레이스홀더이고 CLI 로 바꾼다.
+//     이 시험이 답하는 것은 "**주어진 게인에서 forceLimit 이 부족한가**" 다.
+using System;
+using System.Collections;
+using System.Collections.Generic;
+using System.Globalization;
+using System.IO;
+using System.Linq;
+using System.Text;
+using UnityEngine;
+
+public class RdaPhysicsProbe : MonoBehaviour
+{
+    [Tooltip("물리를 돌리는 시간(초)")]                     public float settleSec = 6f;
+    [Tooltip("xDrive stiffness (플레이스홀더)")]            public float stiffness = 100000f;
+    [Tooltip("xDrive damping (플레이스홀더)")]              public float damping = 10000f;
+    [Tooltip(">0 이면 모든 관절 forceLimit 을 이 값으로 덮어쓴다 — 대조군용")]
+    public float forceLimitOverride = -1f;
+    [Tooltip("목표 자세 'base=0,shoulder=-1.57,...' (라디안·ROS 관절 이름). 비우면 전부 0")]
+    public string poseSpec = "";
+    public string reportPath = "";
+
+    readonly Dictionary<string, ArticulationBody> _joints = new Dictionary<string, ArticulationBody>();
+    readonly Dictionary<ArticulationBody, ArticulationBody> _rootOf =
+        new Dictionary<ArticulationBody, ArticulationBody>();
+    readonly Dictionary<ArticulationBody, int> _dofIndex = new Dictionary<ArticulationBody, int>();
+    readonly Dictionary<string, float> _target = new Dictionary<string, float>();     // 라디안
+    readonly Dictionary<string, float> _forceLimitImported = new Dictionary<string, float>();
+    readonly Dictionary<string, float> _effortUrdf = new Dictionary<string, float>();   // URDF effort(Nm)
+
+    IEnumerator Start()
+    {
+        var argv = Environment.GetCommandLineArgs();
+        for (int i = 0; i < argv.Length - 1; i++)
+        {
+            if (argv[i] == "--settle" && float.TryParse(argv[i + 1], NumberStyles.Float,
+                CultureInfo.InvariantCulture, out var s)) settleSec = s;
+            if (argv[i] == "--stiffness" && float.TryParse(argv[i + 1], NumberStyles.Float,
+                CultureInfo.InvariantCulture, out var k)) stiffness = k;
+            if (argv[i] == "--damping" && float.TryParse(argv[i + 1], NumberStyles.Float,
+                CultureInfo.InvariantCulture, out var d)) damping = d;
+            if (argv[i] == "--force-limit" && float.TryParse(argv[i + 1], NumberStyles.Float,
+                CultureInfo.InvariantCulture, out var f)) forceLimitOverride = f;
+            if (argv[i] == "--pose") poseSpec = argv[i + 1];
+            if (argv[i] == "--report") reportPath = argv[i + 1];
+        }
+        if (string.IsNullOrEmpty(reportPath))
+            reportPath = Path.GetFullPath("rda_unity_physics.json");
+
+        // 🔴 루트를 고정하지 않으면 로봇이 통째로 떨어진다(미러에서 실측된 것과 같은 이유).
+        //    ⚠ 루트는 하나가 아니다 — 바퀴·센서가 별도 아티큘레이션 트리다.
+        int roots = 0;
+        foreach (var ab in FindObjectsOfType<ArticulationBody>(true))
+            if (ab.isRoot) { ab.immovable = true; roots++; }
+
+        // 콜라이더는 끈다 — 위 "무엇을 재지 않나" 참조. 중력 처짐만 남긴다.
+        int offCol = 0;
+        foreach (var ab in FindObjectsOfType<ArticulationBody>(true))
+            foreach (var col in ab.GetComponentsInChildren<Collider>(true))
+                if (col.enabled) { col.enabled = false; offCol++; }
+
+        // 🔴 중력은 **켠다**. 이 프로브의 존재 이유다(미러는 여기서 false 를 넣는다).
+        foreach (var ab in FindObjectsOfType<ArticulationBody>(true)) ab.useGravity = true;
+        Debug.Log($"[RdaPhysicsProbe] 루트 {roots}개 고정 · 콜라이더 {offCol}개 비활성 · 중력 ON");
+
+        var byObject = new Dictionary<string, ArticulationBody>();
+        foreach (var ab in FindObjectsOfType<ArticulationBody>(true))
+            if (ab.jointType == ArticulationJointType.RevoluteJoint ||
+                ab.jointType == ArticulationJointType.PrismaticJoint)
+                byObject[ab.gameObject.name] = ab;
+
+        var mapAsset = Resources.Load<TextAsset>("joint_map");
+        if (mapAsset == null) { Debug.LogError("[RdaPhysicsProbe] joint_map 없음"); Application.Quit(1); yield break; }
+        foreach (var pair in mapAsset.text.Split(','))
+        {
+            var kv = pair.Split(':');
+            if (kv.Length != 2) continue;
+            var jn = kv[0].Trim().Trim('{', '}', '"', ' ', '\n', '\r', '\t');
+            var ln = kv[1].Trim().Trim('{', '}', '"', ' ', '\n', '\r', '\t');
+            if (jn.Length == 0 || ln.Length == 0) continue;
+            if (byObject.TryGetValue(ln, out var ab)) _joints[jn] = ab;
+        }
+
+        foreach (var kv in _joints)
+        {
+            var ab = kv.Value;
+            var root = ab;
+            while (!root.isRoot && root.transform.parent != null)
+            {
+                var p = root.transform.parent.GetComponentInParent<ArticulationBody>();
+                if (p == null) break;
+                root = p;
+            }
+            _rootOf[ab] = root;
+            var starts = new List<int>();
+            root.GetDofStartIndices(starts);
+            _dofIndex[ab] = (ab.index >= 0 && ab.index < starts.Count) ? starts[ab.index] : -1;
+            _target[kv.Key] = 0f;
+            // 임포터가 넣어 준 값을 **덮어쓰기 전에** 기록한다(이것도 측정값이다 — 아래 주의 참조).
+            _forceLimitImported[kv.Key] = ab.xDrive.forceLimit;
+        }
+
+        // 🔴 effort(Nm)는 **URDF 에서 직접** 받는다 — Unity 임포터가 넣어 준 forceLimit 은
+        //    같은 프로젝트에서 실행마다 64 로도 0 으로도 읽혔다(2026-08-18 실측). 0 이면
+        //    토크 상한이 0 이라 드라이브가 아무 힘도 못 내고, 그러면 이 시험은
+        //    "effort 값이 버티는가" 가 아니라 "드라이브 없이 떨어지는가" 를 재게 된다.
+        var effAsset = Resources.Load<TextAsset>("joint_effort");
+        if (effAsset != null)
+        {
+            foreach (var pair in effAsset.text.Split(','))
+            {
+                var kv = pair.Split(':');
+                if (kv.Length != 2) continue;
+                var jn = kv[0].Trim().Trim('{', '}', '"', ' ', '\n', '\r', '\t');
+                var vs = kv[1].Trim().Trim('{', '}', '"', ' ', '\n', '\r', '\t');
+                if (float.TryParse(vs, NumberStyles.Float, CultureInfo.InvariantCulture, out var ev))
+                    _effortUrdf[jn] = ev;
+            }
+        }
+        else Debug.LogWarning("[RdaPhysicsProbe] joint_effort.json 없음 — 임포터 값을 그대로 쓴다");
+
+        foreach (var tok in (poseSpec ?? "").Split(','))
+        {
+            var kv = tok.Split('=');
+            if (kv.Length != 2) continue;
+            if (float.TryParse(kv[1].Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out var v))
+                _target[kv[0].Trim()] = v;
+        }
+
+        // 🔴 드라이브 설정은 **한 프레임 양보한 뒤**에 한다.
+        //    Start 에서 바로 쓰면 URDF Importer 가 붙여 놓은 UrdfJoint 계열 컴포넌트가
+        //    나중에 초기화되며 xDrive 를 통째로 덮어쓴다 — 2026-08-18 실측에서
+        //    forceLimit 이 임포트값(64/314/121/22)에서 **0** 으로 바뀌어 있었다.
+        //    forceLimit 0 = 토크 상한 0 이므로 드라이브가 아무 힘도 못 낸다.
+        //    ⇒ 그 상태로 재면 "effort 값 시험" 이 아니라 "드라이브 없는 자유낙하" 를 재게 된다.
+        yield return null;
+        yield return new WaitForFixedUpdate();
+
+        // 드라이브 설정 — 목표는 도(degree). forceLimit 은 **명시적으로** 넣는다(남의 값을 믿지 않는다).
+        foreach (var kv in _joints)
+        {
+            var ab = kv.Value;
+            var dr = ab.xDrive;
+            dr.stiffness = stiffness;
+            dr.damping = damping;
+            float fl = forceLimitOverride > 0f ? forceLimitOverride
+                       : (_effortUrdf.ContainsKey(kv.Key) ? _effortUrdf[kv.Key] : _forceLimitImported[kv.Key]);
+            dr.forceLimit = fl;
+            dr.target = _target[kv.Key] * Mathf.Rad2Deg;
+            ab.xDrive = dr;
+        }
+        foreach (var kv in _joints)
+            Debug.Log($"[RdaPhysicsProbe] {kv.Key}: forceLimit={kv.Value.xDrive.forceLimit} "
+                      + $"stiffness={kv.Value.xDrive.stiffness} target={kv.Value.xDrive.target}");
+
+        // 관절을 목표 자세로 **순간 세팅** — 루트에서 dof 배열 통째로 써야 한다(개별 세팅은 무시된다).
+        var touched = new HashSet<ArticulationBody>();
+        var buf = new Dictionary<ArticulationBody, List<float>>();
+        foreach (var kv in _joints)
+        {
+            var ab = kv.Value; var root = _rootOf[ab]; int idx = _dofIndex[ab];
+            if (idx < 0) continue;
+            if (!buf.TryGetValue(root, out var list)) { list = new List<float>(); root.GetJointPositions(list); buf[root] = list; }
+            if (idx < list.Count) { list[idx] = _target[kv.Key]; touched.Add(root); }
+        }
+        foreach (var root in touched) root.SetJointPositions(buf[root]);
+
+        yield return new WaitForFixedUpdate();
+
+        // 설정이 실제로 남아 있는지 확인 — 위 함정 때문에 '설정했다' 를 믿지 않는다.
+        var flAfterSet = new Dictionary<string, float>();
+        foreach (var kv in _joints) flAfterSet[kv.Key] = kv.Value.xDrive.forceLimit;
+
+        // 초기 상태(= 처지기 직전) 기록.
+        var tcp = FindDeep(transform.root, "tcp") ?? FindDeepAll("tcp");
+        Vector3 tcp0 = tcp != null ? tcp.position : Vector3.zero;
+
+        float maxDrift = 0f; float tMax = 0f;
+        float t = 0f;
+        while (t < settleSec)
+        {
+            yield return new WaitForFixedUpdate();
+            t += Time.fixedDeltaTime;
+            foreach (var kv in _joints)
+            {
+                float cur = kv.Value.jointPosition[0];               // 라디안
+                float e = Mathf.Abs(cur - _target[kv.Key]);
+                if (e > maxDrift) { maxDrift = e; tMax = t; }
+            }
+        }
+
+        Vector3 tcp1 = tcp != null ? tcp.position : Vector3.zero;
+
+        var sb = new StringBuilder();
+        sb.Append("{\n");
+        sb.Append($"  \"unity\": \"{Application.unityVersion}\",\n");
+        sb.Append($"  \"settle_sec\": {settleSec.ToString("F3", CultureInfo.InvariantCulture)},\n");
+        sb.Append($"  \"fixed_dt\": {Time.fixedDeltaTime.ToString("F5", CultureInfo.InvariantCulture)},\n");
+        sb.Append($"  \"gravity_on\": true,\n");
+        sb.Append($"  \"robot_colliders\": \"disabled\",\n");
+        sb.Append($"  \"stiffness\": {stiffness.ToString("F1", CultureInfo.InvariantCulture)},\n");
+        sb.Append($"  \"damping\": {damping.ToString("F1", CultureInfo.InvariantCulture)},\n");
+        sb.Append($"  \"force_limit_override\": {forceLimitOverride.ToString("F3", CultureInfo.InvariantCulture)},\n");
+        sb.Append($"  \"max_drift_rad\": {maxDrift.ToString("F8", CultureInfo.InvariantCulture)},\n");
+        sb.Append($"  \"max_drift_at_sec\": {tMax.ToString("F3", CultureInfo.InvariantCulture)},\n");
+        sb.Append("  \"joints\": [\n");
+        var rows = new List<string>();
+        foreach (var kv in _joints)
+        {
+            float cur = kv.Value.jointPosition[0];
+            rows.Add($"    {{\"name\": \"{kv.Key}\", "
+                     + $"\"target_rad\": {_target[kv.Key].ToString("F6", CultureInfo.InvariantCulture)}, "
+                     + $"\"actual_rad\": {cur.ToString("F6", CultureInfo.InvariantCulture)}, "
+                     + $"\"error_rad\": {(cur - _target[kv.Key]).ToString("F6", CultureInfo.InvariantCulture)}, "
+                     + $"\"force_limit_used\": {kv.Value.xDrive.forceLimit.ToString("F3", CultureInfo.InvariantCulture)}, "
+                     + $"\"force_limit_after_set\": {flAfterSet[kv.Key].ToString("F3", CultureInfo.InvariantCulture)}, "
+                     + $"\"force_limit_imported\": {_forceLimitImported[kv.Key].ToString("F3", CultureInfo.InvariantCulture)}}}");
+        }
+        sb.Append(string.Join(",\n", rows));
+        sb.Append("\n  ],\n");
+        sb.Append($"  \"tcp_start\": [{tcp0.x.ToString("F6", CultureInfo.InvariantCulture)}, {tcp0.y.ToString("F6", CultureInfo.InvariantCulture)}, {tcp0.z.ToString("F6", CultureInfo.InvariantCulture)}],\n");
+        sb.Append($"  \"tcp_end\": [{tcp1.x.ToString("F6", CultureInfo.InvariantCulture)}, {tcp1.y.ToString("F6", CultureInfo.InvariantCulture)}, {tcp1.z.ToString("F6", CultureInfo.InvariantCulture)}],\n");
+        sb.Append($"  \"tcp_drop_m\": {(tcp0 - tcp1).magnitude.ToString("F6", CultureInfo.InvariantCulture)}\n");
+        sb.Append("}\n");
+        File.WriteAllText(reportPath, sb.ToString());
+        Debug.Log($"[RdaPhysicsProbe] 완료 — 최대 드리프트 {maxDrift:F6} rad · tcp 이동 {(tcp0 - tcp1).magnitude:F6} m");
+        Application.Quit(0);
+    }
+
+    static Transform FindDeep(Transform root, string name)
+    {
+        if (root == null) return null;
+        if (root.name == name) return root;
+        foreach (Transform c in root) { var r = FindDeep(c, name); if (r != null) return r; }
+        return null;
+    }
+
+    static Transform FindDeepAll(string name)
+    {
+        foreach (var go in FindObjectsOfType<GameObject>(true))
+            if (go.name == name) return go.transform;
+        return null;
+    }
+}
+'''
+
 GREENHOUSE_CS = r'''// 온실·작물을 greenhouse.json 에서 읽어 씬에 세운다 (RDA 7주차 M4, 자동 생성물)
 // ROS(FLU) → Unity(RUF) 변환은 Unity Robotics 규약과 동일: pos (x,y,z)→(−y,z,x)
 using System.Collections.Generic;
@@ -633,6 +899,52 @@ public static class RdaBatch
         }
     }
 
+    // ───────────────────────────── 물리 거동 시험(2026-08-18 신설)
+    const string PhysScenePath = "Assets/Scenes/RdaPhysicsScene.unity";
+
+    /// 중력을 켠 채 팔이 버티는지 보는 씬. **미러 씬과 따로 둔다** —
+    /// RdaRosBridge 가 Start 에서 중력을 끄기 때문에 한 씬에 둘을 같이 넣을 수 없다.
+    /// 온실은 넣지 않는다(콜라이더를 끄므로 장면에 있어도 영향이 없고, 기동만 느려진다).
+    public static void BuildPhysicsScene()
+    {
+        try {
+            EditorSceneManager.NewScene(NewSceneSetup.DefaultGameObjects, NewSceneMode.Single);
+            var robot = ImportRobot();
+            PlaceRobot(robot);
+            var go = new GameObject("RdaPhysicsProbe");
+            go.AddComponent<RdaPhysicsProbe>();
+            Directory.CreateDirectory("Assets/Scenes");
+            EditorSceneManager.SaveScene(EditorSceneManager.GetActiveScene(), PhysScenePath);
+            Debug.Log($"[RDA] 물리 시험 씬 저장: {PhysScenePath}");
+            EditorApplication.Exit(0);
+        } catch (Exception e) {
+            Debug.LogError("[RDA] 물리 시험 씬 저장 실패: " + e);
+            EditorApplication.Exit(1);
+        }
+    }
+
+    public static void BuildPhysicsPlayer()
+    {
+        try {
+            var opts = new UnityEditor.BuildPlayerOptions {
+                scenes = new[] { PhysScenePath },
+                // 🔴 미러 플레이어(Build/RdaPlayer)와 **같은 폴더에 빌드하면 안 된다** —
+                //    Unity 는 대상 폴더를 정리하므로 앞서 빌드한 플레이어가 통째로 사라진다
+                //    (2026-08-18 실측: Build/RdaPhysicsPlayer 로 빌드하니 RdaPlayer 가 없어졌다).
+                locationPathName = "Build/physics/RdaPhysicsPlayer",
+                target = UnityEditor.BuildTarget.StandaloneLinux64,
+                options = UnityEditor.BuildOptions.None,
+            };
+            var rep = UnityEditor.BuildPipeline.BuildPlayer(opts);
+            var ok = rep.summary.result == UnityEditor.Build.Reporting.BuildResult.Succeeded;
+            Debug.Log($"[RDA] 물리 플레이어 빌드 {(ok ? "성공" : "실패")} — {rep.summary.totalErrors} errors");
+            EditorApplication.Exit(ok ? 0 : 1);
+        } catch (Exception e) {
+            Debug.LogError("[RDA] 물리 플레이어 빌드 실패: " + e);
+            EditorApplication.Exit(1);
+        }
+    }
+
     /// 헤드리스(-batchmode -nographics) 로 돌릴 리눅스 플레이어를 빌드한다.
     /// ⚠ 사람이 Play 를 누르지 않아도 검증되도록 하려고 만든 것이다.
     public static void BuildPlayer()
@@ -714,6 +1026,7 @@ def build(out_dir, urdf_path, obstacles, mesh_search, mounts_path=None):
     runtime = os.path.join(out_dir, "Assets", "RdaRuntime")
     os.makedirs(runtime, exist_ok=True)
     open(os.path.join(runtime, "RdaRosBridge.cs"), "w").write(BRIDGE_CS)
+    open(os.path.join(runtime, "RdaPhysicsProbe.cs"), "w").write(PHYSICS_CS)
 
     # ROS 관절 이름 → Unity 오브젝트(=URDF 자식 링크) 이름.
     # URDF Importer 가 ArticulationBody 를 자식 링크 오브젝트에 붙이기 때문에 필요하다.
@@ -725,6 +1038,16 @@ def build(out_dir, urdf_path, obstacles, mesh_search, mounts_path=None):
         if j["type"] != "fixed":
             jmap[jn] = j["child"]
     json.dump(jmap, open(os.path.join(res, "joint_map.json"), "w"), indent=1)
+
+    # 🔴 관절 effort(Nm) — **URDF 에서 직접** 넘긴다. Unity URDF Importer 가 ArticulationDrive 의
+    #    forceLimit 에 넣어 주는 값이 실행마다 달라졌다(2026-08-18 실측: 같은 프로젝트에서
+    #    64 로 읽히기도 하고 0 으로 읽히기도 했다. 0 이면 드라이브가 아무 힘도 못 낸다).
+    #    ⇒ 물리 시험은 남의 값을 믿지 않고 이 파일을 쓴다(URDF = 단일 진실원).
+    jeff = {}
+    for jn, j in G.parse_urdf(urdf_path)[1].items():
+        if j["type"] != "fixed" and j.get("effort") is not None:
+            jeff[jn] = float(j["effort"])
+    json.dump(jeff, open(os.path.join(res, "joint_effort.json"), "w"), indent=1)
 
     # 🔴 로봇의 **월드 배치**(base_placement) — Gazebo·데모는 적용하는데 생성기들이 빠뜨렸다.
     #    ROS 쪽은 `world→base_link` 정적 TF 로 (x, y, ground+z, yaw) 를 걸고 Gazebo 는 같은 값을
