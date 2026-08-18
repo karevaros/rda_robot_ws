@@ -45,6 +45,9 @@ def main():
     ap.add_argument("--settle", type=float, default=0.8, help="창을 올린 뒤 대기(초)")
     ap.add_argument("--no-raise", action="store_true")
     ap.add_argument("--list", action="store_true")
+    ap.add_argument("--size", help="캡처 전에 창 크기를 WxH 로 바꾼다(예: 1920x1080). "
+                                   "발표자료용 가로형 1600px+ 요구를 맞추려고 추가(2026-08-18)")
+    ap.add_argument("--move", help="캡처 전에 창을 X,Y 로 옮긴다(예: 0,0 — 듀얼 모니터에서 잘림 방지)")
     a = ap.parse_args()
 
     if a.list:
@@ -67,6 +70,15 @@ def main():
             cands.sort(key=lambda w: len(w[1]))
             wid = int(cands[0][0])
             print(f"[capture] 창 선택: {cands[0][1]} (id {wid})", file=sys.stderr)
+        # 🔴 크기·위치를 먼저 바꾸고 나서 올린다 — 순서를 바꾸면 리사이즈 재그리기가
+        #    캡처에 걸려 화면 절반이 빈 채로 찍힌다(2026-08-18 실측).
+        if a.move:
+            x, y = a.move.split(",")
+            subprocess.run(["xdotool", "windowmove", str(wid), x, y], capture_output=True)
+        if a.size:
+            w, h = a.size.lower().split("x")
+            subprocess.run(["xdotool", "windowsize", str(wid), w, h], capture_output=True)
+            time.sleep(1.5)                      # 리사이즈 후 재그리기 대기
         if not a.no_raise:
             subprocess.run(["xdotool", "windowactivate", "--sync", str(wid)],
                            capture_output=True)
