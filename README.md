@@ -523,6 +523,78 @@ ros2 action send_goal /arm_controller/follow_joint_trajectory \
 > 데이터 채널에 **두 번째 연결**을 여는데, 다중 접속 허용 여부를 확인하지 못했다. 실기 첫
 > 연결에서 ①단독 ②동시 순으로 확인한 뒤 켜는 것을 권한다. 꺼진 채 뜨면 launch 가 경고한다.
 
+### 3-9. 가상환경 3종으로 내보내기 — Gazebo · Isaac Sim · Unity
+
+**같은 통합 URDF 하나**에서 세 시뮬레이터용 산출물을 만든다. 세 번들의 `rda_robot.urdf` 는
+**바이트 동일**하다(md5 대조) — 형상이 갈릴 여지가 없다는 뜻이다.
+
+```bash
+source /opt/ros/humble/setup.bash && source ~/robot_ws/install/setup.bash
+cd ~/robot_ws
+
+# ⓐ Gazebo — 온실 월드(SDF, static 186개) + 통합 URDF
+mkdir -p export/gazebo
+ros2 run rda_robot_bringup gen_gazebo_world.py    > export/gazebo/greenhouse.world
+ros2 run rda_robot_assembler compose_urdf -o export/gazebo/rda_robot.urdf
+
+# ⓑ Isaac Sim — Isaac 없이 Pixar USD 로 직접 쓴다 (pip usd-core)
+ros2 run rda_robot_bringup gen_usd_scene.py --out export/isaac
+
+# ⓒ Unity — 열기만 하면 되는 프로젝트 통째로
+ros2 run rda_robot_bringup gen_unity_assets.py --out export/unity
+```
+
+**검증 — 시뮬레이터 없이도 대부분 돌아간다.**
+
+```bash
+python3 src/docs/scripts/test_usd_export.py                              # 23/23 (Isaac 불필요)
+python3 src/docs/scripts/test_unity_export.py --project export/unity     # 14/14 (Unity 불필요)
+```
+
+Unity 를 설치했다면 배치모드로 열어 **형상까지** 대조한다(14/14 → **20/20**).
+
+```bash
+UNITY=~/unity/Editor/Unity
+$UNITY -batchmode -nographics -quit -projectPath $PWD/export/unity \
+  -executeMethod RdaBatch.RunAll -logFile /tmp/unity_batch.log
+python3 src/docs/scripts/test_unity_export.py --project export/unity     # 20/20
+```
+
+**ROS 연동(미러) · 물리 거동 시험** — 플레이어를 빌드해 두면 사람이 Play 를 누르지 않아도 검증된다.
+
+```bash
+# 미러 — 살아 있는 /joint_states 를 Unity 가 같은 자세로 그린다
+bash src/docs/scripts/setup_ros_tcp_endpoint.sh          # 최초 1회(upstream 버그 패치 포함)
+$UNITY -batchmode -nographics -quit -projectPath $PWD/export/unity -executeMethod RdaBatch.BuildScene
+$UNITY -batchmode -nographics -quit -projectPath $PWD/export/unity -executeMethod RdaBatch.BuildPlayer
+python3 src/docs/scripts/test_unity_ros_bridge.py                        # 7/7
+
+# 물리 — 중력에서 팔이 버티는가 (유도 effort 값 시험)
+$UNITY -batchmode -nographics -quit -projectPath $PWD/export/unity -executeMethod RdaBatch.BuildPhysicsScene
+$UNITY -batchmode -nographics -quit -projectPath $PWD/export/unity -executeMethod RdaBatch.BuildPhysicsPlayer
+python3 src/docs/scripts/test_unity_physics.py --project export/unity    # 8/8
+```
+
+> 🔴 **세 환경의 검증 등급이 다르다 — 같은 것으로 읽으면 안 된다.**
+> **Gazebo** = 실행·수확 실증(제어가 실제로 도는 유일한 환경) ·
+> **Unity** = 실행 검증(형상·장면 20/20) + ROS 재현(7/7) + 중력 거동(8/8) ·
+> **Isaac** = 산출물 + 로컬 수치 검증 23/23, **실행은 프로젝트 범위 밖**(2026-08-16 결정).
+
+> 🔴 **로컬 검증 통과가 실행 보증이 아니다.** Unity 는 로컬 14/14 를 통과한 상태에서 실제로
+> 열어 보니 결함 2건이 나왔고(패키지 모듈 누락 · 리플렉션 인자·코루틴), 화면을 보고서야
+> 온실 원기둥 109개가 누워 있고 로봇이 90° 돌아간 것을 사람이 찾았다. **개수 검사는 형상
+> 검사가 아니다.** 같은 이유로 **Isaac 의 23/23 도 "실행하면 문제없다"는 뜻이 아니다.**
+
+> ⚠ **생성기 재실행은 Unity 프로젝트를 비운다**(`Library` 캐시만 남는다). 씬·플레이어·리포트가
+> 전부 사라지므로 순서는 **생성 → PhysicsScene→PhysicsPlayer → Scene→Player → RunAll** 이다.
+> 정적 검증이 갑자기 14/14 로 보이면 `RdaBatch.RunAll` 을 다시 돌리면 된다.
+
+> ⚠ **물리 시험이 보증하는 범위** — 중력에서의 팔 거동만이다. 로봇 콜라이더를 끈 채 재므로
+> **접촉·충돌 응답은 미검증**이고, 드라이브 게인은 플레이스홀더이며, **PhysX 안의 값이지 실기
+> 정확도가 아니다**.
+
+---
+
 ---
 
 ## 4. 프로젝트 구조
@@ -531,7 +603,7 @@ ros2 action send_goal /arm_controller/follow_joint_trajectory \
 |--------|------|
 | `rda_robot_description` | 모델 라이브러리(`config/models/`), mesh, 결합설정(`config/mounts.yaml`), 온실·작물 정의(`config/obstacles.yaml`), 컨트롤러 설정(`config/controllers*.yaml`), 관절 토크(`config/joint_effort.yaml`), 표시·Gazebo·**실기** launch |
 | `rda_robot_assembler` | 조립 GUI + **통합 URDF 컴포저**(`compose_urdf`) + `mesh2urdf` |
-| `rda_robot_bringup` | 자충돌 모니터, 장애물 발행, 집기 데모, Gazebo 월드 생성, **열매 인지**(`fruit_detector.py`), 수확 조작기·**GUI 실행 패널**(`harvest_panel.py`), **그리퍼 어댑터·안전 감시**(실기) |
+| `rda_robot_bringup` | 자충돌 모니터, 장애물 발행, 집기 데모, Gazebo 월드 생성, **열매 인지**(`fruit_detector.py`), 수확 조작기·**GUI 실행 패널**(`harvest_panel.py`), **그리퍼 어댑터·안전 감시**(실기), **3종 내보내기**(`gen_usd_scene.py`·`gen_unity_assets.py`) |
 | `rda_robot_moveit_config` | MoveIt2 설정(SRDF/ACM/OMPL/3D센서) + `moveit_demo`·`pregrasp_demo`·`perception_demo` launch |
 | `rda_robot_msgs` | 메시지 정의 — `SafetyState`(제어박스 안전 상태) |
 
@@ -549,6 +621,14 @@ config/models/<슬롯>/*.yaml ──────────────┤  →
 rda_robot_    moveit_      pregrasp_    perception_   perception_   real_robot
  display       demo          demo          demo      demo+execute
 (3-1 표시)  (3-3 계획)    (3-4 집기)   (3-5 센싱)    (3-7 구동)    (3-8 실기)
+                                          │
+                              같은 URDF 에서 3종 내보내기 (3-9)
+     ┌────────────────────────┬───────────┴────────────┐
+     ▼                        ▼                        ▼
+gen_gazebo_world.py      gen_usd_scene.py       gen_unity_assets.py
+export/gazebo/           export/isaac/          export/unity/
+ (월드 SDF + URDF)        (USD 번들 16MB)        (Unity 프로젝트)
+     └──────────── rda_robot.urdf 는 3종 모두 바이트 동일 ────────────┘
 ```
 
 시뮬과 실기는 **같은 통합 URDF** 를 쓴다. 차이는 URDF 안의 `ros2_control` 블록 하나뿐이다 —
@@ -752,4 +832,4 @@ mesh 에 별도 제한이 걸려 있다.
 | — | Gazebo 시뮬 + 센싱 옥토맵 + 열매 인지 | ✅ |
 | 6 | 통합 제어 — ros2_control 실구동·MoveIt `execute`·연속 수확·재계획 트리거·GUI 실행 패널(3-7) | ✅ |
 | — | 실기 연동 준비 — 레인보우 제어박스 배선·그리퍼 어댑터·실행 감시·토크 유도(3-8) | ✅ |
-| 7 | 가상환경 컨버팅 — Gazebo ✅ / Isaac Sim·Unity 예정 | 진행 중 |
+| 7 | 가상환경 컨버팅 — 3종 산출·검증(3-9) · Gazebo 실증 / Unity 실행 20/20·연동 7/7·물리 8/8 / Isaac USD 23/23(실행은 범위 밖) | ✅ |
