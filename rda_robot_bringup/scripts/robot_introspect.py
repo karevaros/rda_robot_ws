@@ -315,6 +315,50 @@ def gripper_span(urdf_xml, srdf_xml, tcp_link, approach_axis, gripper_group="gri
     return (lo, hi)
 
 
+def gripper_closing_axis(urdf_xml, srdf_xml, tcp_link, approach_axis,
+                         gripper_group="gripper"):
+    """그리퍼 **닫힘축**(패드가 서로 마주보는 방향) — tcp 로컬 단위벡터, 실패 시 None.
+
+    파지(grasp)는 접근축만 알면 됐다. **절단(cut)은 다르다** — 줄기가 패드 *사이를
+    가로질러야* 잘리므로 줄기 축과 닫힘축의 상대각을 맞춰야 한다(나란하면 아무리
+    닫아도 안 잘린다). 그래서 접근축과 별개로 닫힘축이 필요하다.
+
+    유도: 손가락 링크 원점을 tcp 프레임으로 옮겨, **가장 멀리 떨어진 두 개**를 잇는
+    방향에서 접근축 성분을 뺀다(손가락이 앞으로 뻗은 만큼은 닫힘 방향이 아니다).
+    RG2 실측 = (1, 0, 0). 그리퍼를 바꿔도 URDF 만으로 다시 유도된다(모델 불문).
+    ⚠ 손가락이 1개거나(정의 불가) 두 원점이 겹치면 None — 호출측이 폴백할 것.
+    """
+    joints, c2j = parse_urdf(urdf_xml)
+    grip = group_joints(srdf_xml, joints, c2j, gripper_group, actuated_only=False)
+    grip = list(grip) + mimics_of(joints, grip)
+    finger_links = [joints[n]["child"] for n in grip if n in joints]
+    if not finger_links:
+        finger_links = _movable_children_below(joints, c2j, tcp_link)
+    pts = []
+    for fl in finger_links:
+        T = compose_tf(joints, c2j, tcp_link, fl)
+        if T is not None:
+            pts.append(np.asarray(T[:3, 3], float))
+    if len(pts) < 2:
+        return None
+    best, bd = None, -1.0
+    for i in range(len(pts)):
+        for j in range(i + 1, len(pts)):
+            d = float(np.linalg.norm(pts[i] - pts[j]))
+            if d > bd:
+                best, bd = (pts[i] - pts[j]), d
+    a = np.asarray(approach_axis, float)
+    na = float(np.linalg.norm(a))
+    if best is None or na < 1e-9:
+        return None
+    a = a / na
+    c = best - float(best @ a) * a               # 접근축 성분 제거
+    n = float(np.linalg.norm(c))
+    if n < 1e-6:                                  # 두 손가락이 접근축 위에 겹쳐 있다
+        return None
+    return [float(v) for v in (c / n)]
+
+
 def playback_joints(srdf_xml, urdf_xml, arm_group="arm", gripper_group="gripper"):
     """재생/계획에 필요한 관절 이름을 SRDF+URDF 에서 자동 유도.
 

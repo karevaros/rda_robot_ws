@@ -154,6 +154,20 @@ class PregraspDemo(Node):
         # ⚠ RG2 실측(FK): 관절 1.18=벌림(open, 152mm) · 0=닫힘(close, 34mm). 값이 직관과 반대.
         self.declare_parameter("gripper_open", 1.18)     # 파지 전 벌린 상태
         self.declare_parameter("gripper_close", 0.35)    # 파지(대과 토마토 Ø70mm 물기)
+        # ── 수확 모드 ────────────────────────────────────────────────────────
+        #  grasp = 열매를 하나씩 잡아 딴다(종전 동작, 기본값).
+        #  cut   = **화방대(rachis)를 잘라** 화방 통째로 수확한다. 열매에 손이 안 닿으므로
+        #          손상이 없다. 기하 제약이 달라진다 — 아래 solve_cut 주석 참조.
+        self.declare_parameter("harvest_mode", "grasp")   # grasp | cut
+        self.declare_parameter("cut_ratio", 0.5)          # 절단점: 0=줄기쪽 끝, 1=열매쪽 끝
+        self.declare_parameter("cut_depth", 0.5)          # 날 위치(패드 깊이 구간 비율). 0.5=패드 중앙
+        # 접근축을 줄기 축 둘레로 돌려 보는 각도(수직성은 어느 값에서도 유지된다)
+        self.declare_parameter("cut_beta_deg",
+                               [0.0, -20.0, 20.0, -40.0, 40.0, -60.0, 60.0, -80.0, 80.0])
+        self.declare_parameter("cut_gripper_close", 0.0)  # 절단 = 끝까지 닫는다
+        self.declare_parameter("cut_axis", [float("nan")] * 3)   # 좌표 목표일 때 줄기 축
+        self.declare_parameter("cut_object", "")          # 좌표 목표일 때 충돌허용할 줄기 객체명
+        self.declare_parameter("cut_remove_fruits", True) # 자르면 그 화방 열매도 함께 사라진다
         self.declare_parameter("plan_time", 5.0)
         # 데모 재생 시간(초) — 보기 좋게 각 구간을 늘림
         self.declare_parameter("dur_approach_plan", 3.5)  # home→pre-grasp
@@ -323,6 +337,8 @@ class PregraspDemo(Node):
         self._clear_octomap = self.create_client(Empty, "clear_octomap")
         self._acm_mode = str(gp("acm_mode").value).strip().lower()
         self._tgt_geom = {}          # name -> (center, radius) : 이름→기하 조회(구 영역 배치용)
+        self._tgt_axis = {}          # name -> 줄기 축(단위) : cut 모드 전용
+        self._axis_at = {}           # 좌표 → 줄기 축 : solve_pregrasp 가 이름 없이 호출돼도 찾게
         self._zone_at = None         # 현재 배치된 구 영역 중심(중복 적용 방지)
         self._zone_allowed = []      # 구 영역이 ACM 허용시킨 명명 객체들(되돌리기용)
         # 수확 완료로 장면에서 없앤 열매(실제 수확처럼) — 목록·재계획에서 제외한다.
@@ -444,6 +460,33 @@ class PregraspDemo(Node):
                        if span else "(측정 실패)")
                     + f" → grasp_offset 상수 {self.grasp_offset*100:.1f}cm 유지. "
                       "그리퍼를 바꿨다면 `gen_srdf.py` 를 다시 돌려 SRDF/접근축을 맞출 것.")
+        # D: 절단 모드 — 닫힘축과 날 위치. 파지는 접근축만 알면 되지만 절단은 **줄기가
+        #    패드 사이를 가로질러야** 하므로 닫힘축이 따로 필요하다(모델 불문 유도).
+        self.cut_mode = str(self.get_parameter("harvest_mode").value).strip().lower() == "cut"
+        self.closing_axis = [1.0, 0.0, 0.0]
+        self.cut_offset = self.grasp_offset
+        if urdf and srdf:
+            try:
+                ca = RI.gripper_closing_axis(urdf, srdf, self.ik_link, self.approach_axis,
+                                             self.get_parameter("gripper_group").value)
+                if ca:
+                    self.closing_axis = ca
+                elif self.cut_mode:
+                    self.get_logger().warn(
+                        "닫힘축 자동유도 실패 → tcp X 가정. 절단 자세가 틀어질 수 있다.")
+            except Exception as e:                          # noqa: BLE001
+                self.get_logger().warn(f"닫힘축 유도 실패({e}) → tcp X 가정")
+        if self._pad_span:      # 날은 패드 중앙(cut_depth) — 파지점(0.33)보다 깊다
+            f = min(max(float(self.get_parameter("cut_depth").value), 0.0), 1.0)
+            self.cut_offset = self._pad_span[0] + f * (self._pad_span[1] - self._pad_span[0])
+        if self.cut_mode:
+            self.get_logger().info(
+                f"수확 모드 = cut(화방대 절단) · 닫힘축(tcp)"
+                f"{[round(v, 3) for v in self.closing_axis]} · 날 위치 "
+                f"{self.cut_offset*100:.1f}cm(cut_depth="
+                f"{float(self.get_parameter('cut_depth').value):.2f}) · 절단점 비율 "
+                f"{float(self.get_parameter('cut_ratio').value):.2f}")
+
         # 관절 이름이 바뀌었을 수 있으니 현재자세 dict 재구성(그리퍼는 벌림)
         gopen = float(self.get_parameter("gripper_open").value)
         self.cur = {j: 0.0 for j in self.ARM}
@@ -913,6 +956,73 @@ class PregraspDemo(Node):
             self.get_logger().info(f"ACM: '{obj_name}' 충돌 허용(수확 대상 줄기) — 접근 궤적에서 제외.")
         return ok
 
+    def _allow_cut_only(self, obj_name):
+        """cut 모드 ACM — **지금 자를 그 객체 하나만** 허용하고, 앞서 허용했던 절단 대상은
+        도로 막는다.
+
+        🔴 이게 없으면 조용히 오염된다: 21개 화방대를 훑으며 하나씩 허용만 하면 뒤로 갈수록
+        앞서 훑은 화방대가 전부 '없는 것'이 되어, 뒤쪽 판정이 실제보다 후해진다(이 프로젝트에서
+        여러 번 데인 '판정이 장면을 더럽힌다' 부류). 허용/해제를 **한 번의 apply 로 함께** 건다."""
+        if self.apply_scene is None:
+            return False
+        prev = getattr(self, "_cut_allowed", set())
+        if obj_name is not None and prev == {obj_name}:
+            return True                                   # 이미 그 상태 — 왕복 생략
+        if not self.apply_scene.wait_for_service(timeout_sec=2.0):
+            return False
+        req = GetPlanningScene.Request()
+        req.components.components = PlanningSceneComponents.ALLOWED_COLLISION_MATRIX
+        res = self._call(self.scene, req, 2.0)
+        if res is None:
+            return False
+        acm = res.scene.allowed_collision_matrix
+        want = {} if obj_name is None else {str(obj_name): True}
+        for old in prev:
+            if old != obj_name:
+                want[str(old)] = False                     # 도로 장애물로
+        for nm, val in want.items():
+            if nm in acm.default_entry_names:
+                acm.default_entry_values[list(acm.default_entry_names).index(nm)] = val
+            else:
+                acm.default_entry_names.append(nm)
+                acm.default_entry_values.append(val)
+        ps = PlanningScene()
+        ps.is_diff = True
+        ps.robot_state.is_diff = True
+        ps.allowed_collision_matrix = acm
+        ares = self._call(self.apply_scene, ApplyPlanningScene.Request(scene=ps), 2.0)
+        ok = ares is not None and ares.success
+        if ok:
+            self._cut_allowed = set() if obj_name is None else {str(obj_name)}
+        return ok
+
+    def _cut_pairs(self, q, pairs, tag):
+        """자세 q 에서 무엇이 무엇에 닿는지 접촉 쌍을 세어 `pairs` 에 누적.
+
+        '충돌로 막혔다'까지만 알면 고칠 수가 없다 — 주 줄기인지·거터인지·자기 몸인지에 따라
+        처방이 완전히 다르다(각도 확대 / 베이스 이동 / 툴 형상). 서비스 왕복이 있으므로
+        `screen_why_detail:=true` 일 때만 켠다."""
+        if not bool(self.get_parameter("screen_why_detail").value):
+            return
+        try:
+            _v, cnt = self._state_report({j: q[j] for j in self.ARM if j in q})
+        except Exception:                                   # noqa: BLE001
+            return
+        for k in (cnt or []):
+            key = f"{tag}:{k}"
+            pairs[key] = pairs.get(key, 0) + 1
+
+    def _cut_object_of(self, p_cut, name=None):
+        """절단점 → 그 줄기의 **장면 객체 이름**(없으면 `cut_object` 파라미터, 그것도 없으면 None)."""
+        if name is not None and str(name).startswith("rachis_"):
+            return str(name)
+        pt = np.asarray(p_cut, float)
+        for nm, (q, _r) in self._tgt_geom.items():
+            if nm.startswith("rachis_") and float(np.linalg.norm(np.asarray(q, float) - pt)) < 1e-6:
+                return nm
+        obj = str(self.get_parameter("cut_object").value).strip()
+        return obj or None
+
     # ── Stage 5: 공간(구 영역) 기반 충돌 허용 ────────────────────────────
     #  이름 기반(_stalk_of)은 설계값 장면에서만 통한다. 센싱 장면의 장애물은 `<octomap>`
     #  하나뿐이고 인지 열매(det_N)엔 이름표가 없어 "목표 화방대만 제외"가 성립하지 않는다.
@@ -1160,8 +1270,33 @@ class PregraspDemo(Node):
                 return len(res.scene.world.octomap.octomap.data)
         return -1
 
-    def _remember_target(self, name, p, r):
-        self._tgt_geom[str(name)] = (np.asarray(p, float), float(r))
+    def _remember_target(self, name, p, r, axis=None):
+        p = np.asarray(p, float)
+        self._tgt_geom[str(name)] = (p, float(r))
+        if axis is not None:
+            u = np.asarray(axis, float)
+            nu = float(np.linalg.norm(u))
+            if nu > 1e-9:
+                u = u / nu
+                self._tgt_axis[str(name)] = u
+                # ★ `solve_pregrasp(p, r)` 은 **이름을 안 받는다**(호출처 10곳). 좌표로도
+                #   찾을 수 있게 함께 넣어 둔다 — 호출처를 전부 고치지 않고 축을 잇는 경로.
+                self._axis_at[tuple(np.round(p, 6))] = u
+
+    def _axis_for(self, p, name=None):
+        """절단 대상 줄기 축(단위) 또는 None. 이름 → 좌표 → `cut_axis` 파라미터 순."""
+        if name is not None and str(name) in self._tgt_axis:
+            return self._tgt_axis[str(name)]
+        u = self._axis_at.get(tuple(np.round(np.asarray(p, float), 6)))
+        if u is not None:
+            return u
+        v = self.get_parameter("cut_axis").value
+        if v and len(v) == 3 and not any(math.isnan(float(x)) for x in v):
+            a = np.asarray([float(x) for x in v], float)
+            n = float(np.linalg.norm(a))
+            if n > 1e-9:
+                return a / n
+        return None
 
     def _allow_for_target(self, name, settle=True):
         """접근 계획 전 충돌 허용 적용. 방식은 `acm_mode`(region|stalk|none)로 결정한다.
@@ -1173,6 +1308,19 @@ class PregraspDemo(Node):
         (조건 오염). 여기로 모아 모드로 제어한다."""
         mode = getattr(self, "_acm_mode", "region")
         if mode == "none":
+            return False
+        if self.cut_mode:
+            # ★ 절단은 **점 하나**에 접근한다 → 구 영역을 쓰지 않는다.
+            #   구(ρ)를 쓰면 그 안의 이웃 화방대·줄기까지 통째로 충돌 허용돼 '회피'가
+            #   무의미해진다. 자를 대상 **그 객체 하나만** 이름으로 허용한다(날이 닿아야
+            #   자르므로 그 하나는 반드시 허용해야 한다).
+            obj = self._cut_object_of(self._tgt_geom.get(str(name), (np.zeros(3), 0.0))[0],
+                                      str(name))
+            if obj:
+                return self._allow_cut_only(obj)
+            self.get_logger().warn(
+                f"cut 모드: 허용할 줄기 객체를 못 정했다(name={tgt}). 좌표 목표면 "
+                "`cut_object:=<객체명>` 을 줄 것 — 없으면 날이 줄기에 닿는 순간 충돌로 기각된다.")
             return False
         if mode == "stalk":
             return self._allow_collision(self._stalk_of(name))
@@ -1227,13 +1375,64 @@ class PregraspDemo(Node):
             rclpy.spin_once(self._det_node, timeout_sec=0.0)   # 최신 관측 반영
         return list(self._det)
 
+    @staticmethod
+    def _axis_from_rpy(rpy):
+        """`_seg_cylinder` 가 쓴 rpy=(0, θ, φ) → 원통 축 방향(단위). Rz(φ)Ry(θ)·ez."""
+        _, th, ph = [float(v) for v in rpy]
+        return np.array([math.cos(ph) * math.sin(th),
+                         math.sin(ph) * math.sin(th),
+                         math.cos(th)])
+
+    def _cut_targets(self):
+        """**절단 목표 = 화방대(rachis) 전부** [(name, 절단점, 반경), ...].
+
+        열매(kind:target)와 달리 화방대는 kind:obstacle 이다 — 자를 대상이지 잡을 대상이
+        아니기 때문. obstacles.yaml 을 같은 방식으로 펼쳐 `rachis_*` 만 고른다.
+        절단점 = 원통 중심에서 `cut_ratio` 만큼 이동(0=줄기쪽 끝, 1=열매쪽 끝, 0.5=중앙).
+        축 u 는 rpy 에서 복원해 `_remember_target` 에 함께 저장한다 — **절단 자세는 이 축이
+        없으면 못 푼다**(수직 접근·닫힘축 정렬이 전부 u 기준).
+
+        ⚠ 인지(perception) 출처는 지원하지 않는다 — `fruit_detector` 는 빨강 세그로 열매만
+          찾고 줄기는 안 낸다. cut 모드는 설계값(yaml) 장면 전용이다.
+        """
+        if str(self.get_parameter("target_source").value).lower().startswith("percep"):
+            self.get_logger().warn(
+                "cut 모드는 인지 타깃을 쓸 수 없다(줄기 인지 없음) → yaml 로 진행.")
+        path = self.get_parameter("obstacles_file").value or self._op.default_yaml()
+        import yaml
+        data = yaml.safe_load(open(path)) or {}
+        try:
+            self._op.expand_crops(data)
+        except Exception:
+            pass
+        ratio = min(max(float(self.get_parameter("cut_ratio").value), 0.0), 1.0)
+        out = []
+        for o in data.get("obstacles", []):
+            nm = str(o.get("name", ""))
+            if not nm.startswith("rachis_") or nm in self._harvested:
+                continue
+            if o.get("type") != "cylinder":
+                continue
+            c = np.array([float(v) for v in o["pose"]["xyz"]])
+            u = self._axis_from_rpy(o["pose"].get("rpy", [0.0, 0.0, 0.0]))
+            h = float(o.get("height", 0.0))
+            r = float(o.get("radius", 0.004))
+            p_cut = c + (ratio - 0.5) * h * u          # 중심 기준 ±h/2 구간 위의 한 점
+            self._remember_target(nm, p_cut, r, axis=u)
+            out.append((nm, p_cut, r))
+        return out
+
     def _all_targets(self):
         """집기 목표 열매 전부 [(name, xyz, r), ...].
 
         `target_source` 로 출처를 고른다:
           · yaml       — obstacles.yaml 의 kind:target (설계값, 이름표 있음)
           · perception — 카메라 인지 결과 /detected_fruits (Stage 4, 이름표 없음)
+
+        **cut 모드에서는 열매가 아니라 화방대(rachis)가 목표**다 → `_cut_targets()`.
         """
+        if self.cut_mode:
+            return self._cut_targets()
         if str(self.get_parameter("target_source").value).lower().startswith("percep"):
             # 인지 타깃은 Gazebo 에서 열매를 지우면 저절로 사라지지만, 삭제 직후 한두 프레임은
             # 남아 있을 수 있어 이름으로도 한 번 더 거른다.
@@ -1262,8 +1461,18 @@ class PregraspDemo(Node):
         t = self.get_parameter("target").value
         r = float(self.get_parameter("fruit_radius").value)
         if t and len(t) == 3 and not any(math.isnan(float(v)) for v in t):
-            self._remember_target("param_target", [float(v) for v in t], r)
-            return "param_target", np.array([float(v) for v in t]), r
+            pt = [float(v) for v in t]
+            ax = None
+            if self.cut_mode:
+                v = self.get_parameter("cut_axis").value
+                if v and len(v) == 3 and not any(math.isnan(float(x)) for x in v):
+                    ax = [float(x) for x in v]
+                else:
+                    self.get_logger().error(
+                        "cut 모드에서 좌표 목표를 주려면 `cut_axis:=\"[ux,uy,uz]\"`(줄기 축)도 "
+                        "함께 줘야 한다 — 축이 없으면 '수직으로 들어간다'가 정의되지 않는다.")
+            self._remember_target("param_target", pt, r, axis=ax)
+            return "param_target", np.array(pt), r
         tg = self._all_targets()
         if not tg:
             return None
@@ -1299,8 +1508,8 @@ class PregraspDemo(Node):
         except Exception:
             return None
 
-    def solve_pregrasp(self, p_fruit, r):
-        """자연스러운 접근 기하 + 후보 샘플링.
+    def solve_pregrasp(self, p_fruit, r, name=None):
+        """자연스러운 접근 기하 + 후보 샘플링. (cut 모드면 `solve_cut` 으로 넘긴다.)
 
           · grasp 점  = p_fruit − a·grasp_offset  (TCP 가 열매 앞 grasp_offset 에서 파지)
           · pre-grasp = grasp − a·standoff         (grasp 에서 standoff 만큼 뒤로)
@@ -1309,6 +1518,14 @@ class PregraspDemo(Node):
         **pre-grasp 와 grasp 둘 다** IK/충돌 통과해야 채택 → 직선 접근이 실제로 가능한
         후보만 고른다(그래야 Cartesian 이 폴백 없이 곧게 들어간다).
         반환: dict(q_pre, q_grasp, a, p_pre, p_grasp, quat, c) 또는 None."""
+        if self.cut_mode:
+            u = self._axis_for(p_fruit, name)
+            if u is None:
+                self.get_logger().error(
+                    "cut 모드인데 줄기 축을 모른다 — 좌표 목표면 `cut_axis:=\"[ux,uy,uz]\"` "
+                    "를 함께 줄 것(축이 없으면 수직 접근 자체가 정의되지 않는다).")
+                return None
+            return self.solve_cut(np.asarray(p_fruit, float), u)
         d0 = float(self.get_parameter("standoff").value)
         goff = self.grasp_offset      # URDF 에서 유도(또는 파라미터 상수)
         prefer_home = bool(self.get_parameter("prefer_near_home").value)
@@ -1353,6 +1570,110 @@ class PregraspDemo(Node):
             return None
         _, c, a, p_pre, p_grasp, quat, q, qg = best
         return dict(c=c, a=a, p_pre=p_pre, p_grasp=p_grasp, quat=quat, q=q, q_grasp=qg)
+
+    def solve_cut(self, p_cut, u):
+        """**화방대 절단 자세** — 줄기 축 u 에 수직으로 들어가 날이 줄기를 가로지르게.
+
+        파지와 다른 점(둘 다 지켜야 자른다):
+          ① 접근축 a ⟂ u — 비스듬히 들어가면 날이 줄기를 타고 미끄러진다.
+          ② 닫힘축 c ⟂ u — c 가 u 와 나란하면 줄기가 패드 사이를 **가로지르지 못한다**.
+        ①이 자유도를 1개(줄기 둘레 회전 β)로 줄이고, ②가 **롤을 계산값으로 고정**한다.
+        ⇒ 파지 쪽 (φ,θ,ψ) 격자 샘플링은 여기 쓸 수 없다. 실측 근거: 현 온실 화방대에서
+           롤 0°(종전 `sample_psi_deg` 의 유일한 값) 의 닫힘각은 **20.9°** — 원리적으로
+           못 자르는 자세다. 필요한 롤은 −69.8°(β=0 기준).
+
+        점 하나에 접근한다 — 열매처럼 반경 r 의 구로 두지 않는다(구로 두면 ρ 안의 이웃
+        줄기·열매까지 통째로 충돌 허용돼 '피한다'는 말이 무의미해진다).
+
+          · 날 위치   = p_cut − a·cut_offset   (패드 중앙이 줄기에 오도록)
+          · pre-cut   = 날 위치 − a·standoff
+        반환 형식은 `solve_pregrasp` 와 같다(전략·재생 코드가 그대로 쓴다)."""
+        # ★ 절단은 **날이 대상에 닿아야** 성립한다 → 판정 자체가 그 객체 허용을 전제한다.
+        #   (파지는 열매가 애초에 충돌객체가 아니라 이 단계가 필요 없었다. 실측으로 드러난
+        #    두 모드의 구조적 차이 — 허용 없이 훑으면 21개 전부 IK 실패로 나온다.)
+        if str(self.get_parameter("acm_mode").value).strip().lower() != "none":
+            obj = self._cut_object_of(p_cut)
+            if obj:
+                self._allow_cut_only(obj)
+            else:
+                self.get_logger().warn(
+                    "cut 모드: 허용할 줄기 객체를 못 정했다 → 좌표 목표면 `cut_object:=<객체명>` "
+                    "을 줄 것(없으면 날이 닿는 순간 충돌로 기각된다).")
+        d0 = float(self.get_parameter("standoff").value)
+        off = self.cut_offset
+        prefer_home = bool(self.get_parameter("prefer_near_home").value)
+        base = self._base_xyz()
+        if base is None:
+            bxy = self._base_xy()
+            base = np.array([bxy[0], bxy[1], 0.35]) if bxy is not None else np.zeros(3)
+        a_nom = np.array([p_cut[0] - base[0], p_cut[1] - base[1], 0.0])   # 로봇→목표 수평
+        if float(np.linalg.norm(a_nom)) < 1e-6:
+            a_nom = np.array([1.0, 0.0, 0.0])
+        betas = [math.radians(float(b)) for b in self.get_parameter("cut_beta_deg").value] or [0.0]
+        best = None
+        # 실패 원인 분류 — '도달 불가' 한 줄로 뭉개면 도달권 문제인지 줄기가 막는 건지 못 가른다.
+        why = dict(back=0, ang=0, pre_ik=0, pre_kin=0, blade_ik=0, blade_kin=0)
+        pairs = {}      # 무엇이 막았나(접촉 쌍) — screen_why_detail 일 때만 채운다
+        for bi, beta in enumerate(betas):
+            a = PG.approach_perpendicular(u, a_nom, beta)
+            # 로봇 쪽에서 들어가는 방향만(반대편에서 찌르는 해는 팔이 작물을 관통해야 한다)
+            if float(a @ (p_cut - base)) <= 0.0:
+                why["back"] += 1
+                continue
+            rolls = PG.rolls_for_closing_perp(a, u, self.approach_axis, self.closing_axis)
+            for ri, roll in enumerate(rolls):
+                ang = PG.closing_angle_deg(a, roll, u, self.approach_axis, self.closing_axis)
+                if ang < 60.0:        # 수직에서 30° 이상 벗어나면 절단으로 인정 안 함
+                    why["ang"] += 1
+                    continue
+                quat = PG.mat_to_quat(PG.gaze_rotation(a, roll, self.approach_axis))
+                p_blade = p_cut - a * off
+                p_pre = p_blade - a * d0
+                q = self.solve_ik(p_pre, quat, avoid=True)
+                if q is None:
+                    why["pre_ik"] += 1
+                    # 충돌을 빼고도 안 되면 **기구학**(도달권/자세) 문제다 — 원인이 갈린다.
+                    qf = self.solve_ik(p_pre, quat, avoid=False)
+                    if qf is None:
+                        why["pre_kin"] += 1
+                    else:
+                        self._cut_pairs(qf, pairs, "pre")
+                    continue
+                qg = self.solve_ik(p_blade, quat, avoid=True)
+                if qg is None:
+                    why["blade_ik"] += 1
+                    qf = self.solve_ik(p_blade, quat, avoid=False)
+                    if qf is None:
+                        why["blade_kin"] += 1
+                    else:
+                        self._cut_pairs(qf, pairs, "날")
+                    continue
+                prior = abs(beta) + 0.3 * math.radians(90.0 - ang)   # 명목 β=0·수직 우선
+                if prefer_home:
+                    jd = sum(abs(float(q.get(j, 0.0))) for j in self.ARM)
+                    score = jd + 0.15 * prior
+                else:
+                    score = prior
+                if best is None or score < best[0]:
+                    best = (score, beta, roll, ang, a, p_pre, p_blade, quat, q, qg)
+        if best is None:
+            self.get_logger().info(
+                f"  절단 자세 없음 — 뒤쪽방향 {why['back']} · 닫힘각부족 {why['ang']} · "
+                f"pre-IK 실패 {why['pre_ik']}(그중 기구학 {why['pre_kin']}, 충돌 "
+                f"{why['pre_ik'] - why['pre_kin']}) · 날-IK 실패 {why['blade_ik']}(기구학 "
+                f"{why['blade_kin']}, 충돌 {why['blade_ik'] - why['blade_kin']})")
+            if pairs:
+                top = sorted(pairs.items(), key=lambda kv: -kv[1])[:5]
+                self.get_logger().info(
+                    "    막은 접촉: " + " · ".join(f"{k}×{v}" for k, v in top))
+            return None
+        _, beta, roll, ang, a, p_pre, p_blade, quat, q, qg = best
+        self.get_logger().info(
+            f"절단 자세: 접근축 β={math.degrees(beta):+.0f}° · 롤 {math.degrees(roll):+.1f}° · "
+            f"a·u={float(a @ u):+.1e}(수직) · 닫힘축∠줄기 {ang:.1f}°(90 이 이상적) · "
+            f"날 {off*100:.1f}cm · standoff {d0*100:.0f}cm")
+        c = PG.Candidate(0.0, 0.0, roll, d0, 1.0, 0.5, 2.0, d0)   # 하위 코드가 c.d/c.psi 를 읽는다
+        return dict(c=c, a=a, p_pre=p_pre, p_grasp=p_blade, quat=quat, q=q, q_grasp=qg)
 
     def _diag_straight(self):
         """[진단] 선택된 도달 열매에 대해 넓은 접근각 격자를 훑어, 각 후보의 pre/grasp IK
@@ -1419,6 +1740,11 @@ class PregraspDemo(Node):
           닿았다). → `approach_jl_max` 초과는 직선으로 인정하지 않고, 동률이면 덜 도는 해 우선."""
         from types import SimpleNamespace
         self._allow_for_target(name)
+        if self.cut_mode:
+            # ★ 파지용 (φ,θ) 격자는 절단에 쓸 수 없다 — 그 격자는 롤을 0 으로 두므로
+            #   닫힘축이 줄기와 나란해진다(현 온실 실측 20.9°). 절단 전용 탐색으로 간다.
+            u = self._axis_for(p_fruit, name)
+            return None if u is None else self._best_straight_cut(name, p_fruit, u, thr)
         goff = self.grasp_offset      # URDF 에서 유도(또는 파라미터 상수)
         d0 = float(self.get_parameter("standoff").value)
         bxy = self._base_xy()
@@ -1480,6 +1806,74 @@ class PregraspDemo(Node):
                 f"완전 직선 각도 없음(최고 fraction={best[1]:.2f}"
                 + (f", 관절한도 {jlim:.1f}rad 초과분 제외" if jlim > 0 else "")
                 + ") → OMPL 우회로 접근")
+        return None
+
+    def _best_straight_cut(self, name, p_cut, u, thr=0.99):
+        """절단판 `_best_straight_candidate` — **줄기 수직 제약을 지키면서** 직선 접근이
+        뚫리는 β 를 고른다.
+
+        파지판과 다른 점: 자유변수가 (φ,θ) 격자가 아니라 **줄기 축 둘레 각 β 하나**이고,
+        롤은 매 β 마다 '닫힘축 ⟂ 줄기'로 계산된다(자유변수 아님). 나머지 판정 기준
+        (fraction · 관절경로 한도 · home 근접)은 파지판과 같게 둔다 — 같은 이유로 필요하다."""
+        from types import SimpleNamespace
+        d0 = float(self.get_parameter("standoff").value)
+        off = self.cut_offset
+        prefer_home = bool(self.get_parameter("prefer_near_home").value)
+        jlim = float(self.get_parameter("approach_jl_max").value)
+        base = self._base_xyz()
+        if base is None:
+            bxy = self._base_xy()
+            base = np.array([bxy[0], bxy[1], 0.35]) if bxy is not None else np.zeros(3)
+        a_nom = np.array([p_cut[0] - base[0], p_cut[1] - base[1], 0.0])
+        betas = [float(b) for b in self.get_parameter("cut_beta_deg").value] or [0.0]
+        best = None
+        for bd in betas:
+            a = PG.approach_perpendicular(u, a_nom, math.radians(bd))
+            if float(a @ (p_cut - base)) <= 0.0:
+                continue
+            for roll in PG.rolls_for_closing_perp(a, u, self.approach_axis, self.closing_axis):
+                ang = PG.closing_angle_deg(a, roll, u, self.approach_axis, self.closing_axis)
+                if ang < 60.0:
+                    continue
+                quat = PG.mat_to_quat(PG.gaze_rotation(a, roll, self.approach_axis))
+                p_blade = p_cut - a * off
+                p_pre = p_blade - a * d0
+                self._set({j: 0.0 for j in self.ARM})
+                q = self.solve_ik(p_pre, quat, avoid=True)
+                if q is None:
+                    continue
+                qg = self.solve_ik(p_blade, quat, avoid=True)
+                if qg is None:
+                    continue
+                self._set(q)
+                gp = Pose()
+                gp.position.x, gp.position.y, gp.position.z = map(float, p_blade)
+                (gp.orientation.x, gp.orientation.y,
+                 gp.orientation.z, gp.orientation.w) = map(float, quat)
+                cart = self.cartesian_to(gp)
+                frac = cart[2] if cart is not None else 0.0
+                jl = self._jl_of(cart[1])[0] if cart is not None else 0.0
+                if jlim > 0.0 and frac >= thr and jl > jlim:
+                    frac = 0.0
+                prior = abs(bd) + 0.3 * (90.0 - ang)
+                hdist = sum(abs(float(q.get(j, 0.0))) for j in self.ARM)
+                key = ((round(frac, 3), -hdist, -prior, -round(jl, 2)) if prefer_home
+                       else (round(frac, 3), -prior, -round(jl, 2)))
+                if best is None or key > best[0]:
+                    c = SimpleNamespace(phi=math.radians(bd), theta=0.0, psi=roll,
+                                        d=d0, prior=prior)
+                    best = (key, frac, dict(c=c, a=a, p_pre=p_pre, p_grasp=p_blade,
+                                            quat=quat, q=q, q_grasp=qg), jl, ang)
+        if best is not None and best[1] >= thr:
+            c = best[2]["c"]
+            self.get_logger().info(
+                f"직선 절단접근 채택: β={math.degrees(c.phi):+.0f}° 롤={math.degrees(c.psi):+.1f}° "
+                f"닫힘축∠줄기 {best[4]:.1f}° → fraction={best[1]:.2f} · 접근구간 관절 "
+                f"{best[3]:.2f}rad")
+            return best[2]
+        if best is not None:
+            self.get_logger().info(
+                f"완전 직선 절단각 없음(최고 fraction={best[1]:.2f}) → OMPL 우회로 접근")
         return None
 
     # ══════════════════ 5주차 2차: 접근 궤적 생성(줄기 회피) ══════════════════
@@ -1584,8 +1978,9 @@ class PregraspDemo(Node):
             l0 = np.array([bxy[0], bxy[1], 0.35]) if bxy is not None else np.array([0.0, 0.0, 0.35])
         tg.sort(key=lambda t: float(np.linalg.norm(t[1] - l0)))
         self.get_logger().info(
-            f"=== 도달 스캔 시작: 전체 {len(tg)}개 열매 "
-            f"(팔 베이스 link0 world = [{l0[0]:.3f}, {l0[1]:.3f}, {l0[2]:.3f}]) ===")
+            f"=== 도달 스캔 시작: 전체 {len(tg)}개 "
+            + ("화방대(절단 대상) " if self.cut_mode else "열매 ")
+            + f"(팔 베이스 link0 world = [{l0[0]:.3f}, {l0[1]:.3f}, {l0[2]:.3f}]) ===")
         reach = []
         for name, p, r in tg:
             d = float(np.linalg.norm(p - l0))
@@ -1596,7 +1991,8 @@ class PregraspDemo(Node):
             self.get_logger().info(
                 f"  [{'O' if ok else 'X'}] {name:22s} ({p[0]:+.2f},{p[1]:+.2f},{p[2]:.2f}) "
                 f"link0거리 {d:.3f}m" + (f"  φ={math.degrees(sol['c'].phi):+.0f}°" if ok else ""))
-        self.get_logger().info(f"=== 도달 가능 {len(reach)}/{len(tg)}개 ===")
+        self.get_logger().info(
+            f"=== {'절단' if self.cut_mode else '도달'} 가능 {len(reach)}/{len(tg)}개 ===")
         if reach:
             zs = [p[2] for _, p, _, _ in reach]
             ds = [d for _, _, d, _ in reach]
@@ -2291,7 +2687,7 @@ class PregraspDemo(Node):
         q_pre, q_grasp_ik = sol["q"], sol["q_grasp"]
         p_grasp, quat = sol["p_grasp"], sol["quat"]
         gopen = float(self.get_parameter("gripper_open").value)
-        close = float(self.get_parameter("gripper_close").value)
+        close = self._close_value()
         q_home = {j: 0.0 for j in self.ARM}
         grasp_pose = Pose()
         grasp_pose.position.x, grasp_pose.position.y, grasp_pose.position.z = map(float, p_grasp)
@@ -2333,7 +2729,7 @@ class PregraspDemo(Node):
         순수 모션플래너가 푸는 경로를 그대로 보는 대조군(줄기 사이 직선 진입을 강제하지 않음)."""
         q_grasp = dict(sol["q_grasp"])
         gopen = float(self.get_parameter("gripper_open").value)
-        close = float(self.get_parameter("gripper_close").value)
+        close = self._close_value()
         q_home = {j: 0.0 for j in self.ARM}
 
         # ① home → grasp 직행 (자유공간 OMPL)
@@ -2371,11 +2767,17 @@ class PregraspDemo(Node):
             self._sel_cache = self._select_reachable()
         sel = self._sel_cache
         if sel is None:
-            self.get_logger().error("목표 열매를 찾지 못함 — obstacles.yaml 의 kind:target 확인.")
+            self.get_logger().error(
+                "목표 화방대를 찾지 못함 — obstacles.yaml 의 crops(rachis_*) 확인."
+                if self.cut_mode else
+                "목표 열매를 찾지 못함 — obstacles.yaml 의 kind:target 확인.")
             return False
         name, p_fruit, r, sol = sel
         if sol is None:
             self.get_logger().error(
+                f"[{name}] 절단 자세를 못 찾음 — 도달권 밖이거나 줄기에 수직으로 들어갈 틈이 "
+                "없다(cut_beta_deg 를 넓히거나 base_x/base_y·스탠드로 자세를 바꿔 볼 것)."
+                if self.cut_mode else
                 f"[{name}] 현재 로봇 위치에서 도달 가능한 열매가 없음(도달불가/충돌). "
                 "어셈블러(base_placement)로 로봇을 열매 앞으로 옮겨 저장하거나 base_x/base_y 로 조정.")
             self._publish_markers(p_fruit, r, None, None, reachable=False)
@@ -2386,9 +2788,13 @@ class PregraspDemo(Node):
             d0 = float(self.get_parameter("standoff").value)
             deg = math.degrees
             self.get_logger().info(
-                f"목표 = {name} @ ({p_fruit[0]:.2f},{p_fruit[1]:.2f},{p_fruit[2]:.2f}) r={r:.3f} · "
-                f"pre-grasp φ={deg(sol['c'].phi):+.0f}° θ={deg(sol['c'].theta):+.0f}° "
-                f"(standoff {d0*100:.0f}cm)")
+                (f"목표(절단) = {name} @ ({p_fruit[0]:.2f},{p_fruit[1]:.2f},{p_fruit[2]:.2f}) · "
+                 f"β={deg(sol['c'].phi):+.0f}° 롤={deg(sol['c'].psi):+.1f}° "
+                 f"(standoff {d0*100:.0f}cm · 날 {self.cut_offset*100:.1f}cm)")
+                if self.cut_mode else
+                (f"목표 = {name} @ ({p_fruit[0]:.2f},{p_fruit[1]:.2f},{p_fruit[2]:.2f}) r={r:.3f} · "
+                 f"pre-grasp φ={deg(sol['c'].phi):+.0f}° θ={deg(sol['c'].theta):+.0f}° "
+                 f"(standoff {d0*100:.0f}cm)"))
             self.get_logger().info("전체 궤적 계획 중(최초 1회, 몇 초 소요)…")
             self._plan_cache = self._precompute(name, p_fruit, r, sol)
             _, _, method, checked = self._plan_cache["app"]
@@ -2567,8 +2973,20 @@ class PregraspDemo(Node):
     #  MoveIt 은 빈손인 줄 알고 경로를 짜고, 손에 든 열매가 옆 줄기를 쓸고 지나가도 모른다.
     #  → 파지 시점에 `AttachedCollisionObject` 로 붙이고(그리퍼 링크 기준), 수확이 끝나면 뗀다.
     #  부착 객체는 링크에 매달리므로 로봇이 움직이면 같이 움직인다(자세와 무관하게 한 번만 걸면 됨).
+    def _close_value(self):
+        """그리퍼 닫힘 목표값. cut 모드는 **끝까지** 닫는다(줄기를 끊어야 하므로)."""
+        if self.cut_mode:
+            return float(self.get_parameter("cut_gripper_close").value)
+        return float(self.get_parameter("gripper_close").value)
+
     def _attach_fruit(self, name, r):
         """파지한 열매를 그리퍼(`ik_link`)에 부착. 성공 여부(bool)."""
+        if self.cut_mode:
+            # ⚠ cut 모드는 부착하지 않는다 — 잘린 화방이 손에 남는지(집게형)·떨어지는지
+            #   (절단형)는 **툴에 달렸고 아직 정해지지 않았다**. 모르는 것을 계획에
+            #   가정으로 넣지 않는다. 후퇴는 접근 역재생이라 부착 없이도 안전하다.
+            #   ⇒ 툴이 정해지면 여기에 '잘린 화방 형상'을 부착할 것.
+            return False
         if not bool(self.get_parameter("attach_fruit").value) or self.apply_scene is None:
             return False
         self._detach_fruit()                       # 이전 것이 남아 있으면 먼저 뗀다
@@ -2685,7 +3103,51 @@ class PregraspDemo(Node):
         self.get_logger().info(
             f"수확 완료 → 장면에서 제거: {name}"
             + (" · Gazebo 모델 삭제" if gz else "") + f" (누적 {len(self._harvested)}개)")
+        # ★ cut 모드: 화방대를 자르면 **그 화방에 달린 열매도 함께** 떨어진다.
+        #   (grasp 모드는 열매 하나만 없어진다 — 이게 두 모드의 눈에 보이는 차이다.)
+        if (self.cut_mode and name.startswith("rachis_")
+                and bool(self.get_parameter("cut_remove_fruits").value)):
+            for fn, fp in self._truss_fruits(name):
+                if fn in self._harvested:
+                    continue
+                self._harvested.add(fn)
+                self._tgt_geom.pop(fn, None)
+                self._harvest_pub.publish(String(data=self._gazebo_name(fn, fp) or fn))
+                if self.apply_scene is not None:
+                    co = CollisionObject()
+                    co.header.frame_id = self.world
+                    co.id = fn
+                    co.operation = CollisionObject.REMOVE
+                    ps = PlanningScene()
+                    ps.is_diff = True
+                    ps.robot_state.is_diff = True
+                    ps.world.collision_objects.append(co)
+                    self._call(self.apply_scene, ApplyPlanningScene.Request(scene=ps), 10.0)
+                self._delete_in_gazebo(fn, fp)
+            self.get_logger().info(
+                f"  ↳ 화방 통째 수확 — 딸린 열매 {len(self._truss_fruits(name))}개 함께 제거")
         return True
+
+    def _truss_fruits(self, rachis_name):
+        """`rachis_r{ri}_p{pi}_t{ti}` → 그 화방에 달린 열매 [(name, xyz), ...].
+
+        절단은 열매를 건드리지 않지만 **결과적으로 화방 전체가 떨어진다** → 장면에서도
+        같이 없애야 다음 판정이 실제와 맞는다(안 그러면 공중에 뜬 열매가 남는다)."""
+        import re
+        m = re.match(r"rachis_(r\d+_p\d+_t\d+)$", str(rachis_name))
+        if not m:
+            return []
+        pref = f"fruit_{m.group(1)}_f"
+        path = self.get_parameter("obstacles_file").value or self._op.default_yaml()
+        try:
+            import yaml
+            data = yaml.safe_load(open(path)) or {}
+            self._op.expand_crops(data)
+        except Exception:                                   # noqa: BLE001
+            return []
+        return [(str(o["name"]), np.array([float(v) for v in o["pose"]["xyz"]]))
+                for o in data.get("obstacles", [])
+                if str(o.get("name", "")).startswith(pref)]
 
     def reset_harvested(self):
         """수확 제외 목록을 비워 장면을 원복(재생 데모 반복용).
@@ -2785,7 +3247,7 @@ class PregraspDemo(Node):
           비용을 아끼려고 **2단계**로 본다: 허용 없이 통과하면 그대로 통과(빠름), 실패한
           것만 구 영역을 걸고 한 번 더 본다(열매마다 장면 조작을 하면 목록 도출이 느려진다)."""
         bxy = self._base_xy()
-        goff = self.grasp_offset      # URDF 에서 유도(또는 파라미터 상수)
+        goff = self.cut_offset if self.cut_mode else self.grasp_offset
         d0 = float(self.get_parameter("standoff").value)
         reach = float(self.get_parameter("arm_reach").value)
         if bxy is not None:
@@ -2800,6 +3262,16 @@ class PregraspDemo(Node):
             hv = p_fruit[:2] - bxy
         else:
             hv = np.array([1.0, 0.0])
+        if self.cut_mode:
+            # ★ 절단은 '명목 자세(롤 0)로 빠르게 본다'가 성립하지 않는다 — 롤이 자유변수가
+            #   아니라 **계산값**이고 접근축도 줄기 축에 묶여 있다. 롤 0 으로 물으면 닫힘축이
+            #   줄기와 나란한(못 자르는) 자세를 묻는 셈이라 실제로 되는 것도 전부 탈락한다
+            #   (실측: 같은 구성에서 scan 은 8/21 인데 이 필터로는 0/21 이었다).
+            #   ⇒ 여기서는 축약하지 않고 solve_cut 을 그대로 쓴다(느리지만 기준이 일치한다).
+            ok = self.solve_pregrasp(p_fruit, r, name) is not None
+            if not ok:
+                self._hv_why["절단자세"] = self._hv_why.get("절단자세", 0) + 1
+            return ok
         a = PG._unit(np.array([hv[0], hv[1], 0.0])) if np.linalg.norm(hv) > 1e-6 \
             else np.array([1.0, 0.0, 0.0])
         quat = PG.mat_to_quat(PG.gaze_rotation(a, 0.0, self.approach_axis))

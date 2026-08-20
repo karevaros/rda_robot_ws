@@ -155,6 +155,9 @@ def _setup(context, *args, **kwargs):
         "harvest_ik_tries": int(lc("harvest_ik_tries").perform(context)),
         "screen_nondestructive": (lc("screen_nondestructive").perform(context).lower()
                                   in ("1", "true", "yes")),
+        # 탈락 원인(접촉 쌍)까지 기록 — '충돌로 막혔다'만으론 처방을 못 고른다
+        "screen_why_detail": (lc("screen_why_detail").perform(context).lower()
+                              in ("1", "true", "yes")),
         "reach_repeat": int(lc("reach_repeat").perform(context)),
         "prefer_near_home": lc("prefer_near_home").perform(context).lower() in ("1", "true", "yes"),
         # 직선접근의 '관절 건전성' 한도 — TCP 직선이어도 관절이 크게 도는 해를 거른다(0=끔)
@@ -170,7 +173,20 @@ def _setup(context, *args, **kwargs):
                            lc("bench_planners").perform(context).split(",") if s.strip()],
         "bench_repeat": int(lc("bench_repeat").perform(context)),
         "bench_out": lc("bench_out").perform(context),
+        # ── 수확 모드: grasp(열매 파지) | cut(화방대 절단) ──────────────────
+        "harvest_mode": lc("harvest_mode").perform(context).strip().lower(),
+        "cut_ratio": float(lc("cut_ratio").perform(context)),
+        "cut_depth": float(lc("cut_depth").perform(context)),
+        "cut_beta_deg": [float(v) for v in
+                         lc("cut_beta_deg").perform(context).strip("[] ").split(",") if v.strip()],
+        "cut_gripper_close": float(lc("cut_gripper_close").perform(context)),
+        "cut_object": lc("cut_object").perform(context),
+        "cut_remove_fruits": (lc("cut_remove_fruits").perform(context).lower()
+                              in ("1", "true", "yes")),
     }
+    _ax = lc("cut_axis").perform(context).strip()
+    if _ax and _ax.lower() not in ("auto", "none", ""):
+        demo_params["cut_axis"] = [float(v) for v in _ax.strip("[] ").split(",")]
     use_yaml = lc("use_yaml_target").perform(context).lower() in ("1", "true", "yes")
     if not use_yaml:
         demo_params["target"] = [float(v) for v in
@@ -252,6 +268,26 @@ def generate_launch_description():
                               description="비교할 OMPL 알고리즘(쉼표 구분, ompl_planning.yaml 과 일치)"),
         DeclareLaunchArgument("bench_repeat", default_value="3",
                               description="같은 조합 반복 횟수(OMPL 은 확률적 — 평균용)"),
+        DeclareLaunchArgument("harvest_mode", default_value="grasp",
+                              description="수확 방식: grasp(열매를 하나씩 파지) | "
+                                          "cut(화방대를 잘라 화방 통째로 — 열매 무접촉)"),
+        DeclareLaunchArgument("cut_ratio", default_value="0.5",
+                              description="화방대 위 절단점: 0=주 줄기쪽 끝, 1=열매쪽 끝"),
+        DeclareLaunchArgument("cut_depth", default_value="0.5",
+                              description="날 위치(손가락 패드 깊이 구간의 비율). 0.5=패드 중앙"),
+        DeclareLaunchArgument("cut_beta_deg",
+                              default_value="[0,-20,20,-40,40,-60,60,-80,80]",
+                              description="접근축을 줄기 축 둘레로 돌려 보는 각도[도]. "
+                                          "어느 값에서도 줄기와 수직은 유지된다."),
+        DeclareLaunchArgument("cut_gripper_close", default_value="0.0",
+                              description="절단 시 그리퍼 목표값(0=끝까지 닫음)"),
+        DeclareLaunchArgument("cut_axis", default_value="auto",
+                              description="좌표 목표(use_yaml_target:=false)를 cut 모드로 쓸 때 "
+                                          "줄기 축 [ux,uy,uz]. yaml 목표면 자동으로 구한다."),
+        DeclareLaunchArgument("cut_object", default_value="",
+                              description="좌표 목표를 cut 모드로 쓸 때 충돌 허용할 줄기 객체명"),
+        DeclareLaunchArgument("cut_remove_fruits", default_value="true",
+                              description="자르면 그 화방에 달린 열매도 함께 장면에서 제거"),
         DeclareLaunchArgument("bench_out", default_value="/tmp/bench_strategy",
                               description="원자료 저장 경로 접두사(.json/.csv)"),
         DeclareLaunchArgument("bench_n", default_value="8",
@@ -287,6 +323,8 @@ def generate_launch_description():
                               description="연속 수확 최대 열매 수."),
         DeclareLaunchArgument("prefer_near_home", default_value="true",
                               description="pre-grasp 자세를 home 에 가까운 것으로 선택(접근 전 큰 회전 제거)."),
+        DeclareLaunchArgument("screen_why_detail", default_value="false",
+                              description="탈락한 자세를 막은 **접촉 쌍**을 기록(진단용, 느려짐)"),
         DeclareLaunchArgument("screen_nondestructive", default_value="true",
                               description="수확가능 판정을 비파괴적으로 — 후보마다 "
                                           "구 영역을 넣지 않고 ACM(옥토맵↔그리퍼)만 "

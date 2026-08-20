@@ -189,6 +189,86 @@ def build_candidates(phis, thetas, psis, ds, w_ang, w_roll, w_d, d0):
     return cands
 
 
+# ─────────────── 절단(cut) 기하 — 줄기에 **수직으로** 들어가기 ───────────────
+#
+#  파지(grasp)와 절단(cut)은 기하 제약이 다르다.
+#    · 파지: 접근축이 열매 중심을 향하면 된다. 롤(접근축 둘레)은 자유 → 기본 0.
+#    · 절단: ① 접근축 a 가 줄기 축 u 에 **수직**이어야 하고(비스듬히 들어가면 날이
+#            줄기를 타고 미끄러진다) ② 닫힘축 c 도 u 에 **수직**이어야 한다
+#            (c 가 u 와 나란하면 줄기가 패드 사이를 가로지르지 못해 안 잘린다).
+#    ⇒ a·u=0 과 c·u=0 을 함께 만족해야 하므로 **롤이 자유변수가 아니라 계산값**이다.
+#      (RG2·현 온실 실측: 롤 0° 에서 닫힘축이 화방대와 20.9° — 원리적으로 못 자른다.
+#       필요한 롤은 −69.7°. 종전 탐색공간 sample_psi_deg=[0.0] 엔 아예 없던 자세다.)
+
+
+def perp_basis(u):
+    """u 에 수직인 정규직교 기저 (e1, e2). u 와 함께 우수좌표계를 이룬다."""
+    u = _unit(u)
+    seed = np.array([0.0, 0.0, 1.0])
+    if abs(float(u @ seed)) > 0.9:                 # u 가 수직이면 다른 씨앗
+        seed = np.array([1.0, 0.0, 0.0])
+    e1 = _unit(np.cross(seed, u))
+    e2 = _unit(np.cross(u, e1))
+    return e1, e2
+
+
+def approach_perpendicular(u, nominal, beta=0.0):
+    """줄기 축 u 에 **정확히 수직인** 접근축. nominal 을 u⊥ 평면에 투영해 u 둘레로 beta 회전.
+
+    투영이 0 에 가까우면(nominal 이 u 와 거의 나란) 기저 e1 을 쓴다."""
+    u = _unit(u)
+    n = np.asarray(nominal, float)
+    proj = n - float(n @ u) * u
+    if float(np.linalg.norm(proj)) < 1e-6:
+        proj, _ = perp_basis(u)
+    a = _unit(proj)
+    return _unit(_rot_axis(u, beta) @ a) if beta else a
+
+
+def rolls_for_closing_perp(a, u, approach_axis=(0.0, -1.0, 0.0),
+                           closing_axis=(1.0, 0.0, 0.0)):
+    """`gaze_rotation(a, roll, approach_axis)` 의 **닫힘축이 u 에 수직**이 되는 roll 목록.
+
+    f(roll) = (R(roll)·closing_axis)·u 는 roll 에 대해 P·cos+Q·sin+K 꼴이다(Ry 가 성분
+    0·2 만 섞으므로). 세 점 f(0)·f(π/2)·f(π) 로 P·Q·K 를 뽑아 닫힌 형태로 푼다 —
+    `gaze_rotation` 내부 구현에 의존하지 않으므로 그 쪽이 바뀌어도 따라간다.
+
+    반환: 정확해 목록(보통 2개, [-π,π)). **해가 없으면 |f| 최소인 roll 하나**를 담아
+    돌려준다(a 가 u 에 수직이 아니면 해가 없을 수 있다) — 호출측이 각도를 재확인할 것.
+    """
+    def f(r):
+        R = gaze_rotation(a, r, approach_axis)
+        return float((R @ np.asarray(closing_axis, float)) @ _unit(u))
+    f0, fh, fp = f(0.0), f(math.pi / 2.0), f(math.pi)
+    K = (f0 + fp) / 2.0
+    P = (f0 - fp) / 2.0
+    Q = fh - K
+    A = math.hypot(P, Q)
+    if A < 1e-12:
+        return []
+    ratio = -K / A
+    if abs(ratio) <= 1.0:
+        phase = math.atan2(Q, P)                   # P·cos r + Q·sin r = A·cos(r − phase)
+        d = math.acos(max(-1.0, min(1.0, ratio)))
+        out = []
+        for r in (phase + d, phase - d):
+            r = (r + math.pi) % (2.0 * math.pi) - math.pi
+            if all(abs(r - o) > 1e-6 for o in out):
+                out.append(r)
+        return out
+    # 정확해 없음 → |f| 최소(=가장 수직에 가까운) 롤 하나
+    grid = [i * 2.0 * math.pi / 720.0 - math.pi for i in range(720)]
+    return [min(grid, key=lambda r: abs(f(r)))]
+
+
+def closing_angle_deg(a, roll, u, approach_axis=(0.0, -1.0, 0.0),
+                      closing_axis=(1.0, 0.0, 0.0)):
+    """닫힘축과 줄기 축 u 가 이루는 각[deg] (0~90). **90 이어야 가로질러 자른다.**"""
+    R = gaze_rotation(a, roll, approach_axis)
+    c = R @ np.asarray(closing_axis, float)
+    return math.degrees(math.acos(min(1.0, abs(float(c @ _unit(u))))))
+
+
 # ───────────────────────────────── ROS 노드 ─────────────────────────────────
 class PregraspPose(Node):
     def __init__(self):
