@@ -49,6 +49,15 @@ def _ground_offset(urdf_xml):
         return 0.0
 
 
+def _obstacles_path(context):
+    """장면 정의 파일. 'auto'=정본. 시험용 변형(예: 현실 화방 높이 first_z=0.35)은
+    정본을 고치지 말고 사본을 만들어 이 인자로 넘긴다."""
+    v = LaunchConfiguration("obstacles_file").perform(context).strip()
+    if not v or v.lower() == "auto":
+        return os.path.join(DESC_SRC, "config", "obstacles.yaml")
+    return v
+
+
 def _setup(context, *args, **kwargs):
     import subprocess
 
@@ -59,7 +68,12 @@ def _setup(context, *args, **kwargs):
     urdf_xml = subprocess.check_output(
         ["ros2", "run", "rda_robot_assembler", "compose_urdf", "--mounts", mounts],
         text=True, stderr=subprocess.PIPE, timeout=180)
-    with open(os.path.join(cfg, "config", "rda_robot.srdf")) as f:
+    # SRDF/ACM 은 **링크 이름·형상에 묶여 있다** — 스탠드처럼 링크가 늘어난 구성은
+    #   전용 SRDF 가 필요하다. 정본을 덮어쓰지 않고 인자로 갈아끼운다.
+    srdf_path = lc("srdf_file").perform(context).strip()
+    if not srdf_path or srdf_path.lower() == "auto":
+        srdf_path = os.path.join(cfg, "config", "rda_robot.srdf")
+    with open(srdf_path) as f:
         srdf_xml = f.read()
 
     rd = {"robot_description": urdf_xml}
@@ -108,7 +122,7 @@ def _setup(context, *args, **kwargs):
     obstacles = Node(package="rda_robot_bringup", executable="obstacle_publisher.py",
                      output="screen",
                      parameters=[{
-                         "obstacles_file": os.path.join(DESC_SRC, "config", "obstacles.yaml"),
+                         "obstacles_file": _obstacles_path(context),
                          # 켜면 열매도 충돌객체 — 이웃 열매를 밀고 지나가는 궤적이 잡힌다
                          "publish_targets": (lc("publish_targets").perform(context).lower()
                                              in ("1", "true", "yes")),
@@ -122,6 +136,7 @@ def _setup(context, *args, **kwargs):
         "grasp_offset_auto": lc("grasp_offset_auto").perform(context).lower() in ("1", "true", "yes"),
         "grasp_depth": float(lc("grasp_depth").perform(context)),
         "target_index": int(lc("target_index").perform(context)),
+        "target_name": lc("target_name").perform(context),
         "auto_reachable": lc("auto_reachable").perform(context).lower() in ("1", "true", "yes"),
         "loop": lc("loop").perform(context).lower() in ("1", "true", "yes"),
         # 팔 프레임 — 팔 스왑 시 지정(예: UR10e=arm_base_link/arm_tool0). 기본=RB5 계약.
@@ -144,7 +159,12 @@ def _setup(context, *args, **kwargs):
         "bench_targets": ([t.strip() for t in lc("bench_targets").perform(context).split(",")
                            if t.strip()] or [""]),
         # Stage 6: 접근 전략(작업 플래너) + 자유공간 OMPL 알고리즘 선택
+        # 데모 노드도 같은 장면 파일을 읽어야 한다(목표 열매·화방대 좌표 출처)
+        "obstacles_file": _obstacles_path(context),
         "strategy": lc("strategy").perform(context),
+        "naive_steps": int(lc("naive_steps").perform(context)),
+        "show_collisions": lc("show_collisions").perform(context).lower() in ("1", "true", "yes"),
+        "collision_probe_hz": float(lc("collision_probe_hz").perform(context)),
         "planner_id": lc("planner_id").perform(context),
         "harvest_all": lc("harvest_all").perform(context).lower() in ("1", "true", "yes"),
         "harvest_max": int(lc("harvest_max").perform(context)),
@@ -204,7 +224,11 @@ def _setup(context, *args, **kwargs):
         nodes.append(RegisterEventHandler(
             OnProcessExit(target_action=demo, on_exit=[Shutdown(reason="측정 완료")])))
     if not scanning and lc("rviz").perform(context).lower() in ("1", "true", "yes"):
-        rviz_cfg = os.path.join(cfg, "config", "pregrasp_demo.rviz")
+        rviz_cfg = lc("rviz_config").perform(context).strip()
+        if not rviz_cfg or rviz_cfg.lower() == "auto":
+            rviz_cfg = os.path.join(cfg, "config", "pregrasp_demo.rviz")
+        elif not os.path.isabs(rviz_cfg):
+            rviz_cfg = os.path.join(cfg, "config", rviz_cfg)
         if not os.path.exists(rviz_cfg):
             rviz_cfg = os.path.join(cfg, "config", "moveit.rviz")
         nodes.append(Node(package="rviz2", executable="rviz2", output="screen",
@@ -224,6 +248,9 @@ def generate_launch_description():
         DeclareLaunchArgument("auto_reachable", default_value="true",
                               description="현재 로봇 위치에서 도달 가능한 열매를 자동 선택(가까운 것부터). "
                                           "false 면 target_index 열매만."),
+        DeclareLaunchArgument("target_name", default_value="",
+                              description="목표 열매를 이름으로 고정(예: fruit_r0_p3_t0_f2). "
+                                          "비교 실행에서 두 조건이 같은 열매를 잡게 할 때."),
         DeclareLaunchArgument("target_index", default_value="0",
                               description="auto_reachable=false 일 때 쓸 열매 인덱스"),
         DeclareLaunchArgument("base_x", default_value="auto",
@@ -244,11 +271,12 @@ def generate_launch_description():
         DeclareLaunchArgument("grasp_offset_auto", default_value="true",
                               description="파지 거리를 그리퍼 손가락 실제 깊이에서 유도(모델 불문). "
                                           "끄면 grasp_offset 상수를 그대로 쓴다."),
-        DeclareLaunchArgument("grasp_depth", default_value="0.33",
-                              description="열매 중심을 손가락 패드의 어디에 둘지(0=입구·1=손끝). "
-                                          "RG2 실측 패드 9.1~21.3cm → 0.33 이면 13.1cm. "
-                                          "깊게(0.5) 물수록 손끝이 열매 뒤로 더 들어가야 해서 "
-                                          "센싱 장면에서는 파지 자세가 안 나올 수 있다."),
+        DeclareLaunchArgument("grasp_depth", default_value="-1.0",
+                              description="파지 깊이. **-1=auto(권장)** — 손가락 **파지면**"
+                                          "(맞은편을 향한 면)의 면적중심을 열매 중심 깊이에 맞춘다"
+                                          "(RG2 실측 15.23cm). 0~1 을 주면 종전 방식 = 손가락 "
+                                          "전체 구간(RG2 9.1~21.3cm)의 비율. 비율은 뿌리 구동부와 "
+                                          "날 끝을 함께 세므로 그리퍼가 바뀌면 뜻이 달라진다."),
         DeclareLaunchArgument("loop", default_value="true"),
         DeclareLaunchArgument("scan_all", default_value="false",
                               description="true=데모 대신 전체 열매 도달 리포트 후 종료(RViz 자동 off)"),
@@ -313,7 +341,23 @@ def generate_launch_description():
                               description="target_source=perception 일 때 구독할 토픽"),
         DeclareLaunchArgument("strategy", default_value="harvest_linear",
                               description="접근 전략(작업 플래너): harvest_linear(사전위치→직선접근"
-                                          "→파지→후퇴) / direct(자유공간 모션플래너로 grasp 직행)."),
+                                          "→파지→후퇴) / direct(자유공간 모션플래너로 grasp 직행) / "
+                                          "naive(대조군 — 관절 직선보간) / "
+                                          "frontal(대조군 — 정면에서 직선 진입, 회피 알고리즘 없음)."),
+        DeclareLaunchArgument("naive_steps", default_value="40",
+                              description="naive 대조군의 관절보간 분해 점수(충돌 검사 해상도)."),
+        DeclareLaunchArgument("show_collisions", default_value="false",
+                              description="재생 중 현재 자세의 충돌을 조회해 접촉점을 빨간 마커"
+                                          "(/collision_markers)로 표시. 회피 있음/없음 비교용 — "
+                                          "재생 모드엔 물리가 없어 표시가 없으면 두 동작이 "
+                                          "똑같아 보인다."),
+        DeclareLaunchArgument("collision_probe_hz", default_value="10.0",
+                              description="충돌 조회 주기[Hz]."),
+        DeclareLaunchArgument("srdf_file", default_value="auto",
+                              description="SRDF 경로. 'auto'=정본(rda_robot.srdf). 스탠드처럼 "
+                                          "링크가 늘어난 구성은 전용 SRDF 를 넘겨야 계획이 된다."),
+        DeclareLaunchArgument("obstacles_file", default_value="auto",
+                              description="장면(온실) 정의 yaml. 'auto'=정본 obstacles.yaml."),
         DeclareLaunchArgument("planner_id", default_value="RRTConnect",
                               description="자유공간 구간 OMPL 알고리즘: RRTConnect·RRT·RRTstar·"
                                           "BiTRRT·EST·PRM (ompl_planning.yaml arm 목록)."),
@@ -355,5 +399,9 @@ def generate_launch_description():
         DeclareLaunchArgument("arm_reach", default_value="1.0",
                               description="기하 프리필터용 팔 최대 도달반경[m](link0 기준)."),
         DeclareLaunchArgument("rviz", default_value="true"),
+        DeclareLaunchArgument("rviz_config", default_value="auto",
+                              description="RViz 설정 파일. 'auto'=pregrasp_demo.rviz. "
+                                          "파일명만 주면 패키지 config/ 에서 찾는다"
+                                          "(예: avoid_compare.rviz — 회피 비교용 근접 시점)."),
         OpaqueFunction(function=_setup),
     ])

@@ -1,14 +1,4 @@
-Panels:
-  - Class: rviz_common/Displays
-    Name: Displays
-    Property Tree Widget:
-      Expanded:
-        - /RobotModel1
-        - /Greenhouse1
-        - /PreGrasp1
-      Splitter Ratio: 0.5
-  - Class: rviz_common/Views
-    Name: Views
+Panels: []
 Visualization Manager:
   Class: ""
   Displays:
@@ -81,17 +71,19 @@ Visualization Manager:
     Current:
       Class: rviz_default_plugins/Orbit
       Name: Current View
-      Distance: 3.5
+      Distance: 1.134
       Focal Point:
-        X: 0.4
-        Y: -0.4
-        Z: 0.9
-      Pitch: 0.35
-      Yaw: 2.2
+        X: 0.86
+        Y: 0.22
+        Z: 1.23
+      Pitch: 0.168
+      Yaw: 3.902
       Target Frame: world
 Window Geometry:
   Displays:
-    collapsed: false
-  Height: 840
-  Width: 1200
+    collapsed: true
+  Views:
+    collapsed: true
+  Height: 1080
+  Width: 1600
   QMainWindow State: ""

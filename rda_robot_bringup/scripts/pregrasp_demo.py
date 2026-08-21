@@ -73,6 +73,9 @@ class PregraspDemo(Node):
         # ---- 파라미터 ----
         self.declare_parameter("target", [float("nan")] * 3)
         self.declare_parameter("target_index", 0)
+        # 목표를 **이름으로 고정**(예: fruit_r0_p3_t0_f2). 비교 실행에서 두 조건이 같은
+        #   열매를 잡게 하려면 필요하다 — 자동 선택은 IK 무작위 때문에 실행마다 달라질 수 있다.
+        self.declare_parameter("target_name", "")
         self.declare_parameter("auto_reachable", True)   # 현 위치서 도달가능 열매 자동선택
         self.declare_parameter("max_scan", 12)           # 자동선택 시 가까운 열매 몇개까지 시도
         self.declare_parameter("scan_all", False)        # True=데모 대신 전체 열매 도달 리포트 후 종료
@@ -119,14 +122,26 @@ class PregraspDemo(Node):
         #   **열매 중심이 패드 사이 grasp_depth 지점에 오도록** grasp_offset 을 계산한다.
         #   (RG2 실측: 패드 0.091~0.213m → 0.5 면 0.152m)
         self.declare_parameter("grasp_offset_auto", True)
-        # grasp_depth = 열매 중심을 패드의 어디에 둘지(0=입구·1=손끝).
-        #   ⚠ 깊이는 **공짜가 아니다** — 깊게 물수록 손끝이 열매 **뒤쪽**으로 더 들어가야 한다.
-        #     RG2 에서 0.5(패드 중앙 15.1cm)로 두면 손끝이 열매 중심 뒤 6.1cm 까지 들어가는데,
-        #     센싱(옥토맵) 장면에서는 그 공간이 막혀 파지 자세가 아예 안 나왔다
-        #     (실측: 인지 장면 수확 1회 → 0회, 후보 4개 전부 solve_pregrasp 실패).
-        #   → 기본 0.33 = 패드의 1/3 지점 ≈ 13cm. 종전 상수와 같은 위치라 검증된 동작을 유지한다.
-        #     주변이 트인 곳에서는 0.5 가 파지 안정성에 낫다(그때는 인자로 올릴 것).
-        self.declare_parameter("grasp_depth", 0.33)
+        # grasp_depth = 열매 중심을 패드의 어디에 둘지(0=집게 뿌리·1=손끝).
+        #   🔴 **0.33 은 패드가 아니라 집게 구동부에 무는 값이었다**(2026-08-21 사용자 지적 →
+        #     mesh 실측으로 확인). RG2 손가락 안쪽면은 tcp 기준 **9.66~21.25cm** 인데
+        #     그중 **9.92~11.34cm 는 집게가 도는 두꺼운 뿌리**다(바깥면 폭이 그 구간에만 있다).
+        #     0.33 → grasp_offset 13.1cm ⇒ 열매(r 3.5cm) 앞면이 **9.6cm** = 뿌리에 박힌다.
+        #   → 기본 0.50 → 15.2cm ⇒ 열매가 **11.7~18.7cm** 를 점유해 패드 유효면 안에 들어온다.
+        #   ⚠ 종전 주석은 "깊게 물수록 손끝이 열매 뒤로 더 들어간다" 고 적고 있었으나 **반대다** —
+        #     goff 가 커지면 TCP 가 뒤로 물러서므로 손끝이 열매 뒤로 나가는 양은 오히려 준다
+        #     (0.33: 손끝 여유 +4.7cm → 0.50: +2.6cm). 캐노피 침투는 줄어든다.
+        #   ⚠ 다만 **센싱(옥토맵) 장면에서 0.5 로 파지 자세가 안 나온 실측이 있다**(수확 1→0).
+        #     그건 TCP 가 물러서는 자리(pre-grasp)가 옥토맵에 막힌 것 — 인지 장면에서 쓸 때는
+        #     그 실측을 다시 확인할 것.
+        #   **기본 -1 = auto** — 비율이 아니라 **파지면(맞은편 손가락을 향한 면)의 면적중심**을
+        #     열매 중심에 맞춘다. 비율(0~1)은 뿌리의 두꺼운 구동부와 얇은 날 끝을 함께 세므로
+        #     그리퍼가 바뀌면 같은 값이 다른 곳을 뜻한다. 0~1 을 주면 종전(구간 비율) 방식.
+        self.declare_parameter("grasp_depth", -1.0)
+        # 손바닥(그리퍼 몸체) 앞면과 열매 표면 사이 최소 여유[m]. auto 파지깊이의 하한을 만든다.
+        #   🔴 이게 없으면 파지점이 얕아져 **열매가 손바닥을 파고드는** 자세가 나온다
+        #     (RG2 실측: 여유 없이 두면 1.0cm 침투 — 실제로는 물 수 없다).
+        self.declare_parameter("palm_clearance", 0.005)
         # ── 직선접근 궤적의 '관절 건전성' 검사 (2026-07-29) ─────────────────
         # TCP 가 직선이어도(fraction=1.00) 손목이 특이점 근처를 지나며 관절이 크게 도는 해가
         # 섞여 나온다. 실측: 같은 열매·같은 직선 15cm 에서 접근구간 관절길이가 **0.65rad ↔
@@ -187,6 +202,19 @@ class PregraspDemo(Node):
         # planner_id = 자유공간 구간에 쓸 OMPL 알고리즘. ompl_planning.yaml 의 arm 목록과 일치해야 함
         #   (RRTConnect·RRTstar·PRM·RRT·BiTRRT·EST). 빈 값이면 그룹 기본(RRTConnect).
         self.declare_parameter("planner_id", "RRTConnect")
+        # [대조군] naive 전략의 관절보간 분해 점수. 충돌 검사 해상도를 정하는 값이라
+        #   너무 성기면 얇은 줄기를 통과해도 '충돌 없음' 으로 보인다.
+        self.declare_parameter("naive_steps", 40)
+        # 안전성 재검증 해상도[rad]. 웨이포인트 사이를 이 간격 이하로 잘게 나눠 검사한다.
+        #   🔴 전략마다 웨이포인트 밀도가 다르면(플래너 44점 vs 보간 40점) 충돌 개수를
+        #     그대로 비교할 수 없고, 성긴 표본은 **얇은 줄기를 지나치며 놓친다**.
+        #     0=끔(종전). bench_strategy 재검증에만 적용.
+        self.declare_parameter("verify_max_step", 0.02)
+        # 재생 중 **현재 자세의 충돌 여부**를 조회해 접촉점을 RViz 마커로 띄운다.
+        #   회피 있음/없음 비교를 화면에서 가르는 유일한 표시(재생 모드는 물리가 없어
+        #   부딪혀도 아무 일이 안 일어난다 — 표시가 없으면 두 동작이 똑같아 보인다).
+        self.declare_parameter("show_collisions", False)
+        self.declare_parameter("collision_probe_hz", 10.0)
         # execute = true 면 /joint_states 재생 대신 **실제 컨트롤러(FollowJointTrajectory)로 실구동**.
         #   6주차 ros2_control(gazebo control 모드)과 묶어 센싱 장면에서 팔을 실제로 움직인다.
         #   이때 관절 상태는 gazebo joint_state_broadcaster 가 발행 → 이 노드는 /joint_states 를
@@ -276,6 +304,7 @@ class PregraspDemo(Node):
         self.strategy = str(gp("strategy").value).strip().lower()
         self.planner_id = str(gp("planner_id").value).strip()
         self.execute = bool(gp("execute").value)
+        self.show_col = bool(gp("show_collisions").value)
 
         # ---- 현재 관절 상태(이 노드가 유일 발행자) : home + 그리퍼 벌림(open) ----
         self.cur = {j: 0.0 for j in self.ARM}
@@ -291,6 +320,12 @@ class PregraspDemo(Node):
         self.mk_pub = self.create_publisher(MarkerArray, "pregrasp_markers", latched)
         self.state_pub = self.create_publisher(DisplayRobotState, "pregrasp_robot_state",
                                                latched)
+        # 재생 중 접촉점 표시(show_collisions). 라칭 — 멈춘 순간의 접촉이 화면에 남는다.
+        self.col_pub = self.create_publisher(MarkerArray, "collision_markers", latched)
+        self._col_hit = 0        # 이번 사이클 누적 충돌 표본 수
+        self._col_n = 0          # 이번 사이클 총 조회 표본 수(비율의 분모)
+        self._col_marks = []     # 이번 사이클 접촉점(누적 표시용)
+        self._col_pairs = {}     # 접촉 쌍별 횟수
 
         if self.execute:
             # 컨트롤러 액션 클라이언트. (계획은 upfront·가상 시작상태로 하고 캐시 궤적을 실행하므로
@@ -446,12 +481,51 @@ class PregraspDemo(Node):
             #   그걸 그대로 쓰면 파지점이 **TCP 원점**이 되어 손목으로 열매를 들이받는다.
             ok = bool(span) and span[1] > 0.02 and span[1] > abs(span[0]) * 1.5
             if ok:
-                f = min(max(float(self.get_parameter("grasp_depth").value), 0.0), 1.0)
-                auto = span[0] + f * (span[1] - span[0])
+                gd = float(self.get_parameter("grasp_depth").value)
+                pad_c = None
+                if gd < 0.0:
+                    # auto = **파지면 면적중심**(사용자 규칙: 구 중심 깊이에 집게의 잡는 부분)
+                    try:
+                        ca = RI.gripper_closing_axis(urdf, srdf, self.ik_link,
+                                                     self.approach_axis,
+                                                     self.get_parameter("gripper_group").value)
+                        pad_c = RI.gripper_pad_center(
+                            urdf, srdf, self.ik_link, self.approach_axis,
+                            ca or [1.0, 0.0, 0.0],
+                            self.get_parameter("gripper_group").value,
+                            mesh_resolver=self._resolve_mesh)
+                    except Exception as e:                  # noqa: BLE001
+                        self.get_logger().warn(f"파지면 중심 유도 실패({e})")
+                    if pad_c is None:
+                        self.get_logger().warn(
+                            "파지면 중심을 못 구했다(mesh 없음?) → grasp_depth 0.50 으로 폴백")
+                        gd = 0.50
+                if pad_c is not None:
+                    pc, palm = float(pad_c[0]), float(pad_c[1])
+                    rr0 = float(self.get_parameter("fruit_radius").value)
+                    clr = float(self.get_parameter("palm_clearance").value)
+                    need = palm + rr0 + clr        # 손바닥이 열매를 파고들지 않을 최소 거리
+                    auto = max(pc, need)
+                    f = (auto - span[0]) / max(1e-9, span[1] - span[0])
+                    self.get_logger().info(
+                        f"파지 깊이 auto — 손 앞으로 나온 집게 구간의 파지면 면적중심 "
+                        f"{pc*100:.2f}cm · 손바닥 앞면 {palm*100:.2f}cm "
+                        f"(+열매 {rr0*100:.1f}cm +여유 {clr*100:.1f}cm ⇒ 최소 {need*100:.2f}cm) "
+                        f"→ 파지거리 {auto*100:.2f}cm"
+                        + ("" if auto <= pc + 1e-9 else " ★손바닥 여유가 지배")
+                        + f" (패드 구간 {span[0]*100:.1f}~{span[1]*100:.1f}cm 의 {f:.3f} 지점)")
+                else:
+                    f = min(max(gd, 0.0), 1.0)
+                    auto = span[0] + f * (span[1] - span[0])
+                # 열매가 패드 어디에 물리는지 함께 남긴다 — 값만으로는 '손끝에 걸렸는지
+                #   집게 구동부에 박혔는지' 를 알 수 없다(2026-08-21 사용자 지적).
+                rr = float(self.get_parameter("fruit_radius").value)
                 self.get_logger().info(
                     f"파지 거리 자동유도 — 손가락 패드 깊이 {span[0]*100:.1f}~{span[1]*100:.1f}cm"
                     f"(tcp 기준, 접근축 투영) · grasp_depth={f:.2f} → grasp_offset "
-                    f"{self.grasp_offset*100:.1f} → {auto*100:.1f}cm")
+                    f"{self.grasp_offset*100:.1f} → {auto*100:.1f}cm · "
+                    f"열매(r={rr*100:.1f}cm)가 패드 {(auto - rr)*100:.1f}~{(auto + rr)*100:.1f}cm "
+                    f"구간을 점유 · 손끝 여유 {(span[1] - auto - rr)*100:+.1f}cm")
                 self.grasp_offset, self._pad_span = auto, span
             else:
                 self.get_logger().warn(
@@ -579,6 +653,8 @@ class PregraspDemo(Node):
         dt = 1.0 / self.rate
         nsteps = max(1, int(duration * self.rate))
         segs = len(waypts) - 1
+        probe_every = max(1, int(round(
+            self.rate / max(0.1, float(self.get_parameter("collision_probe_hz").value)))))
         for s in range(nsteps + 1):
             u = s / nsteps                       # 0..1 전체 진행
             if segs <= 0:
@@ -591,9 +667,69 @@ class PregraspDemo(Node):
                        for k in range(len(names))]
             self._set({names[k]: pos[k] for k in range(len(names))})
             self._publish_js()
+            if self.show_col and (s % probe_every == 0):
+                self._probe_collision()
             rclpy.spin_once(self, timeout_sec=0.0)
             time.sleep(dt)
         return self.DONE      # 재생 모드는 장면과 무관하므로 항상 완주
+
+    def _probe_collision(self):
+        """[표시 전용] 지금 자세가 장면과 충돌하는지 조회해 접촉점을 마커로 띄운다.
+
+        🔴 재생 모드에는 물리가 없다 — 회피 없는 궤적이 줄기를 관통해도 화면에서는
+        아무 일도 안 일어난다. 그래서 '무엇을 언제 뚫었는지'를 보이게 만드는 표시가
+        비교의 전부다. 판정 기준은 계획 때와 같은 planning scene·ACM 을 그대로 쓴다
+        (별도 기준을 쓰면 '충돌' 이 측정자 탓인지 궤적 탓인지 못 가린다)."""
+        if self._sv is None:
+            return
+        req = GetStateValidity.Request()
+        req.group_name = self.group
+        js = JointState()
+        js.name = list(self.cur.keys())
+        js.position = [float(v) for v in self.cur.values()]
+        req.robot_state.joint_state = js
+        req.robot_state.is_diff = True
+        res = self._call(self._sv, req, 1.0)
+        if res is None:
+            return
+        self._col_n += 1
+        if res.valid or not res.contacts:
+            return                    # 🔴 지우지 않는다 — 아래 참조(누적)
+        self._col_hit += 1
+        # ★ 접촉점을 **사이클 동안 누적**한다. 순간만 띄우면 궤적이 어디를 스쳤는지
+        #   한 장에 안 남고(캡처·GIF 에서 대부분 프레임이 비어 보인다), 무엇보다
+        #   "몇 번 닿았나" 를 눈으로 셀 수가 없다. 사이클 시작에서만 지운다.
+        for c in res.contacts[:20]:
+            k = f"{c.contact_body_1}|{c.contact_body_2}"
+            self._col_pairs[k] = self._col_pairs.get(k, 0) + 1
+            self._col_marks.append((float(c.position.x), float(c.position.y),
+                                    float(c.position.z)))
+        arr = MarkerArray()
+        for i, (x, y, z) in enumerate(self._col_marks[-200:]):
+            m = Marker()
+            m.header.frame_id = self.world
+            m.header.stamp = self.get_clock().now().to_msg()
+            m.ns, m.id, m.type, m.action = "collision", i, Marker.SPHERE, Marker.ADD
+            m.pose.position.x, m.pose.position.y, m.pose.position.z = x, y, z
+            m.pose.orientation.w = 1.0
+            m.scale.x = m.scale.y = m.scale.z = 0.05
+            # ⚠ 열매가 빨강이다 — 접촉 마커까지 빨강이면 화면에서 구분이 안 된다(실측).
+            m.color.r, m.color.g, m.color.b, m.color.a = 1.0, 0.92, 0.0, 1.0
+            arr.markers.append(m)
+        t = Marker()
+        t.header.frame_id = self.world
+        t.header.stamp = self.get_clock().now().to_msg()
+        t.ns, t.id, t.type, t.action = "collision", 9000, Marker.TEXT_VIEW_FACING, Marker.ADD
+        t.pose.position = res.contacts[0].position
+        t.pose.position.z += 0.22
+        t.pose.orientation.w = 1.0
+        t.scale.z = 0.07
+        t.color.r, t.color.g, t.color.b, t.color.a = 1.0, 0.92, 0.0, 1.0
+        t.text = f"충돌 {self._col_hit}/{self._col_n}"
+        arr.markers.append(t)
+        self.col_pub.publish(arr)
+        pair = f"{res.contacts[0].contact_body_1} ↔ {res.contacts[0].contact_body_2}"
+        self.get_logger().warn(f"  💥 충돌 {len(res.contacts)}건 — {pair}")
 
     #: _execute_traj / _play_waypoints 반환값
     DONE, REPLAN, FAILED = "done", "replan", "failed"
@@ -866,8 +1002,10 @@ class PregraspDemo(Node):
             return None
         return self._traj_to_waypts(res.motion_plan_response.trajectory.joint_trajectory)
 
-    def cartesian_to(self, pose_goal):
-        """현재→목표 TCP pose 직선(Cartesian) 경로. (names, waypts, fraction) 또는 None."""
+    def cartesian_to(self, pose_goal, avoid=True):
+        """현재→목표 TCP pose 직선(Cartesian) 경로. (names, waypts, fraction) 또는 None.
+
+        avoid=False 면 **충돌을 보지 않고** 직선을 뽑는다 — 회피 없는 대조군 전용."""
         req = GetCartesianPath.Request()
         req.header.frame_id = self.world
         req.start_state = self._robot_state()
@@ -879,7 +1017,7 @@ class PregraspDemo(Node):
         req.jump_threshold = float(self.get_parameter("cartesian_jump").value)
         req.revolute_jump_threshold = float(
             self.get_parameter("cartesian_revolute_jump").value)
-        req.avoid_collisions = True
+        req.avoid_collisions = bool(avoid)
         req.waypoints = [pose_goal]
         res = self._call(self.cart, req, 5.0)
         if res is None or not res.solution.joint_trajectory.points:
@@ -1942,6 +2080,20 @@ class PregraspDemo(Node):
         tg = self._all_targets()
         if not tg:
             return None
+        want = str(self.get_parameter("target_name").value or "").strip()
+        if want:
+            hit = [t for t in tg if str(t[0]) == want]
+            if not hit:
+                self.get_logger().error(f"target_name '{want}' 을 장면에서 못 찾음 → 자동 선택으로")
+            else:
+                name, p_fruit, r = hit[0]
+                self.get_logger().info(f"목표 고정(target_name) = {name}")
+                sol = self.solve_pregrasp(p_fruit, r)
+                if sol is None and getattr(self, "_acm_mode", "region") != "none":
+                    self._remember_target(name, p_fruit, r)
+                    if self._allow_for_target(name):
+                        sol = self.solve_pregrasp(p_fruit, r)
+                return name, p_fruit, r, sol
         bxy = self._base_xy()
         if bxy is not None:
             # link0(≈base xy, z 0.35) 로부터 **3D 거리**로 정렬 → 가장 낮고 가까운(도달 쉬운)
@@ -2267,6 +2419,21 @@ class PregraspDemo(Node):
             + (f" · 쌍별 불일치 {bad_pair[:2]}" if bad_pair else ""))
         return False
 
+    @staticmethod
+    def _densify(wp, max_step):
+        """웨이포인트 열을 관절 최대 스텝 max_step[rad] 이하로 선형 세분. 경로 자체는
+        바뀌지 않는다(구간 안이 직선이므로) — 검사 해상도만 올린다."""
+        if max_step <= 0 or not wp or len(wp) < 2:
+            return wp
+        out = [list(map(float, wp[0]))]
+        for a, b in zip(wp[:-1], wp[1:]):
+            a = np.asarray(a, float)
+            b = np.asarray(b, float)
+            k = int(math.ceil(float(np.max(np.abs(b - a))) / max_step))
+            for i in range(1, max(1, k) + 1):
+                out.append(list(a + (b - a) * (i / max(1, k))))
+        return out
+
     def _invalid_waypoints(self, names, wp, sample=1, pairs=None):
         """궤적 웨이포인트를 **현재 ACM 기준**으로 검사해 충돌 상태 개수를 센다.
         조건 C(전 작물 무시)로 만든 궤적이 실제로는 얼마나 위험한지 정량화하는 지표.
@@ -2499,7 +2666,8 @@ class PregraspDemo(Node):
             return dict(name=name, strategy=strat, planner=planner, ok=False,
                         method="IK 실패", checked=False, t=time.time() - t0,
                         jl=None, cl=None, n=0, bad=None, frac=None,
-                        fallback=False, pre_fb=False, home_fb=False,
+                        fallback=False, pre_fb=False, home_fb=False, n_chk=0,
+                        bad_coarse=None,
                         plan_calls=0, plan_fail=0, plan_t=0.0)
         c = self._precompute(name, p_fruit, r, sol)
         t = time.time() - t0
@@ -2526,9 +2694,22 @@ class PregraspDemo(Node):
         if stalk:
             self._set_allow([stalk], True)
         cpairs = {}
-        bad = (self._invalid_waypoints(pre_n, pre_wp, pairs=cpairs)
-               + self._invalid_waypoints(app_n, app_wp, pairs=cpairs)
-               + (self._invalid_waypoints(home_n, home_wp, pairs=cpairs) if home_wp else 0))
+        # ★ 두 전략을 **같은 해상도**로 검사한다 — 웨이포인트 밀도가 다르면 충돌 개수를
+        #   비교할 수 없고, 성긴 표본은 얇은 줄기 사이를 그냥 지나친다.
+        vstep = float(self.get_parameter("verify_max_step").value)
+        d_pre = self._densify(pre_wp, vstep)
+        d_app = self._densify(app_wp, vstep)
+        d_home = self._densify(home_wp, vstep) if home_wp else []
+        n_chk = len(d_pre) + len(d_app) + (len(d_home) if d_home else 0)
+        bad = (self._invalid_waypoints(pre_n, d_pre, pairs=cpairs)
+               + self._invalid_waypoints(app_n, d_app, pairs=cpairs)
+               + (self._invalid_waypoints(home_n, d_home, pairs=cpairs) if d_home else 0))
+        # 같은 궤적을 **원래 웨이포인트만으로도** 재본다. 두 값이 다르면 차이는 궤적이
+        #   아니라 **검사 해상도** 탓이다(성긴 검사는 얇은 줄기 사이를 그냥 지나친다).
+        bad_coarse = (self._invalid_waypoints(pre_n, pre_wp)
+                      + self._invalid_waypoints(app_n, app_wp)
+                      + (self._invalid_waypoints(home_n, home_wp) if home_wp else 0)) \
+            if vstep > 0 else bad
         if cpairs:
             self.get_logger().warn(
                 f"  ⚠ 안전기준 접촉 {bad}wp — 쌍 "
@@ -2538,7 +2719,7 @@ class PregraspDemo(Node):
         m = re.search(r"frac=([0-9.]+)", str(method))
         return dict(name=name, strategy=strat, planner=planner, ok=True,
                     method=method, checked=bool(checked), t=t,
-                    jl=jl, cl=cl, n=nwp, bad=bad,
+                    jl=jl, cl=cl, n=nwp, bad=bad, n_chk=n_chk, bad_coarse=bad_coarse,
                     bad_pairs=";".join(f"{k}×{v}" for k, v in sorted(
                         cpairs.items(), key=lambda x: -x[1])),
                     frac=(float(m.group(1)) if m else None),
@@ -2587,7 +2768,9 @@ class PregraspDemo(Node):
                             f"{'OK ' if res['ok'] else '실패'} t={res['t']:5.1f}s "
                             f"관절={('%.2f' % res['jl']) if res['jl'] is not None else '  - '}rad "
                             f"TCP={('%.2f' % res['cl']) if res['cl'] is not None else '  - '}m "
-                            f"pts={res['n']:3d} 충돌wp={res['bad'] if res['bad'] is not None else '-'} "
+                            f"pts={res['n']:3d} "
+                            f"충돌wp={res['bad'] if res['bad'] is not None else '-'}"
+                            f"/{res.get('n_chk', 0)}(성긴검사 {res.get('bad_coarse')}) "
                             f"{'검증O' if res['checked'] else '검증X'}"
                             f"{' 폴백' if res.get('fallback') else '    '} method={res['method']}")
         self._bench_strategy_summary(rows, strats, planners, len(picked), rep)
@@ -2755,10 +2938,186 @@ class PregraspDemo(Node):
                     q_pre=q_grasp, q_grasp=q_grasp, q_home=q_home,
                     gopen=gopen, close=close, home=home, sol=sol)
 
+    def _strategy_naive(self, name, p_fruit, r, sol):
+        """[대조군 · 회피 알고리즘 없음] home → grasp 자세를 **관절 직선보간**으로 잇는다.
+
+        모션플래너도 충돌검사도 쓰지 않는다 — 시작 관절값과 목표 관절값을 선형으로 섞을
+        뿐이다. 산업용 팔의 기본 이동(MoveJ)과 같은 동작이고, 장애물이 정의돼 있어도
+        경로는 그 존재를 모른다.
+
+        🔴 **이 대조군은 일부러 유리하게 만들었다.** 목표 자세 `sol["q_grasp"]` 는
+        회피 있는 쪽이 찾아낸 것과 **같은 값**(충돌 없는 IK 해)을 그대로 쓴다. 즉
+        '목표를 못 찾아서' 생기는 차이를 배제하고 **경로 생성에 회피가 들어갔는가**
+        하나만 남겼다. 그런데도 충돌이 나온다면 그것은 전적으로 경로 탓이다.
+
+        열매 부착은 **한다** — 손에 열매가 들린 것은 알고리즘의 선택이 아니라 사실이고,
+        양쪽을 같은 기준으로 재검증하려면 장면 상태가 같아야 한다. 다만 이 전략은
+        그 부착물을 **계획에 쓰지 않는다**(계획 자체가 없다)."""
+        q_grasp = dict(sol["q_grasp"])
+        gopen = float(self.get_parameter("gripper_open").value)
+        close = self._close_value()
+        q_home = {j: 0.0 for j in self.ARM}
+        n = max(2, int(self.get_parameter("naive_steps").value))
+
+        def lerp(qa, qb):
+            return [[float(qa[j] + (qb[j] - qa[j]) * k / (n - 1)) for j in self.ARM]
+                    for k in range(n)]
+
+        self.cur = {j: 0.0 for j in self.ARM}
+        self.cur.update({f: gopen for f in self.FINGERS})
+
+        # ① home → grasp : 관절 직선보간(플래너·충돌검사 없음)
+        wp = lerp(q_home, q_grasp)
+        method = f"naive/관절보간 {n}점 (회피 없음)"
+        self.get_logger().info(f"① home→grasp 관절보간 {n}점 — 플래너·충돌검사 사용 안 함")
+
+        # ② 접근 구간 없음(①이 곧장 grasp 까지 간다) → 자리표시
+        app_wp = [[q_grasp[j] for j in self.ARM], [q_grasp[j] for j in self.ARM]]
+
+        # ④ grasp → home : 같은 보간의 역재생(이 역시 회피 없음)
+        self._attach_fruit(name, r)
+        self._set({j: q_grasp[j] for j in self.ARM})
+        home = (self.ARM, list(reversed(wp)))
+
+        self.cur = {j: 0.0 for j in self.ARM}
+        self.cur.update({f: gopen for f in self.FINGERS})
+        return dict(pre=(self.ARM, wp), app=(self.ARM, app_wp, method, False),
+                    q_pre=q_grasp, q_grasp=q_grasp, q_home=q_home,
+                    gopen=gopen, close=close, home=home, sol=sol)
+
+    def _frontal_dir(self, p_fruit):
+        """**정면 = 행잉베드(재배 행) 면에 수직인 수평 방향**.
+
+        🔴 'base 에서 열매로 가는 방향' 이 아니다 — 그건 로봇이 행 앞에 정확히 서 있을
+        때만 법선과 같고, 옆으로 비켜 있으면 어긋난다(실측: 이 장면에서 최대 14°).
+        재배 행은 `obstacles.yaml crops.rows` 가 `x` 로 정의한다(행은 Y 로 뻗는다)
+        ⇒ 행 평면 x=const 의 수평 법선은 ±X. 목표 열매가 속한 행을 고르고, **통로(로봇)
+        쪽에서 작물 쪽으로** 향하도록 부호를 정한다.
+
+        · `approach_yaw_deg` 를 주면 그 값이 우선(월드 yaw[도]).
+        · 행 정보를 못 읽으면 base→열매 수평방향으로 물러선다(경고).
+        """
+        yaw = float(self.get_parameter("approach_yaw_deg").value)
+        if not math.isnan(yaw):
+            return PG._unit(np.array([math.cos(math.radians(yaw)),
+                                      math.sin(math.radians(yaw)), 0.0]))
+        p = np.asarray(p_fruit, float)
+        bxy = self._base_xy()
+        rows = []
+        try:
+            import yaml
+            path = self.get_parameter("obstacles_file").value or self._op.default_yaml()
+            data = yaml.safe_load(open(path)) or {}
+            rows = [float(r["x"]) for r in ((data.get("crops") or {}).get("rows") or [])
+                    if "x" in r]
+        except Exception:
+            rows = []
+        if rows:
+            x_row = min(rows, key=lambda x: abs(x - float(p[0])))
+            ref = float(bxy[0]) if bxy is not None else 0.0
+            sgn = 1.0 if (x_row - ref) >= 0 else -1.0
+            return np.array([sgn, 0.0, 0.0])
+        self.get_logger().warn(
+            "재배 행 정보(crops.rows[*].x)를 못 읽음 → 정면을 base→열매 방향으로 대체")
+        hv = (p[:2] - bxy) if bxy is not None else np.array([1.0, 0.0])
+        if np.linalg.norm(hv) < 1e-6:
+            hv = np.array([1.0, 0.0])
+        return PG._unit(np.array([hv[0], hv[1], 0.0]))
+
+    def _strategy_frontal(self, name, p_fruit, r, sol):
+        """[대조군 · 회피 알고리즘 없음] **정면에서 직선으로 진입**한다.
+
+        제안 방식(harvest_linear)과의 차이는 세 가지이고, 셋 다 '회피'에 해당한다:
+          ① **접근각을 고르지 않는다** — φ=0·θ=0 정면 고정. 제안은 후보격자(φ×θ×ψ)를
+             훑어 *줄기를 피해 곧게 들어갈 수 있는 각*을 찾는다.
+          ② **IK 가 충돌을 보지 않는다**(`avoid_collisions=False`). 제안은 pre-grasp·grasp
+             둘 다 충돌 통과해야 채택한다.
+          ③ **경로가 충돌을 보지 않는다** — 진입은 충돌검사 없는 Cartesian 직선,
+             왕복(home↔pre-grasp)은 플래너 없이 관절보간.
+
+        즉 "열매 정면에 서서 곧장 찔러 넣는" 동작이다. 목표점(파지 자세·파지 깊이)은
+        제안과 같은 기하로 잡으므로, 차이는 **경로와 접근 방향** 하나로 좁혀진다."""
+        d0 = float(self.get_parameter("standoff").value)
+        goff = self.grasp_offset
+        gopen = float(self.get_parameter("gripper_open").value)
+        close = self._close_value()
+        q_home = {j: 0.0 for j in self.ARM}
+        n = max(2, int(self.get_parameter("naive_steps").value))
+
+        p_fruit = np.asarray(p_fruit, float)
+        a = self._frontal_dir(p_fruit)
+        bxy = self._base_xy()
+        if bxy is not None:
+            hv = p_fruit[:2] - bxy
+            if np.linalg.norm(hv) > 1e-6:
+                hv = PG._unit(np.array([hv[0], hv[1], 0.0]))
+                self.get_logger().info(
+                    f"정면(행잉베드 법선) a=[{a[0]:+.2f},{a[1]:+.2f},{a[2]:+.2f}] · "
+                    f"base→열매 방향과 "
+                    f"{math.degrees(math.acos(max(-1.0, min(1.0, float(np.dot(a, hv)))))):.1f}° 차이")
+        quat = PG.mat_to_quat(PG.gaze_rotation(a, 0.0, self.approach_axis))
+        p_grasp = p_fruit - a * goff
+        p_pre = p_grasp - a * d0
+        # 🔴 회피 없음 = IK 도 충돌을 보지 않는다.
+        q_pre = self.solve_ik(p_pre, quat, avoid=False)
+        q_grasp_ik = self.solve_ik(p_grasp, quat, avoid=False)
+        if q_pre is None or q_grasp_ik is None:
+            # 정면 자세가 기구학적으로 아예 없다(도달 불가) — 회피 문제가 아니다.
+            self.get_logger().error(
+                f"[{name}] 정면 진입 자세를 IK 가 못 찾음(도달 불가) — 대조군 계획 실패")
+            return dict(pre=(self.ARM, []), app=(self.ARM, [], "frontal/IK 실패", False),
+                        q_pre=q_home, q_grasp=q_home, q_home=q_home,
+                        gopen=gopen, close=close, home=None, sol=None)
+
+        self.cur = {j: 0.0 for j in self.ARM}
+        self.cur.update({f: gopen for f in self.FINGERS})
+
+        # ① home → pre-grasp(정면) : 플래너 없이 관절보간
+        pre_wp = [[float(q_home[j] + (q_pre[j] - q_home[j]) * k / (n - 1)) for j in self.ARM]
+                  for k in range(n)]
+        self.get_logger().info(
+            f"① home→정면 pre-grasp 관절보간 {n}점 — 플래너 사용 안 함")
+
+        # ② pre-grasp → grasp : 정면 직선(충돌검사 없음)
+        self._set({j: q_pre[j] for j in self.ARM})
+        gp_pose = Pose()
+        gp_pose.position.x, gp_pose.position.y, gp_pose.position.z = map(float, p_grasp)
+        (gp_pose.orientation.x, gp_pose.orientation.y,
+         gp_pose.orientation.z, gp_pose.orientation.w) = map(float, quat)
+        cart = self.cartesian_to(gp_pose, avoid=False)
+        if cart is not None and cart[2] > 0.99:
+            app_n, app_wp = cart[0], cart[1]
+            method = f"frontal/직선진입 fraction={cart[2]:.2f} (회피 없음)"
+        else:
+            frac = cart[2] if cart is not None else 0.0
+            app_n = self.ARM
+            app_wp = [[float(q_pre[j] + (q_grasp_ik[j] - q_pre[j]) * k / 9)
+                       for j in self.ARM] for k in range(10)]
+            method = f"frontal/관절보간 진입(Cartesian frac={frac:.2f}) (회피 없음)"
+        self.get_logger().info(f"② 정면 진입 {len(app_wp)}점 — {method}")
+        q_grasp = ({nm: app_wp[-1][i] for i, nm in enumerate(app_n)}
+                   if app_wp else dict(q_grasp_ik))
+
+        # ④ 후퇴 = ② 역재생 → home 은 ① 역재생(둘 다 회피 없음)
+        self._attach_fruit(name, r)
+        home = (self.ARM, list(reversed(pre_wp)))
+
+        self.cur = {j: 0.0 for j in self.ARM}
+        self.cur.update({f: gopen for f in self.FINGERS})
+        frontal_sol = dict(c=PG.build_candidates([0.0], [0.0], [0.0], [d0],
+                                                 1.0, 0.5, 2.0, d0)[0],
+                           a=a, p_pre=p_pre, p_grasp=p_grasp, quat=quat,
+                           q=q_pre, q_grasp=q_grasp_ik)
+        return dict(pre=(self.ARM, pre_wp), app=(app_n, app_wp, method, False),
+                    q_pre=q_pre, q_grasp=q_grasp, q_home=q_home,
+                    gopen=gopen, close=close, home=home, sol=frontal_sol)
+
     # 전략 레지스트리 — 새 전략은 위에 메서드 추가 후 여기에 한 줄 등록만.
     _STRATEGIES = {
         "harvest_linear": _strategy_harvest_linear,
         "direct": _strategy_direct,
+        "naive": _strategy_naive,
+        "frontal": _strategy_frontal,
     }
 
     def run(self):
@@ -2803,9 +3162,35 @@ class PregraspDemo(Node):
                 + ". 이후 반복은 이 궤적을 매끈하게 재생만 함(재계획 없음).")
         return self._play_cycle(name, p_fruit, r, self._plan_cache)
 
+    def _safety_acm(self, name):
+        """[show_collisions 전용] 재생 중 충돌 표시를 **측정과 같은 안전 기준**으로 맞춘다:
+        전 작물이 장애물 · 수확 대상 화방대만 허용 · 구 영역 제거.
+
+        🔴 이걸 안 하면 계획이 남긴 완화(구 영역 허용)가 그대로 남아 조건이 흐려지고,
+        반대로 목표 화방대까지 장애물이 되어 **막 딴 열매가 제 화방대에 닿는 것**을
+        충돌로 센다(실측: 그 쌍 하나가 표시의 대부분을 차지했다). 두 실행을 비교하려면
+        기준이 하나여야 한다 — bench_strategy 재검증과 같은 기준을 쓴다."""
+        if getattr(self, "_crops_cache", None) is None:
+            self._crops_cache = self._crop_objects()
+        self._clear_zone()
+        self._set_allow(self._crops_cache, False)
+        stalk = self._stalk_of(name)
+        if stalk:
+            self._set_allow([stalk], True)
+
     def _play_cycle(self, name, p_fruit, r, c):
         """계획 dict c(전략 산출)의 한 수확 사이클(home→pre→접근→파지→후퇴→home)을 실행/재생.
         execute 모드면 각 구간이 컨트롤러로 실구동된다."""
+        if self.show_col:
+            self._safety_acm(name)
+            self._col_hit, self._col_n, self._col_pairs = 0, 0, {}
+            self._col_marks = []
+            _clr = MarkerArray()
+            _m = Marker()
+            _m.header.frame_id, _m.ns, _m.id = self.world, "collision", 0
+            _m.action = Marker.DELETEALL
+            _clr.markers.append(_m)
+            self.col_pub.publish(_clr)
         c_sol = c.get("sol")
         if c_sol is not None:
             self._publish_markers(p_fruit, r, c_sol["p_pre"], c_sol["a"], reachable=True)
@@ -2880,6 +3265,16 @@ class PregraspDemo(Node):
                               f"{name} ④home")
         self._set({j: 0.0 for j in self.ARM})
         self._hold(float(self.get_parameter("pause").value))
+        if self.show_col:
+            if self._col_hit:
+                top = ", ".join(f"{k}×{v}" for k, v in sorted(
+                    self._col_pairs.items(), key=lambda x: -x[1])[:4])
+                self.get_logger().warn(
+                    f"[{name}] 충돌 표본 {self._col_hit}/{self._col_n}"
+                    f"({100.0 * self._col_hit / max(1, self._col_n):.1f}%) — {top}")
+            else:
+                self.get_logger().info(
+                    f"[{name}] 충돌 표본 0/{self._col_n}(안전기준).")
         self.get_logger().info(f"[{name}] 수확 사이클 완료.")
         return True
 
