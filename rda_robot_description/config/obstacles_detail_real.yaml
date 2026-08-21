@@ -204,6 +204,11 @@ crops:
       rachis_out: 0.06
       cluster_gap: 0.85
       rachis_radius: 0.004
+      rachis_on_top: true
+      rachis_droop: 0.0
+      rachis_segments: 1
+      pedicel_radius: 0.002
+      pedicel_min_len: 0.008
   span:
     y_min: -1.2
     y_max: 1.2

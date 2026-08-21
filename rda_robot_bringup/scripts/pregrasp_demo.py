@@ -1080,14 +1080,37 @@ class PregraspDemo(Node):
 
     # ── 5주차 2차: 목표 화방대(수확 대상 줄기) 충돌 허용 ──────────────────
     @staticmethod
-    def _stalk_of(fruit_name):
-        """열매 이름 fruit_r{ri}_p{pi}_t{ti}_f{fi} → 그 화방대 rachis_r{ri}_p{pi}_t{ti}.
-        열매는 자기 화방대(줄기 곁가지)에 매달려 있어, 그 화방대는 접근 시 불가피하게
-        스친다 → '수확 대상 줄기'로 보고 접근 궤적에서만 충돌 제외. (주 줄기·다른 화방대는
-        장애물 유지 → 진짜 회피.) 파싱 실패 시 None."""
+    def _truss_key(fruit_name):
+        """열매 이름 fruit_r{ri}_p{pi}_t{ti}_f{fi} → 화방 키 'r{ri}_p{pi}_t{ti}'. 실패 시 None."""
         import re
         m = re.match(r"fruit_(r\d+_p\d+_t\d+)_f\d+$", str(fruit_name))
-        return f"rachis_{m.group(1)}" if m else None
+        return m.group(1) if m else None
+
+    def _stalks_of(self, fruit_name):
+        """열매가 매달린 **자기 화방의 줄기 객체 전부** (화방대 마디들 + 그 열매의 소과경).
+
+        열매는 자기 화방대에 매달려 있어 접근 시 불가피하게 스친다 → '수확 대상 줄기'로
+        보고 접근 궤적에서만 충돌 제외한다(주 줄기·다른 화방대는 장애물 유지 = 진짜 회피).
+
+        🔴 **이름 하나가 아니라 목록이다.** 상세 장면에서는 화방대가 곡선 마디
+        `rachis_<키>_s0/_s1/…` 로 쪼개지고 소과경 `pedicel_<키>_f{fi}` 도 생긴다.
+        종전처럼 `rachis_<키>` 하나만 허용하면 **그 이름이 아예 없어 조용히 무효**가 된다
+        (2026-08-21 상세 작물 도입 시 확인). 장면에서 실제 이름을 찾아 돌려준다."""
+        key = self._truss_key(fruit_name)
+        if key is None:
+            return []
+        fi = str(fruit_name).rsplit("_f", 1)[-1]
+        names = [str(o.get("name", "")) for o in self._scene_objects()]
+        out = [n for n in names
+               if n == f"rachis_{key}" or n.startswith(f"rachis_{key}_s")
+               or n == f"pedicel_{key}_f{fi}"]
+        # 장면을 못 읽었으면 종전 이름 하나로 물러선다(폴백)
+        return out or [f"rachis_{key}"]
+
+    def _stalk_of(self, fruit_name):
+        """[호환] 화방대 이름 하나. 여러 마디면 첫 번째. 새 코드는 `_stalks_of` 를 쓸 것."""
+        s = self._stalks_of(fruit_name)
+        return s[0] if s else None
 
     def _allow_collision(self, obj_name):
         """planning scene ACM 에서 obj_name 을 '모든 링크와 충돌 무시'로 표시(default entry).
@@ -1490,10 +1513,10 @@ class PregraspDemo(Node):
                 "`cut_object:=<객체명>` 을 줄 것 — 없으면 날이 줄기에 닿는 순간 충돌로 기각된다.")
             return False
         if mode == "stalk":
-            return self._allow_collision(self._stalk_of(name))
+            return self._set_allow(self._stalks_of(name), True)
         g = self._tgt_geom.get(str(name))
         if g is None:                                   # 기하를 모르면 이름 기반으로 폴백
-            return self._allow_collision(self._stalk_of(name))
+            return self._set_allow(self._stalks_of(name), True)
         rho = g[1] + float(self.get_parameter("region_margin").value)
         return self._allow_region(g[0], rho, settle=settle)
 
@@ -2501,7 +2524,7 @@ class PregraspDemo(Node):
     def _bench_one(self, name, p_fruit, r, cond):
         """한 열매·한 조건을 평가해 dict 리포트. cond ∈ BENCH_CONDS"""
         crops = self._bench_crops
-        stalk = self._stalk_of(name)
+        stalks = self._stalks_of(name)
         home = {j: 0.0 for j in self.ARM}
         self._set(home)
         # ── 조건별 ACM 설정 ──
@@ -2537,8 +2560,8 @@ class PregraspDemo(Node):
         #     장애물이 되어 모든 조건이 충돌로 나온다.
         self._clear_zone()
         self._set_allow(crops, False)
-        if stalk:
-            self._set_allow([stalk], True)
+        if stalks:
+            self._set_allow(stalks, True)
         bad = self._invalid_waypoints(names_j, wp)
         self._set(home)
         return dict(name=name, cond=cond, ik=True, frac=frac, method=method,
@@ -2717,7 +2740,7 @@ class PregraspDemo(Node):
         #   장면에 남은 원본과 겹쳐 **자기 자신과의 충돌**이 접촉의 대부분으로 잡힌다
         #   (2026-08-21 실측: 접촉 쌍 상위가 전부 `fruit_X|grasped_fruit_X` 였다).
         #   무는 대상을 만지는 것은 충돌이 아니다.
-        allow = [x for x in (self._stalk_of(name), name) if x]
+        allow = [x for x in (self._stalks_of(name) + [name]) if x]
         if allow:
             self._set_allow(allow, True)
         cpairs = {}
@@ -3370,7 +3393,7 @@ class PregraspDemo(Node):
         self._clear_zone()
         self._set_allow(self._crops_cache, False)
         # 목표 화방대 + **목표 열매 자신**을 허용(무는 대상을 만지는 건 충돌이 아니다).
-        allow = [x for x in (self._stalk_of(name), name) if x]
+        allow = [x for x in (self._stalks_of(name) + [name]) if x]
         if allow:
             self._set_allow(allow, True)
 

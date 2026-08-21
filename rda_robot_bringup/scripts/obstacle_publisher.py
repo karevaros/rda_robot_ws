@@ -82,6 +82,40 @@ def _seg_cylinder(name, p1, p2, radius, color):
             "radius": radius, "height": ln, "color": color, "nolabel": True}
 
 
+def _rachis_axis(a, c, droop, nseg):
+    """화방대 축 폴리라인 [p0..pn]. droop=0·nseg=1 이면 **[a, c] 그대로**(종전 직선).
+
+    처짐은 2차 베지어로 준다 — 중간 제어점을 a·c 중점에서 `droop` 만큼 내린다.
+    사진(9aJK·e77cc)에서 화방대는 주 줄기에서 나와 **아래로 휘며** 열매를 단다."""
+    if nseg <= 1 and droop <= 0.0:
+        return [list(a), list(c)]
+    n = max(nseg, 2 if droop > 0 else 1)
+    m = [(a[0] + c[0]) / 2, (a[1] + c[1]) / 2, (a[2] + c[2]) / 2 - droop]
+    out = []
+    for k in range(n + 1):
+        t = k / n
+        u = 1.0 - t
+        out.append([u * u * a[i] + 2 * u * t * m[i] + t * t * c[i] for i in range(3)])
+    return out
+
+
+def _closest_on_polyline(poly, p):
+    """폴리라인 위에서 점 p 에 가장 가까운 점. 소과경이 **축의 가까운 곳에서** 갈라지도록."""
+    best, bd = poly[0], float("inf")
+    for a, b in zip(poly[:-1], poly[1:]):
+        d = [b[i] - a[i] for i in range(3)]
+        L2 = sum(v * v for v in d)
+        if L2 < 1e-12:
+            continue
+        t = sum((p[i] - a[i]) * d[i] for i in range(3)) / L2
+        t = max(0.0, min(1.0, t))
+        q = [a[i] + t * d[i] for i in range(3)]
+        dd = sum((p[i] - q[i]) ** 2 for i in range(3))
+        if dd < bd:
+            best, bd = q, dd
+    return best
+
+
 def expand_crops(spec):
     """spec['crops'](파라메트릭 템플릿+배치) → 개체(줄기·화방·열매)로 펼쳐 obstacles 에 append.
 
@@ -118,6 +152,21 @@ def expand_crops(spec):
     rachis_out = float(tr.get("rachis_out", 0.06))     # 줄기→클러스터 중심 옆거리(+Y)
     cluster_gap = float(tr.get("cluster_gap", 0.85))   # 열매 간격(지름 배수, <1 겹침=뭉침)
     rachis_r = float(tr.get("rachis_radius", 0.004))
+    # ── 상세 형상(2026-08-21, tomatopick 사진 대조) ─────────────────────
+    #   전부 **없으면 종전과 바이트 동일**하게 나오도록 기본값을 중립으로 둔다.
+    #   정본 장면(obstacles.yaml)에는 이 키가 없다 → 기존 검증 수치가 안 바뀐다.
+    #   · rachis_droop/segments : 화방대 축이 직선이 아니라 **아래로 처지는 곡선**
+    #   · pedicel_*             : 화방대 축 → **각 열매**로 갈라지는 자루(=사진의 '갈래')
+    #     🔴 '화방대 갈래' 와 '소과경' 은 같은 구조다(사진 재검토 2026-08-21).
+    #        갈라지는 것은 화방대가 아니라 **소과경**이다.
+    rachis_droop = float(tr.get("rachis_droop", 0.0))       # 축 중간 처짐량[m] (0=직선)
+    rachis_seg = max(1, int(tr.get("rachis_segments", 1)))  # 축 마디 수 (1=종전)
+    ped_r = float(tr.get("pedicel_radius", 0.0))            # 0=소과경 없음(종전)
+    ped_min = float(tr.get("pedicel_min_len", 0.008))       # 이보다 짧으면 생략
+    #   화방대 축을 **열매 윗면(+z 표면)** 높이에 놓는다(사용자 지시 2026-08-21).
+    #   종전에는 축이 클러스터 **중심**으로 갔다 → 축이 열매 속을 관통했다.
+    #   실제로는 화방대가 열매 위를 지나고 열매가 그 아래에 매달린다(사진 전부).
+    rachis_top = bool(tr.get("rachis_on_top", False))       # False=종전
     stem_color = tpl.get("stem_color", [0.30, 0.50, 0.20, 0.95])
     rachis_color = tpl.get("rachis_color", [0.35, 0.55, 0.25, 0.95])
     fruit_color = tpl.get("fruit_color", [0.90, 0.20, 0.13, 0.97])
@@ -168,18 +217,48 @@ def expand_crops(spec):
                 # 클러스터 중심: 왼쪽(+side_y)으로 rachis_out, 살짝 아래
                 cy = ay + side_y * (rachis_out + f_r)
                 cz = tz - f_r
+                fruits = []
                 for fi, (ox, oy, oz) in enumerate(_cluster_offsets(nf, gap)):
+                    fp = [ax + ox, cy + oy, cz + oz]
                     items.append({
                         "name": f"fruit_r{ri}_p{pi}_t{ti}_f{fi}", "kind": "target",
                         "type": "sphere",
-                        "pose": {"xyz": [ax + ox, cy + oy, cz + oz]},
+                        "pose": {"xyz": fp},
                         "radius": f_r, "color": fruit_color, "nolabel": True,
                     })
+                    fruits.append((fi, fp))
                     added += 1
-                # 화방대(줄기→클러스터): 얇은 원통
-                items.append(_seg_cylinder(f"rachis_r{ri}_p{pi}_t{ti}",
-                                           [ax, ay, tz], [ax, cy, cz], rachis_r, rachis_color))
-                added += 1
+                # ── 화방대 축(줄기 부착점 → 클러스터 중심) ──
+                #   기본은 종전과 같은 **직선 원통 1개**(이름도 그대로 `rachis_r_p_t`).
+                #   rachis_droop/segments 를 주면 아래로 처지는 곡선을 마디로 나눈다.
+                # 축 끝점: rachis_on_top 이면 클러스터 **윗면**(중심 + 열매반경)
+                A = [ax, ay, tz]
+                C = [ax, cy, cz + (f_r if rachis_top else 0.0)]
+                axis = _rachis_axis(A, C, rachis_droop, rachis_seg)
+                base = f"rachis_r{ri}_p{pi}_t{ti}"
+                for si in range(len(axis) - 1):
+                    # 🔴 마디가 하나면 **이름을 종전 그대로** 둔다 — `fruit_… → rachis_…`
+                    #    이름 계약(`_stalk_of`)이 여기에 묶여 있다.
+                    nm = base if len(axis) == 2 else f"{base}_s{si}"
+                    items.append(_seg_cylinder(nm, axis[si], axis[si + 1],
+                                               rachis_r, rachis_color))
+                    added += 1
+                # ── 소과경(화방대 축 → 각 열매) ──
+                if ped_r > 0.0:
+                    for fi, fp in fruits:
+                        # 열매는 축 **아래**에 매달린다 → 자루는 열매 윗면으로 간다.
+                        target = ([fp[0], fp[1], fp[2] + f_r] if rachis_top else fp)
+                        q = _closest_on_polyline(axis, target)
+                        d = math.dist(q, target)
+                        if d <= ped_min:
+                            continue          # 열매가 축에 붙어 있으면 자루가 없다
+                        e = list(target) if rachis_top else [
+                            q[k] + (target[k] - q[k]) * max(0.0, (d - f_r * 0.6)) / d
+                            for k in range(3)]
+                        items.append(_seg_cylinder(
+                            f"pedicel_r{ri}_p{pi}_t{ti}_f{fi}", q, e,
+                            ped_r, rachis_color))
+                        added += 1
     return added
 
 
