@@ -1,221 +1,174 @@
 # ⚠ 생성물 — 손으로 고치지 말 것.
 #   정본 = obstacles.yaml · 생성기 = docs/scripts/gen_scene_variants.py
 #   정본을 고쳤으면 생성기를 다시 돌릴 것.
+# 작업 공간 · 온실 환경 정의 (4주차 — 온실 재구성)
+#
+# 출처: 사용자 제공 CATIA STEP `docs/greenhouse_ref/chamdan2greenhause.stp`
+#   FreeCAD 실측(배치 변환 반영). 전체 온실 = 폭18.0 x 길이40.0 x 높이6.2 m.
+#   본 파일은 그중 **레일파이프 + 재배 거터**만 primitive 로 옮긴 것(사용자 지시).
+#   온실 외곽 셸·지붕 구조재는 경로계획에 불필요·과중 → 제외.
+#   실측 근거 수치:
+#     · 거터: 단면 240mm, 상면 z=0.92m, X 피치 1.66m (8줄, 중앙통로로 좌4/우4)
+#     · 지면 부재/레일: 폭578mm, z=0.175~0.225m, 거터와 0.83m 교차 배치
+#   → 로봇 주변 ±3m 국소 구간만 인스턴스화(팔 도달반경 1.138m). 주행 붙일 때 확장.
+#
+# 좌표계 통일 규칙
+#   · 모든 좌표는 `frame`(기본 world) 기준. **world 의 z=0 이 바닥면**이다.
+#     launch 가 world → base_link 를 z=+0.23479 로 발행한다(URDF 에서 유도).
+#     로봇은 원점(0,0)에서 정면 +X 를 보고 Y 방향 통로에 서 있다(레일 주행축=Y).
+#   · 길이 m, 각도 rad(rpy). pose.xyz = 형상 중심(center).
+#
+# 종류(kind)
+#   obstacle : 실제 물체. 충돌 회피 대상(플래닝 시 collision object).
+#   keepout  : 물리적 실체가 없는 이동 제한 영역(가상 벽).
+#   target   : (예정) 집기 목표. 아직 미도입 — 작물(토마토) 추가 시 함께 도입.
+#
+# type: box(size xyz) | cylinder(radius,height) | sphere(radius)
+#
+# ★ 라이브 튜닝: 이 파일을 저장하면 obstacle_publisher 가 ~1초 내 자동으로 다시
+#   반영한다(RViz 재기동 불필요). 값을 바꿔가며 형태를 조절할 수 있다.
+#   (편집 중 문법이 깨진 채 저장돼도 이전 상태를 유지하고 경고만 낸다.)
+
 frame: world
+
+# ── 작업 공간: 팔 tcp 가 머물러야 하는 영역 ───────────────────────────────
+# 기구학 재분석(docs/기구학-분석.md): 팔 베이스 world z=0.335, tcp 최대반경 1.138 m.
 workspace:
-  center:
-  - 0.0
-  - 0.0
-  - 1.04
-  size:
-  - 2.4
-  - 2.4
-  - 1.4
+  center: [0.0, 0.0, 1.04]
+  size: [2.4, 2.4, 1.40]
+
+# ── 온실 구조(레일파이프 + 거터) · 로봇 주변 국소 구간 ────────────────────
 obstacles:
-- name: ground_plane
-  kind: keepout
-  type: box
-  pose:
-    xyz:
-    - 0.0
-    - 0.0
-    - -0.05
-    rpy:
-    - 0.0
-    - 0.0
-    - 0.0
-  size:
-  - 8.0
-  - 8.0
-  - 0.1
-  color:
-  - 0.5
-  - 0.5
-  - 0.5
-  - 0.2
-- name: gutter_front
-  kind: obstacle
-  type: box
-  pose:
-    xyz:
-    - 0.83
-    - 0.0
-    - 0.86
-    rpy:
-    - 0.0
-    - 0.0
-    - 0.0
-  size:
-  - 0.24
-  - 6.0
-  - 0.12
-  color:
-  - 0.2
-  - 0.55
-  - 0.25
-  - 0.85
-- name: gutter_rear
-  kind: obstacle
-  type: box
-  pose:
-    xyz:
-    - -0.83
-    - 0.0
-    - 0.86
-    rpy:
-    - 0.0
-    - 0.0
-    - 0.0
-  size:
-  - 0.24
-  - 6.0
-  - 0.12
-  color:
-  - 0.2
-  - 0.55
-  - 0.25
-  - 0.85
-- name: gutter_front2
-  kind: obstacle
-  type: box
-  pose:
-    xyz:
-    - 2.49
-    - 0.0
-    - 0.86
-    rpy:
-    - 0.0
-    - 0.0
-    - 0.0
-  size:
-  - 0.24
-  - 6.0
-  - 0.12
-  color:
-  - 0.2
-  - 0.55
-  - 0.25
-  - 0.55
-- name: rail_L0
-  kind: obstacle
-  type: cylinder
-  pose:
-    xyz:
-    - -0.25
-    - 0.0
-    - 0.05
-    rpy:
-    - 1.5708
-    - 0.0
-    - 0.0
-  radius: 0.025
-  height: 6.0
-  color:
-  - 0.4
-  - 0.4
-  - 0.45
-  - 0.95
-- name: rail_R0
-  kind: obstacle
-  type: cylinder
-  pose:
-    xyz:
-    - 0.25
-    - 0.0
-    - 0.05
-    rpy:
-    - 1.5708
-    - 0.0
-    - 0.0
-  radius: 0.025
-  height: 6.0
-  color:
-  - 0.4
-  - 0.4
-  - 0.45
-  - 0.95
-- name: rail_L1
-  kind: obstacle
-  type: cylinder
-  pose:
-    xyz:
-    - 1.41
-    - 0.0
-    - 0.05
-    rpy:
-    - 1.5708
-    - 0.0
-    - 0.0
-  radius: 0.025
-  height: 6.0
-  color:
-  - 0.4
-  - 0.4
-  - 0.45
-  - 0.55
-- name: rail_R1
-  kind: obstacle
-  type: cylinder
-  pose:
-    xyz:
-    - 1.91
-    - 0.0
-    - 0.05
-    rpy:
-    - 1.5708
-    - 0.0
-    - 0.0
-  radius: 0.025
-  height: 6.0
-  color:
-  - 0.4
-  - 0.4
-  - 0.45
-  - 0.55
+  # [이동 제한] 바닥면. 팔의 바닥 관통 방지(자충돌 모니터는 링크↔링크만 검사).
+  - name: ground_plane
+    kind: keepout
+    type: box
+    pose: {xyz: [0.0, 0.0, -0.05], rpy: [0.0, 0.0, 0.0]}
+    size: [8.0, 8.0, 0.10]     # 상면 z=0
+    color: [0.50, 0.50, 0.50, 0.20]
+
+  # ── 재배 거터 (crop gutter) : 단면 0.24m, 상면 0.92m, Y 방향 6m ──────────
+  #  실측 상면 0.92 → 중심 z = 0.92-0.06 = 0.86, 두께 0.12.
+  #  작물(토마토 줄기·화방·열매)은 이 거터 위에 재배 — 아직 미추가(구조만).
+  - name: gutter_front        # 로봇 정면, 팔 도달권 안 (수확 대상 줄)
+    kind: obstacle
+    type: box
+    pose: {xyz: [0.83, 0.0, 0.86], rpy: [0.0, 0.0, 0.0]}
+    size: [0.24, 6.0, 0.12]
+    color: [0.20, 0.55, 0.25, 0.85]
+
+  - name: gutter_rear         # 로봇 뒤쪽 줄
+    kind: obstacle
+    type: box
+    pose: {xyz: [-0.83, 0.0, 0.86], rpy: [0.0, 0.0, 0.0]}
+    size: [0.24, 6.0, 0.12]
+    color: [0.20, 0.55, 0.25, 0.85]
+
+  - name: gutter_front2       # 정면 다음 줄 (피치 1.66m, 도달권 밖 — 맥락용)
+    kind: obstacle
+    type: box
+    pose: {xyz: [2.49, 0.0, 0.86], rpy: [0.0, 0.0, 0.0]}
+    size: [0.24, 6.0, 0.12]
+    color: [0.20, 0.55, 0.25, 0.55]
+
+  # ── 레일파이프 (buisrail) : 바닥의 Y 방향 원통 쌍, 로봇 주행/대차 레일 ────
+  #  cylinder 기본축=Z → rpy=[pi/2,0,0] 로 Y 방향으로 눕힘. 게이지 0.5m.
+  - name: rail_L0             # 로봇 통로(X=0) 좌측 레일
+    kind: obstacle
+    type: cylinder
+    pose: {xyz: [-0.25, 0.0, 0.05], rpy: [1.5708, 0.0, 0.0]}
+    radius: 0.025
+    height: 6.0
+    color: [0.40, 0.40, 0.45, 0.95]
+
+  - name: rail_R0             # 로봇 통로(X=0) 우측 레일
+    kind: obstacle
+    type: cylinder
+    pose: {xyz: [0.25, 0.0, 0.05], rpy: [1.5708, 0.0, 0.0]}
+    radius: 0.025
+    height: 6.0
+    color: [0.40, 0.40, 0.45, 0.95]
+
+  - name: rail_L1             # 다음 통로(X=1.66) 레일 쌍 (맥락용)
+    kind: obstacle
+    type: cylinder
+    pose: {xyz: [1.41, 0.0, 0.05], rpy: [1.5708, 0.0, 0.0]}
+    radius: 0.025
+    height: 6.0
+    color: [0.40, 0.40, 0.45, 0.55]
+
+  - name: rail_R1
+    kind: obstacle
+    type: cylinder
+    pose: {xyz: [1.91, 0.0, 0.05], rpy: [1.5708, 0.0, 0.0]}
+    radius: 0.025
+    height: 6.0
+    color: [0.40, 0.40, 0.45, 0.55]
+
+# ── 작물(토마토, 대과) · 파라메트릭 전개 ──────────────────────────────────────
+# obstacle_publisher.py 의 expand_crops() 가 아래 템플릿+배치를 개체로 펼친다
+# (줄기=obstacle 회피 / 열매=target 집기목표). 손 나열 대신 파라미터만 관리.
+#
+# 치수 근거:
+#   · 줄기 반경 0.006m(=Ø11.5mm) ← AIHub 줄기두께 평균 1.15cm
+#   · 화방당 열매 6개 ← AIHub numberOfFruitPerTruss 평균 6.5
+#   · 대과 열매 반경 0.035m(=Ø70mm) ← 통상(추정, AIHub 는 열매 지름 cm 미제공)
+#   · 줄기 높이 2.2m·화방 수직간격 0.25m·주간 0.4m ← 통상(추정)
+#   · 줄 x=±0.83·거터 상면 0.92m ← 온실 STEP 실측
 crops:
+  # ▸ crop_tuner GUI 로 조절 가능한 값에는  @tune=<id>|<min>|<max>|<기본값>  마커가 붙어 있다.
+  #   GUI(ros2 run rda_robot_bringup crop_tuner.py)가 그 줄의 숫자만 바꿔 저장 → 라이브 반영.
+  #   '기본값으로 초기화' 버튼은 마커의 <기본값> 으로 되돌린다.
   template:
+    # 줄기: 로그 곡선으로 +Y 방향 상승(사진 참고). 짧은 원통 마디로 근사.
     stem:
-      radius: 0.006
-      height: 2.2
-      lean_y: 0.3
-      curve_k: 4
-      segments: 6
-    stem_color:
-    - 0.3
-    - 0.5
-    - 0.2
-    - 0.95
-    rachis_color:
-    - 0.35
-    - 0.55
-    - 0.25
-    - 0.95
-    fruit_color:
-    - 0.9
-    - 0.2
-    - 0.13
-    - 0.97
+      radius: 0.006          # 줄기 반경 @tune=stem_radius|0.003|0.02|0.006
+      height: 2.2            # 유인 높이 @tune=stem_height|1.0|3.0|2.2
+      lean_y: 0.3           # +Y 곡선 편차 @tune=stem_lean_y|0.0|0.6|0.3
+      curve_k: 4           # 로그 곡률 @tune=stem_curve_k|0.5|10.0|4.0
+      segments: 6            # 곡선 마디 수 @tune=stem_segments|2|12|6
+    stem_color: [0.30, 0.50, 0.20, 0.95]
+    rachis_color: [0.35, 0.55, 0.25, 0.95]
+    fruit_color: [0.90, 0.20, 0.13, 0.97]
     truss:
-      first_z: 0.35
-      spacing: 0.25
-      count: 3
-      fruits_per_truss: 4
-      fruit_radius: 0.035
-      rachis_out: 0.06
-      cluster_gap: 0.85
-      rachis_radius: 0.004
-      rachis_on_top: true
-      rachis_droop: 0.0
-      rachis_segments: 1
-      pedicel_radius: 0.002
-      pedicel_min_len: 0.008
+      first_z: 0.35          # 첫 화방 높이 @tune=truss_first_z|0.1|1.2|0.35
+      #  ↑ 레일 위(X=0) RB5 팔 도달권(link0서 tcp 최대 1.138m)에 최하단 화방을 넣으려 낮춤.
+      #    통로↔작물행 0.83m + 거터 0.92m 조합상 이 팔은 z≲1.05m 만 닿음(2026-07-22 실 IK 재측정).
+      #    → 실 IK 스캔(pregrasp_demo scan_all)상 도달 열매는 거터 바로 위(최하단 화방 t0)뿐.
+      #    first_z 가 유일한 실질 레버(가로거리 x=0.83 은 거터 STEP 실측이라 고정, cluster 모양은 영향 미미).
+      spacing: 0.25          # 화방 수직간격 @tune=truss_spacing|0.1|0.6|0.25
+      count: 3               # 주당 화방 수 @tune=truss_count|1|8|3
+      fruits_per_truss: 4    # 화방당 열매 @tune=fruits_per_truss|1|6|4
+      fruit_radius: 0.035    # 대과 반경 @tune=fruit_radius|0.015|0.06|0.035
+      rachis_out: 0.06       # 클러스터 거리 @tune=rachis_out|0.0|0.3|0.06
+      cluster_gap: 0.85      # 뭉침 정도 @tune=cluster_gap|0.3|1.5|0.85
+      rachis_radius: 0.004   # 화방대 굵기 @tune=rachis_radius|0.001|0.012|0.004
+      # ── 화방 상세 형상 (2026-08-21, tomatopick 사진 대조) ──────────────
+      #  기본값은 **중립**(종전 형상과 동일). 상세 장면은 생성기가 이 값들만 바꾼다:
+      #    docs/scripts/gen_scene_variants.py → obstacles_detail*.yaml
+      #  튜너로 라이브 조절: ros2 run rda_robot_bringup crop_tuner.py [yaml경로]
+      #
+      #  rachis_z_frac = 화방대 축 높이를 **열매 반경의 배수**로.
+      #    0 = 클러스터 중심(종전 — 축이 열매 속을 관통) · 1 = 열매 윗면(+z 표면)
+      #    >1 = 윗면보다 위 → 소과경이 길어져 사진의 '매달린' 모습에 가까워진다
+      rachis_z_frac: 1.0     # 화방대 높이(열매반경 배수) @tune=rachis_z_frac|0.0|2.0|0.0
+      #  ⚠ droop 은 z_frac 과 **함께 쓰면 충돌한다** — 축을 열매 윗면(z_frac=1)에 얹으면
+      #    양 끝이 이미 최상단 열매 윗면이라, 처지는 순간 축 중간이 그 열매를 파고든다
+      #    (실측: droop 3cm 에서 1.3cm 침투). 처짐을 보려면 z_frac 을 함께 올릴 것.
+      rachis_droop: 0.0      # 화방대 처짐(m) @tune=rachis_droop|0.0|0.08|0.0
+      rachis_segments: 1     # 화방대 마디 수 @tune=rachis_segments|1|6|1
+      #  ⚠ 마디를 2 이상으로 하면 이름이 `rachis_<키>_s0/_s1…` 로 갈린다. 데모는
+      #    `_stalks_of()` 가 목록으로 찾아 대응하지만, 외부 도구가 `rachis_<키>` 하나를
+      #    가정하고 있다면 그쪽을 확인할 것.
+      #
+      #  소과경(pedicel) = 화방대 축 → 각 열매 **윗면**(꼭지가 나는 자리). 0 이면 안 만든다.
+      pedicel_radius: 0.002    # 소과경 굵기(m) @tune=pedicel_radius|0.0|0.006|0.0
+      pedicel_min_len: 0.008 # 이보다 짧으면 자루 생략(m) @tune=pedicel_min_len|0.0|0.03|0.008
   span:
     y_min: -1.2
     y_max: 1.2
-    spacing: 0.4
+    spacing: 0.4             # 주간 간격 @tune=plant_spacing|0.2|0.8|0.4
   rows:
-  - x: 0.83
-    gutter_top: 0.92
-  - x: -0.83
-    gutter_top: 0.92
-    fruits_per_truss: 0
+    # truss_side: 'left'(기본, 통로에서 볼 때 왼쪽=+Y) | 'right' | '+y' | '-y'
+    - {x: 0.83, gutter_top: 0.92}                         # 앞줄(작업 대상): 줄기+열매(왼쪽)
+    - {x: -0.83, gutter_top: 0.92, fruits_per_truss: 0}   # 뒷줄: 줄기만(맥락)

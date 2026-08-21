@@ -33,8 +33,32 @@ LABELS = {
     "rachis_out": "클러스터 거리 (m)",
     "cluster_gap": "뭉침 정도 (작을수록 촘촘)",
     "plant_spacing": "주간 간격 (m)",
+    # ── 화방 상세 형상 (2026-08-21, tomatopick 사진 대조) ──
+    "rachis_radius": "화방대 굵기 (m)",
+    "rachis_z_frac": "화방대 높이 (열매반경 배수 · 0=중심 1=윗면)",
+    "rachis_droop": "화방대 처짐 (m)",
+    "rachis_segments": "화방대 마디 수",
+    "pedicel_radius": "소과경 굵기 (m · 0=없음)",
+    "pedicel_min_len": "소과경 최소 길이 (m · 이하면 생략)",
+}
+
+#: 값이 서로 물릴 때 알려 줄 것 — 숫자만 봐서는 알 수 없는 상호작용.
+WARN = {
+    ("rachis_droop", "rachis_z_frac"):
+        "화방대 처짐과 높이는 함께 물린다 — 축을 열매 윗면(높이 1.0)에 얹은 채 처지면 "
+        "축 중간이 그 열매를 파고든다(실측: 처짐 3cm 에서 1.3cm 침투). "
+        "처짐을 보려면 높이도 함께 올릴 것.",
 }
 SLIDER_STEPS = 1000     # 실수 슬라이더 해상도
+
+
+def _is_generated(path):
+    """생성기가 만든 파일인지 — 배너 문구로 판별."""
+    try:
+        with open(path) as f:
+            return "생성물" in f.read(400)
+    except OSError:
+        return False
 
 
 def default_path():
@@ -134,7 +158,9 @@ class CropTuner(QtWidgets.QWidget):
     def __init__(self, path):
         super().__init__()
         self.path = path
-        self.setWindowTitle("작물 파라미터 튜너")
+        # 🔴 어느 파일을 만지는지 제목에 박는다 — 파생 장면(생성물)을 정본으로 착각해
+        #   튜닝하면 다음 생성 때 조용히 덮어써진다.
+        self.setWindowTitle(f"작물 파라미터 튜너 — {os.path.basename(path)}")
         self.resize(430, 640)
         self.rows = {}
         self._pending = {}
@@ -146,8 +172,14 @@ class CropTuner(QtWidgets.QWidget):
         self._timer.timeout.connect(self._flush)
 
         outer = QtWidgets.QVBoxLayout(self)
+        gen = _is_generated(path)
         info = QtWidgets.QLabel(
-            "슬라이더/숫자를 바꾸면 obstacles.yaml 에 저장되고 RViz 가 ~1초 내 반영합니다.")
+            f"슬라이더/숫자를 바꾸면 <b>{os.path.basename(path)}</b> 에 저장되고 "
+            "RViz 가 ~1초 내 반영합니다."
+            + ("<br><b style='color:#c62828;'>⚠ 이 파일은 생성물입니다</b> — "
+               "gen_scene_variants.py 를 다시 돌리면 <b>덮어써집니다</b>. "
+               "값을 남기려면 정본 obstacles.yaml 이나 생성기를 고치세요."
+               if gen else ""))
         info.setWordWrap(True)
         info.setStyleSheet("color:#555;")
         outer.addWidget(info)
@@ -237,12 +269,26 @@ class CropTuner(QtWidgets.QWidget):
         try:
             write_values(self.path, dict(self._pending))
             names = ", ".join(self._pending)
-            self.status.setText(f"저장: {names}")
-            self.status.setStyleSheet("color:#2e7d32;")
+            warn = self._interaction_warning()
+            if warn:
+                self.status.setText(f"저장: {names}  ⚠ {warn}")
+                self.status.setStyleSheet("color:#ef6c00;")
+            else:
+                self.status.setText(f"저장: {names}")
+                self.status.setStyleSheet("color:#2e7d32;")
         except OSError as e:
             self.status.setText(f"저장 실패: {e}")
             self.status.setStyleSheet("color:#c62828;")
         self._pending.clear()
+
+    def _interaction_warning(self):
+        """숫자만 봐서는 안 보이는 **값끼리의 충돌**을 알린다.
+        슬라이더는 각 값을 독립적으로 보여 주지만, 형상은 그렇지 않다."""
+        for (a, b), msg in WARN.items():
+            ra, rb = self.rows.get(a), self.rows.get(b)
+            if ra and rb and ra.value() > 1e-9 and rb.value() > 1e-9:
+                return msg
+        return None
 
 
 def main():

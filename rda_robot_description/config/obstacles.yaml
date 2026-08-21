@@ -139,7 +139,28 @@ crops:
       fruit_radius: 0.035    # 대과 반경 @tune=fruit_radius|0.015|0.06|0.035
       rachis_out: 0.06       # 클러스터 거리 @tune=rachis_out|0.0|0.3|0.06
       cluster_gap: 0.85      # 뭉침 정도 @tune=cluster_gap|0.3|1.5|0.85
-      rachis_radius: 0.004   # 화방대 굵기
+      rachis_radius: 0.004   # 화방대 굵기 @tune=rachis_radius|0.001|0.012|0.004
+      # ── 화방 상세 형상 (2026-08-21, tomatopick 사진 대조) ──────────────
+      #  기본값은 **중립**(종전 형상과 동일). 상세 장면은 생성기가 이 값들만 바꾼다:
+      #    docs/scripts/gen_scene_variants.py → obstacles_detail*.yaml
+      #  튜너로 라이브 조절: ros2 run rda_robot_bringup crop_tuner.py [yaml경로]
+      #
+      #  rachis_z_frac = 화방대 축 높이를 **열매 반경의 배수**로.
+      #    0 = 클러스터 중심(종전 — 축이 열매 속을 관통) · 1 = 열매 윗면(+z 표면)
+      #    >1 = 윗면보다 위 → 소과경이 길어져 사진의 '매달린' 모습에 가까워진다
+      rachis_z_frac: 0.0     # 화방대 높이(열매반경 배수) @tune=rachis_z_frac|0.0|2.0|0.0
+      #  ⚠ droop 은 z_frac 과 **함께 쓰면 충돌한다** — 축을 열매 윗면(z_frac=1)에 얹으면
+      #    양 끝이 이미 최상단 열매 윗면이라, 처지는 순간 축 중간이 그 열매를 파고든다
+      #    (실측: droop 3cm 에서 1.3cm 침투). 처짐을 보려면 z_frac 을 함께 올릴 것.
+      rachis_droop: 0.0      # 화방대 처짐(m) @tune=rachis_droop|0.0|0.08|0.0
+      rachis_segments: 1     # 화방대 마디 수 @tune=rachis_segments|1|6|1
+      #  ⚠ 마디를 2 이상으로 하면 이름이 `rachis_<키>_s0/_s1…` 로 갈린다. 데모는
+      #    `_stalks_of()` 가 목록으로 찾아 대응하지만, 외부 도구가 `rachis_<키>` 하나를
+      #    가정하고 있다면 그쪽을 확인할 것.
+      #
+      #  소과경(pedicel) = 화방대 축 → 각 열매 **윗면**(꼭지가 나는 자리). 0 이면 안 만든다.
+      pedicel_radius: 0.0    # 소과경 굵기(m) @tune=pedicel_radius|0.0|0.006|0.0
+      pedicel_min_len: 0.008 # 이보다 짧으면 자루 생략(m) @tune=pedicel_min_len|0.0|0.03|0.008
   span:
     y_min: -1.2
     y_max: 1.2

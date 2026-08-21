@@ -6,8 +6,8 @@
 
 만드는 것
   · obstacles_real_truss.yaml   — 현실 화방 높이(first_z 0.35). 스탠드 구성용.
-  · obstacles_detail.yaml       — 상세 작물(잎·소과경·화방대 곡선) + 기본 높이
-  · obstacles_detail_real.yaml  — 상세 작물 + 현실 화방 높이
+  · obstacles_detail.yaml       — 상세 화방(화방대 위치 교정 + 소과경) + 기본 높이
+  · obstacles_detail_real.yaml  — 상세 화방 + 현실 화방 높이
 
 🔴 **정본은 읽기만 한다.** 파생 파일에는 "생성물" 표시를 붙인다.
 
@@ -25,9 +25,9 @@
 """
 import argparse
 import os
+import re
 import sys
 
-import yaml
 
 CFG = os.path.expanduser("~/robot_ws/src/rda_robot_description/config")
 SRC = os.path.join(CFG, "obstacles.yaml")
@@ -38,41 +38,56 @@ BANNER = (
     "#   정본을 고쳤으면 생성기를 다시 돌릴 것.\n"
 )
 
-#: 상세 작물 형상 — 값은 **통상값(추정)**, 사진은 구조만 정했다.
-DETAIL_TRUSS = {
-    "rachis_on_top": True,       # 🔴 화방대 축을 **열매 윗면(+z 표면)** 높이에 둔다
-                                 #    (사용자 지시 2026-08-21). 종전에는 축이 클러스터
-                                 #    **중심**으로 가 열매 속을 관통했다.
-    "rachis_droop": 0.0,         # 🔴 처짐 없음(수평).
-    #   왜 0 인가 — 축을 열매 윗면에 얹으면 **처짐이 원리적으로 성립하지 않는다.**
-    #   축의 양 끝(줄기 부착점·클러스터 끝)이 이미 최상단 열매 윗면 높이라, 3cm 만 처져도
-    #   축 중간이 그 열매 속으로 1.3cm 파고든다(2026-08-21 실측: 축 z 1.0067 ↔ 윗면 1.0200).
-    #   사진의 '아래로 휜 화방대' 를 담으려면 축을 윗면보다 더 위로 띄우고 소과경을 길게
-    #   줘야 하는데, 그건 "윗면에 위치" 라는 지시와 다르다 → 지시를 따른다.
-    "rachis_segments": 1,        # 직선이므로 마디 1개. 이름도 종전 `rachis_<키>` 유지
-                                 #   (여러 마디면 `_s0/_s1…` 로 갈려 이름 계약이 흔들린다)
-    "pedicel_radius": 0.002,     # 소과경 굵기 — 사진상 화방대(4mm)보다 확실히 가늘다
-    "pedicel_min_len": 0.008,    # 이보다 짧으면 자루 없이 축에 붙은 것으로 본다
+#: 상세 화방 형상 — 값은 **통상값(추정)**, 사진은 구조만 정했다.
+#  키는 정본 obstacles.yaml 에 **중립 기본값 + @tune 마커**로 이미 들어 있다.
+#  여기서는 그 줄의 **숫자만** 바꾼다(주석·마커 보존).
+DETAIL = {
+    # 화방대 축을 **열매 윗면(+z 표면)** 높이로. 0=클러스터 중심(종전, 열매 관통).
+    "rachis_z_frac": 1.0,
+    # 소과경(화방대 → 각 열매 윗면). 사진상 화방대(4mm)보다 확실히 가늘다.
+    "pedicel_radius": 0.002,
+    # 처짐·마디는 켜지 않는다 — 축을 윗면에 얹으면 처지는 순간 열매를 파고든다
+    #   (실측: droop 3cm 에서 1.3cm 침투). 마디 1개면 이름도 종전 `rachis_<키>` 유지.
+    "rachis_droop": 0.0,
+    "rachis_segments": 1,
 }
+
 VARIANTS = {
-    "obstacles_real_truss.yaml": dict(first_z=0.35, detail=False),
-    "obstacles_detail.yaml": dict(first_z=None, detail=True),
-    "obstacles_detail_real.yaml": dict(first_z=0.35, detail=True),
+    "obstacles_real_truss.yaml": {"first_z": 0.35},
+    "obstacles_detail.yaml": dict(DETAIL),
+    "obstacles_detail_real.yaml": dict(DETAIL, first_z=0.35),
 }
 
-
-def build(src, first_z=None, detail=False):
-    d = yaml.safe_load(open(src)) or {}
-    tr = d["crops"]["template"]["truss"]
-    if first_z is not None:
-        tr["first_z"] = float(first_z)
-    if detail:
-        tr.update(DETAIL_TRUSS)
-    return d
+# `key: value` 줄에서 앞부분과 숫자를 분리 (crop_tuner 와 같은 규칙 — 주석은 건드리지 않는다)
+VAL_RE = re.compile(r"^(\s*([A-Za-z_][\w]*):\s*)(-?[\d.]+)")
 
 
-def render(d):
-    return BANNER + yaml.safe_dump(d, allow_unicode=True, sort_keys=False, width=100)
+def build(src, overrides):
+    """정본을 **줄 단위로** 읽어 지정한 키의 숫자만 바꾼다.
+
+    🔴 yaml.safe_dump 로 다시 쓰면 **주석과 `@tune` 마커가 전부 날아간다** —
+    그러면 파생 장면은 튜너(crop_tuner)로 조절할 수 없다. 줄 단위 치환이면
+    정본의 주석·근거·마커가 파생에도 그대로 남는다."""
+    out, seen = [], set()
+    for ln in open(src):
+        m = VAL_RE.match(ln)
+        if m and m.group(2) in overrides:
+            key = m.group(2)
+            v = overrides[key]
+            # 원본 줄의 표기(정수/소수)를 따라간다 — 파일 스타일을 흔들지 않는다
+            txt = (f"{float(v):g}" if "." in m.group(3)
+                   else (str(int(round(v))) if float(v).is_integer() else f"{float(v):g}"))
+            if "." in m.group(3) and "." not in txt:
+                txt += ".0"
+            ln = ln[:m.start(3)] + txt + ln[m.end(3):]
+            seen.add(key)
+        out.append(ln)
+    missing = set(overrides) - seen
+    if missing:
+        raise SystemExit(
+            f"error: 정본에 없는 키 {sorted(missing)} — obstacles.yaml 에 "
+            f"중립 기본값으로 먼저 추가할 것(그래야 튜너에도 뜬다)")
+    return BANNER + "".join(out)
 
 
 def main():
@@ -83,7 +98,7 @@ def main():
     stale = []
     for name, kw in VARIANTS.items():
         path = os.path.join(CFG, name)
-        text = render(build(SRC, **kw))
+        text = build(SRC, kw)
         cur = open(path).read() if os.path.exists(path) else None
         if a.check:
             if cur != text:

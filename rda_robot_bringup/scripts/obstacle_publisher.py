@@ -163,10 +163,12 @@ def expand_crops(spec):
     rachis_seg = max(1, int(tr.get("rachis_segments", 1)))  # 축 마디 수 (1=종전)
     ped_r = float(tr.get("pedicel_radius", 0.0))            # 0=소과경 없음(종전)
     ped_min = float(tr.get("pedicel_min_len", 0.008))       # 이보다 짧으면 생략
-    #   화방대 축을 **열매 윗면(+z 표면)** 높이에 놓는다(사용자 지시 2026-08-21).
-    #   종전에는 축이 클러스터 **중심**으로 갔다 → 축이 열매 속을 관통했다.
-    #   실제로는 화방대가 열매 위를 지나고 열매가 그 아래에 매달린다(사진 전부).
-    rachis_top = bool(tr.get("rachis_on_top", False))       # False=종전
+    #   화방대 축의 **높이**를 열매 반경의 배수로 준다(사용자 지시 2026-08-21).
+    #     0.0 = 클러스터 **중심**(종전 — 축이 열매 속을 관통했다)
+    #     1.0 = 열매 **윗면(+z 표면)** — 실제로는 화방대가 열매 위를 지난다(사진 전부)
+    #     >1  = 윗면보다 더 위 → 소과경이 길어져 사진의 '매달린' 모습에 가까워진다
+    #   🔴 불리언이 아니라 **연속값**인 이유: 튜너(crop_tuner)가 숫자만 읽는다.
+    rachis_zf = float(tr.get("rachis_z_frac", 0.0))
     stem_color = tpl.get("stem_color", [0.30, 0.50, 0.20, 0.95])
     rachis_color = tpl.get("rachis_color", [0.35, 0.55, 0.25, 0.95])
     fruit_color = tpl.get("fruit_color", [0.90, 0.20, 0.13, 0.97])
@@ -231,9 +233,9 @@ def expand_crops(spec):
                 # ── 화방대 축(줄기 부착점 → 클러스터 중심) ──
                 #   기본은 종전과 같은 **직선 원통 1개**(이름도 그대로 `rachis_r_p_t`).
                 #   rachis_droop/segments 를 주면 아래로 처지는 곡선을 마디로 나눈다.
-                # 축 끝점: rachis_on_top 이면 클러스터 **윗면**(중심 + 열매반경)
+                # 축 끝점: 클러스터 중심에서 열매반경 × rachis_z_frac 만큼 위
                 A = [ax, ay, tz]
-                C = [ax, cy, cz + (f_r if rachis_top else 0.0)]
+                C = [ax, cy, cz + f_r * rachis_zf]
                 axis = _rachis_axis(A, C, rachis_droop, rachis_seg)
                 base = f"rachis_r{ri}_p{pi}_t{ti}"
                 for si in range(len(axis) - 1):
@@ -246,15 +248,13 @@ def expand_crops(spec):
                 # ── 소과경(화방대 축 → 각 열매) ──
                 if ped_r > 0.0:
                     for fi, fp in fruits:
-                        # 열매는 축 **아래**에 매달린다 → 자루는 열매 윗면으로 간다.
-                        target = ([fp[0], fp[1], fp[2] + f_r] if rachis_top else fp)
+                        # 자루는 **열매 윗면**에 붙는다(꼭지가 나는 자리).
+                        target = [fp[0], fp[1], fp[2] + f_r]
                         q = _closest_on_polyline(axis, target)
                         d = math.dist(q, target)
                         if d <= ped_min:
                             continue          # 열매가 축에 붙어 있으면 자루가 없다
-                        e = list(target) if rachis_top else [
-                            q[k] + (target[k] - q[k]) * max(0.0, (d - f_r * 0.6)) / d
-                            for k in range(3)]
+                        e = list(target)
                         items.append(_seg_cylinder(
                             f"pedicel_r{ri}_p{pi}_t{ti}_f{fi}", q, e,
                             ped_r, rachis_color))
