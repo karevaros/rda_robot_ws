@@ -410,6 +410,10 @@ def main(argv=None):
     ap = argparse.ArgumentParser(
         description="mounts.yaml → 통합 URDF (rda_robot.urdf.xacro 대체)")
     ap.add_argument("--mounts", help="mounts.yaml 경로 (생략 시 정본 소스의 config/mounts.yaml)")
+    ap.add_argument("--preset", metavar="NAME",
+                    help="로봇 구성 프리셋 이름(presets.yaml). mounts 를 그 구성의 것으로 "
+                         "고른다. --mounts 를 함께 주면 --mounts 가 이긴다. "
+                         "--preset list 로 목록 확인.")
     ap.add_argument("-o", "--out", help="출력 파일 (생략 시 stdout)")
     ap.add_argument("--name", default="rda_robot", help="robot name")
     ap.add_argument("--joint-effort", metavar="YAML",
@@ -436,6 +440,23 @@ def main(argv=None):
         model_args.setdefault(slot, {})[key] = val
 
     mounts = a.mounts
+    if not mounts and a.preset:
+        from . import presets as _pre
+        if str(a.preset).strip().lower() == "list":
+            for nm in _pre.names():
+                print(_pre.describe(nm))
+                print()
+            return 0
+        try:
+            e = _pre.resolve(a.preset)
+        except (KeyError, FileNotFoundError) as ex:
+            print(f"error: {ex}", file=sys.stderr)
+            return 2
+        mounts = e["mounts"]
+        # 프리셋을 쓸 때 **어떤 구성으로 조립했는지** stderr 로 남긴다 — 산출물만 보고는
+        # 기본 구성인지 시험 구성인지 구분이 안 된다(조용한 혼동의 씨앗).
+        print(f"[compose] 프리셋 '{e['name']}' ({e['label']}) → mounts={mounts}",
+              file=sys.stderr)
     if not mounts:
         mounts = os.path.join(os.path.dirname(reg.models_dir()), "mounts.yaml")
     try:

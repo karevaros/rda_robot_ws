@@ -49,13 +49,42 @@ def _ground_offset(urdf_xml):
         return 0.0
 
 
+def _preset(context):
+    """`robot_config` 프리셋 해석 결과 dict 또는 None(해석 실패/미사용).
+
+    프리셋은 mounts·srdf·scene 을 **함께** 고른다 — 하나만 바꾸면 조용히 틀린다
+    (특히 SRDF 는 링크 이름에 묶여 있어 스탠드 구성에 정본을 쓰면 계획이 막힌다)."""
+    name = LaunchConfiguration("robot_config").perform(context).strip()
+    if not name or name.lower() in ("", "none"):
+        return None
+    # 이 함수는 mounts·srdf·scene 해석에서 각각 불린다 → 결과를 캐시해 **안내를 한 번만** 낸다
+    cache = getattr(_preset, "_cache", None)
+    if cache is not None and cache[0] == name:
+        return cache[1]
+    try:
+        from rda_robot_assembler import presets
+        e = presets.resolve(name)
+    except Exception as ex:                     # noqa: BLE001
+        print(f"[pregrasp_demo.launch] robot_config='{name}' 해석 실패 → 개별 인자 사용: {ex}")
+        _preset._cache = (name, None)
+        return None
+    print(f"[pregrasp_demo.launch] 로봇 구성 = {e['name']} ({e['label']})")
+    if e.get("note"):
+        print("  ⚠ " + e["note"].splitlines()[0])
+    _preset._cache = (name, e)
+    return e
+
+
 def _obstacles_path(context):
     """장면 정의 파일. 'auto'=정본. 시험용 변형(예: 현실 화방 높이 first_z=0.35)은
     정본을 고치지 말고 사본을 만들어 이 인자로 넘긴다."""
     v = LaunchConfiguration("obstacles_file").perform(context).strip()
-    if not v or v.lower() == "auto":
-        return os.path.join(DESC_SRC, "config", "obstacles.yaml")
-    return v
+    if v and v.lower() != "auto":
+        return v                                     # 직접 지정이 최우선
+    e = _preset(context)
+    if e and e.get("scene"):
+        return e["scene"]
+    return os.path.join(DESC_SRC, "config", "obstacles.yaml")
 
 
 def _setup(context, *args, **kwargs):
@@ -63,7 +92,12 @@ def _setup(context, *args, **kwargs):
 
     cfg = get_package_share_directory("rda_robot_moveit_config")
     lc = LaunchConfiguration
-    mounts = lc("mounts_file").perform(context)
+    preset = _preset(context)
+    mounts = lc("mounts_file").perform(context).strip()
+    if (not mounts or mounts.lower() == "auto") and preset and preset.get("mounts"):
+        mounts = preset["mounts"]
+    if not mounts or mounts.lower() == "auto":
+        mounts = os.path.join(DESC_SRC, "config", "mounts.yaml")
 
     urdf_xml = subprocess.check_output(
         ["ros2", "run", "rda_robot_assembler", "compose_urdf", "--mounts", mounts],
@@ -72,7 +106,7 @@ def _setup(context, *args, **kwargs):
     #   전용 SRDF 가 필요하다. 정본을 덮어쓰지 않고 인자로 갈아끼운다.
     srdf_path = lc("srdf_file").perform(context).strip()
     if not srdf_path or srdf_path.lower() == "auto":
-        srdf_path = os.path.join(cfg, "config", "rda_robot.srdf")
+        srdf_path = (preset or {}).get("srdf") or os.path.join(cfg, "config", "rda_robot.srdf")
     with open(srdf_path) as f:
         srdf_xml = f.read()
 
@@ -163,6 +197,18 @@ def _setup(context, *args, **kwargs):
         "obstacles_file": _obstacles_path(context),
         "strategy": lc("strategy").perform(context),
         "naive_steps": int(lc("naive_steps").perform(context)),
+        # frontal(회피 없음) 기하 — 거터 법선 · 캐노피 밖 진입
+        "gutter_prefix": lc("gutter_prefix").perform(context),
+        "canopy_margin": float(lc("canopy_margin").perform(context)),
+        "canopy_row_width": float(lc("canopy_row_width").perform(context)),
+        "canopy_depth": float(lc("canopy_depth").perform(context)),
+        "frontal_from_canopy": (lc("frontal_from_canopy").perform(context).lower()
+                                in ("1", "true", "yes")),
+        # 수확 대상 선정 규칙
+        "select_order": lc("select_order").perform(context),
+        "require_visible": lc("require_visible").perform(context).lower() in ("1", "true", "yes"),
+        "camera_link": lc("camera_link").perform(context),
+        "occlusion_margin": float(lc("occlusion_margin").perform(context)),
         "show_collisions": lc("show_collisions").perform(context).lower() in ("1", "true", "yes"),
         "collision_probe_hz": float(lc("collision_probe_hz").perform(context)),
         "planner_id": lc("planner_id").perform(context),
@@ -218,6 +264,13 @@ def _setup(context, *args, **kwargs):
     scanning = any(lc(a).perform(context).lower() in ("1", "true", "yes")
                    for a in ("scan_all", "diag_straight", "bench", "verify_region",
                              "bench_strategy"))
+    # reach_repeat 은 숫자 인자라 위 목록에 안 들어간다 — 빠뜨리면 진단이 끝나거나
+    #   데모 노드가 죽어도 나머지 스택이 남아 **아무 일도 안 하며 계속 돈다**
+    #   (2026-08-21 실측: 노드가 예외로 죽었는데 10분간 매달려 있었다).
+    try:
+        scanning = scanning or int(lc("reach_repeat").perform(context)) > 0
+    except ValueError:
+        pass
     if scanning:
         # 측정/스캔 모드는 데모 노드가 끝나면 할 일이 없다 → 스택 전체를 내린다.
         # (안 그러면 move_group·obstacle_publisher 가 남아 사용자가 Ctrl-C 를 눌러야 한다.)
@@ -239,8 +292,13 @@ def _setup(context, *args, **kwargs):
 
 def generate_launch_description():
     return LaunchDescription([
-        DeclareLaunchArgument("mounts_file",
-                              default_value=os.path.join(DESC_SRC, "config", "mounts.yaml")),
+        DeclareLaunchArgument("robot_config", default_value="base",
+                              description="로봇 구성 프리셋(presets.yaml): base(정본) | "
+                                          "stand(+500mm 스탠드, 채택 안 한 시험 구성). "
+                                          "mounts·SRDF·장면을 **함께** 고른다 — 하나만 "
+                                          "바꾸면 조용히 틀린다. 개별 인자를 주면 그쪽 우선."),
+        DeclareLaunchArgument("mounts_file", default_value="auto",
+                              description="mounts.yaml 경로. 'auto'=robot_config 프리셋의 것."),
         DeclareLaunchArgument("target", default_value="[0.5,-0.4,0.9]",
                               description="목표 토마토 월드좌표 [x,y,z] (use_yaml_target=false 일 때)"),
         DeclareLaunchArgument("use_yaml_target", default_value="true",
@@ -344,6 +402,30 @@ def generate_launch_description():
                                           "→파지→후퇴) / direct(자유공간 모션플래너로 grasp 직행) / "
                                           "naive(대조군 — 관절 직선보간) / "
                                           "frontal(대조군 — 정면에서 직선 진입, 회피 알고리즘 없음)."),
+        DeclareLaunchArgument("gutter_prefix", default_value="gutter",
+                              description="정면 법선을 유도할 재배 거터(행잉베드) 객체 이름 접두사."),
+        DeclareLaunchArgument("frontal_from_canopy", default_value="true",
+                              description="frontal 대조군의 직선 구간을 **캐노피 밖에서** 시작. "
+                                          "false 면 종전처럼 standoff 만 직선."),
+        DeclareLaunchArgument("canopy_margin", default_value="0.05",
+                              description="캐노피 바깥 지점에서 더 물러설 여유[m]."),
+        DeclareLaunchArgument("canopy_depth", default_value="0.6",
+                              description="접근축 방향으로 '같은 행'으로 볼 깊이[m]. 행은 "
+                                          "접근축 방향으로 떨어져 있으므로 이것이 행을 가르는 "
+                                          "실제 기준이다(측방 폭만으로는 못 가른다)."),
+        DeclareLaunchArgument("canopy_row_width", default_value="0.45",
+                              description="캐노피 경계를 잴 때 '같은 행'으로 볼 측방 폭[m]. "
+                                          "너무 크면 다음 행 거터까지 잡혀 진입 거리가 부푼다."),
+        DeclareLaunchArgument("select_order", default_value="normal",
+                              description="수확 대상 정렬: normal(기본 — 거터 법선 방향 "
+                                          "수평거리가 가까운 것부터) | dist3d(종전 3D 거리) | z(높이차)."),
+        DeclareLaunchArgument("require_visible", default_value="true",
+                              description="**다른 토마토에 가려진 열매는 대상에서 뺀다**"
+                                          "(eye-to-hand 카메라 시선 기준). 줄기·화방대는 세지 않는다."),
+        DeclareLaunchArgument("camera_link", default_value="auto",
+                              description="가림 판정 시선 원점 링크. auto=sensor2(eye-to-hand) 계열."),
+        DeclareLaunchArgument("occlusion_margin", default_value="0.005",
+                              description="가림 판정 여유[m] — 가리는 열매 반경에 더해 본다."),
         DeclareLaunchArgument("naive_steps", default_value="40",
                               description="naive 대조군의 관절보간 분해 점수(충돌 검사 해상도)."),
         DeclareLaunchArgument("show_collisions", default_value="false",

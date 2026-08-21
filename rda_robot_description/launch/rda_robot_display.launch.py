@@ -67,10 +67,32 @@ def _ground_offset(urdf_xml):
         return 0.0, f"URDF 에서 바닥 오프셋을 못 읽어 z=0 을 씁니다 ({e})."
 
 
+def _scene_file(context, preset):
+    """장면 yaml — 직접 지정 > 프리셋 > 정본."""
+    v = LaunchConfiguration("obstacles_file").perform(context).strip()
+    if v and v.lower() != "auto":
+        return v
+    return (preset or {}).get("scene") or os.path.expanduser(
+        "~/robot_ws/src/rda_robot_description/config/obstacles.yaml")
+
+
 def _launch_setup(context, *args, **kwargs):
     pkg = FindPackageShare("rda_robot_description")
     rviz_path = PathJoinSubstitution([pkg, "rviz", "rda_robot.rviz"])
-    mounts_file = LaunchConfiguration("mounts_file").perform(context)
+    # 로봇 구성 프리셋(presets.yaml) — mounts·장면을 함께 고른다. 개별 인자가 우선.
+    preset = None
+    _pname = LaunchConfiguration("robot_config").perform(context).strip()
+    if _pname and _pname.lower() != "none":
+        try:
+            from rda_robot_assembler import presets as _pre
+            preset = _pre.resolve(_pname)
+            print(f"[rda_robot_display] 로봇 구성 = {preset['name']} ({preset['label']})")
+        except Exception as _ex:                    # noqa: BLE001
+            print(f"[rda_robot_display] robot_config='{_pname}' 해석 실패 → 개별 인자: {_ex}")
+    mounts_file = LaunchConfiguration("mounts_file").perform(context).strip()
+    if (not mounts_file or mounts_file.lower() == "auto"):
+        mounts_file = (preset or {}).get("mounts") or os.path.expanduser(
+            "~/robot_ws/src/rda_robot_description/config/mounts.yaml")
 
     # initial_pose · base_placement 읽기(있으면 jsp zeros / 로봇 배치로)
     zeros = {}
@@ -139,32 +161,31 @@ def _launch_setup(context, *args, **kwargs):
         nodes.append(Node(package="rda_robot_bringup",
                           executable="obstacle_publisher.py",
                           output="screen",
-                          parameters=[{"obstacles_file":
-                                       LaunchConfiguration("obstacles_file").perform(context)}]))
+                          parameters=[{"obstacles_file": _scene_file(context, preset)}]))
     return nodes
 
 
 def generate_launch_description():
-    default_mounts = os.path.expanduser(
-        "~/robot_ws/src/rda_robot_description/config/mounts.yaml")
+    preset_arg = DeclareLaunchArgument(
+        "robot_config", default_value="base",
+        description="로봇 구성 프리셋(presets.yaml): base(정본) | stand(+500mm, 시험 구성). "
+                    "mounts·장면을 함께 고른다. 개별 인자를 주면 그쪽 우선.")
     mounts_arg = DeclareLaunchArgument(
-        "mounts_file", default_value=default_mounts,
-        description="결합/초기포즈 yaml 경로")
+        "mounts_file", default_value="auto",
+        description="결합/초기포즈 yaml 경로. 'auto'=robot_config 프리셋의 것.")
     collision_arg = DeclareLaunchArgument(
         "collision", default_value="true",
         description="자충돌 모니터 실행 여부(RViz 빨강 마커 표시)")
-    default_obstacles = os.path.expanduser(
-        "~/robot_ws/src/rda_robot_description/config/obstacles.yaml")
     obstacles_arg = DeclareLaunchArgument(
         "obstacles", default_value="true",
         description="장애물 환경 표시 여부(world TF + 장애물 마커)")
     obstacles_file_arg = DeclareLaunchArgument(
-        "obstacles_file", default_value=default_obstacles,
+        "obstacles_file", default_value="auto",
         description="장애물 정의 yaml 경로")
     base_yaw_arg = DeclareLaunchArgument(
         "base_yaw", default_value="auto",
         description="world→base_link yaw[rad]. 'auto'=mounts.yaml 의 base_placement 값 사용. "
                     "숫자를 주면 그 값으로 덮어씀(예: -1.5708=시계 90°).")
-    return LaunchDescription([mounts_arg, collision_arg, obstacles_arg,
+    return LaunchDescription([preset_arg, mounts_arg, collision_arg, obstacles_arg,
                               obstacles_file_arg, base_yaw_arg,
                               OpaqueFunction(function=_launch_setup)])

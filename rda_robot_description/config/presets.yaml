@@ -1,0 +1,42 @@
+# 로봇 구성 프리셋 — "이 구성으로 띄워라" 를 한 이름으로 부르기 위한 표.
+#
+#  왜 필요한가: 구성이 바뀌면 **함께 바뀌어야 하는 파일이 여럿**이다.
+#    · mounts  : 슬롯 결합값(어떤 베이스·어디에 팔을 붙이나)
+#    · srdf    : 자충돌 ACM — **링크 이름·형상에 묶여 있다**. 링크가 늘어난 구성(스탠드)에서
+#                정본 SRDF 를 그대로 쓰면 새 링크의 자충돌 쌍이 없어 계획이 막힌다.
+#    · scene   : 장면(온실) 정의. 도달권이 달라지면 유의미한 작물 배치도 달라진다.
+#  하나라도 빠뜨리면 **조용히 틀린 결과**가 나오므로 셋을 한 이름으로 묶는다.
+#
+#  쓰는 법
+#    ros2 launch rda_robot_moveit_config pregrasp_demo.launch.py robot_config:=stand
+#    ros2 launch rda_robot_description rda_robot_display.launch.py robot_config:=stand
+#    ros2 run rda_robot_assembler compose_urdf --preset stand -o /tmp/stand.urdf
+#  개별 인자(mounts_file·srdf_file·obstacles_file)를 직접 주면 그쪽이 우선한다.
+#
+#  경로는 이 파일 기준 상대경로. srdf 는 rda_robot_moveit_config/config/ 기준.
+
+default: base
+
+presets:
+  base:
+    label: "기본 구성 (정본)"
+    mounts: mounts.yaml
+    srdf: rda_robot.srdf
+    scene: obstacles.yaml
+    note: >
+      2026-08-18 결정으로 **채택된 구성**. 팔 베이스 z=0.115(Scout 상판).
+      장면의 truss.first_z 는 0.10 — 이 팔의 도달권에 최하단 화방을 넣으려고
+      현실값 0.35 에서 낮춰 둔 값이다(작물을 로봇에 맞춰 내린 것).
+
+  stand:
+    label: "스탠드 +500mm (시험 구성 · 채택 안 함)"
+    mounts: mounts_stand.yaml
+    srdf: rda_robot_stand.srdf
+    scene: obstacles_real_truss.yaml
+    note: >
+      팔 베이스를 원통 라이저로 +0.500m 올린 구성. 장면은 **현실 화방 높이
+      first_z=0.35**. 🔴 2026-08-18 사용자 결정으로 **채택하지 않는다** —
+      실기에 스탠드가 없고, 넣으면 인도 모델이 실기와 어긋난다.
+      재현 가능한 시험 구성으로만 남긴다(도달권-스탠드-시험.md 9장).
+      ⚠ 이 구성의 수치를 보고서에 인용할 때는 **"채택 안 한 시험 구성"** 을 함께 적을 것.
+      실측: 현실 화방 높이에서 기본 구성 도달 0/74 → 스탠드 16~17/74.

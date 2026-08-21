@@ -205,6 +205,35 @@ class PregraspDemo(Node):
         # [대조군] naive 전략의 관절보간 분해 점수. 충돌 검사 해상도를 정하는 값이라
         #   너무 성기면 얇은 줄기를 통과해도 '충돌 없음' 으로 보인다.
         self.declare_parameter("naive_steps", 40)
+        # frontal(회피 없음) 대조군 기하 ─────────────────────────────────
+        #   정면 법선을 어느 객체에서 유도할지(이름 접두사). 재배 거터 = 행잉베드.
+        self.declare_parameter("gutter_prefix", "gutter")
+        #   직선 진입을 **캐노피 밖에서** 시작한다(사용자 정의 2026-08-21). 캐노피 바깥
+        #   지점에서 이 여유[m]만큼 더 물러선 곳이 진입 시작점.
+        self.declare_parameter("canopy_margin", 0.05)
+        #   캐노피 경계를 잴 때 '같은 행'으로 볼 측방 폭[m]. 이걸 안 두면 다음 행 거터까지
+        #   잡혀 진입 거리가 통로 전체로 부풀어 무의미해진다.
+        self.declare_parameter("canopy_row_width", 0.45)
+        #   접근축 방향으로 '같은 행'으로 볼 깊이[m]. 행은 접근축 방향으로 떨어져 있으므로
+        #   **이것이 행을 가르는 실제 기준**이다(측방 폭만으로는 못 가른다).
+        self.declare_parameter("canopy_depth", 0.6)
+        #   캐노피 밖 진입을 쓰지 않고 종전처럼 standoff 만 직선으로 하려면 false.
+        self.declare_parameter("frontal_from_canopy", True)
+        # ── 수확 대상 선정 규칙 (사용자 정의 2026-08-21) ────────────────
+        #   select_order = 어떤 거리로 '가까운 것부터' 를 정할지
+        #     normal : **거터(행잉베드) 법선 방향 수평거리** — 통로에서 작물행 쪽으로 잰
+        #              수직(perpendicular) 거리. 얕게 박힌 열매(통로에 가까운 것)부터.
+        #     dist3d : 종전 — 팔 베이스에서의 3D 유클리드 거리
+        #     z      : 팔 베이스와의 높이(z) 차이
+        self.declare_parameter("select_order", "normal")
+        #   require_visible = **다른 열매에 가려진 열매는 대상에서 뺀다**(카메라 시선 기준).
+        #     eye-to-hand 카메라 원점에서 열매 중심으로 그은 선분을 다른 열매 구가 막으면 제외.
+        #     🔴 줄기·화방대는 세지 않는다(사용자 정의: "다른 토마토에 가려지지 않은 것").
+        self.declare_parameter("require_visible", True)
+        #   시선 기준 카메라 링크. 'auto' 면 sensor2(eye-to-hand) 계열을 TF 에서 찾는다.
+        self.declare_parameter("camera_link", "auto")
+        #   가림 판정 여유[m]. 가리는 열매 반경에 더해 본다(스쳐 지나가는 경우도 가림으로).
+        self.declare_parameter("occlusion_margin", 0.005)
         # 안전성 재검증 해상도[rad]. 웨이포인트 사이를 이 간격 이하로 잘게 나눠 검사한다.
         #   🔴 전략마다 웨이포인트 밀도가 다르면(플래너 44점 vs 보간 40점) 충돌 개수를
         #     그대로 비교할 수 없고, 성긴 표본은 **얇은 줄기를 지나치며 놓친다**.
@@ -2076,32 +2105,28 @@ class PregraspDemo(Node):
                 return None
             sol = self.solve_pregrasp(tgt[1], tgt[2])
             return (tgt[0], tgt[1], tgt[2], sol) if sol else (tgt[0], tgt[1], tgt[2], None)
-        # 자동: 전체 열매를 base(link0)로부터 가까운 순으로 정렬 → 앞 max_scan 개 시도
-        tg = self._all_targets()
-        if not tg:
-            return None
+        # 자동: **선정 규칙**(거터 법선 수평거리 · 가림 제외)대로 정렬 → 앞 max_scan 개 시도
+        #   ⚠ 종전에는 여기서만 따로 3D 거리로 정렬했다. 목록(`_sorted_targets`)과 기준이
+        #     달라지면 '목록 1순위와 데모가 고르는 열매가 다른' 조용한 불일치가 생긴다.
+        tg = self._sorted_targets()
         want = str(self.get_parameter("target_name").value or "").strip()
         if want:
-            hit = [t for t in tg if str(t[0]) == want]
+            # 이름으로 못박은 목표는 **선정 규칙을 우회**한다 — 가림 필터가 걷어낸 열매도
+            #   비교 실험에서는 일부러 지정할 수 있어야 한다.
+            hit = [t for t in self._all_targets() if str(t[0]) == want]
             if not hit:
                 self.get_logger().error(f"target_name '{want}' 을 장면에서 못 찾음 → 자동 선택으로")
             else:
                 name, p_fruit, r = hit[0]
-                self.get_logger().info(f"목표 고정(target_name) = {name}")
+                self.get_logger().info(f"목표 고정(target_name) = {name} (선정 규칙 우회)")
                 sol = self.solve_pregrasp(p_fruit, r)
                 if sol is None and getattr(self, "_acm_mode", "region") != "none":
                     self._remember_target(name, p_fruit, r)
                     if self._allow_for_target(name):
                         sol = self.solve_pregrasp(p_fruit, r)
                 return name, p_fruit, r, sol
-        bxy = self._base_xy()
-        if bxy is not None:
-            # link0(≈base xy, z 0.35) 로부터 **3D 거리**로 정렬 → 가장 낮고 가까운(도달 쉬운)
-            #  열매 우선. (수평거리만 쓰면 팔 한계인 높은 열매를 골라 접근이 어려움.)
-            l0 = self._base_xyz()
-            if l0 is None:
-                l0 = np.array([bxy[0], bxy[1], 0.35])
-            tg.sort(key=lambda t: float(np.linalg.norm(t[1] - l0)))
+        if not tg:
+            return None
         n = int(self.get_parameter("max_scan").value)
         self.get_logger().info(f"도달 가능한 열매 탐색(가까운 {min(n, len(tg))}개, 전체 {len(tg)})…")
         for name, p_fruit, r in tg[:n]:
@@ -2556,12 +2581,9 @@ class PregraspDemo(Node):
             self._bench_crops = self._crop_objects()
             self.get_logger().info(f"작물 객체 {len(self._bench_crops)}개를 ACM 조작 대상으로 잡음")
         self._bench_wait_scene_stable()
-        tg = self._all_targets()
-        bxy = self._base_xy()
-        l0 = self._base_xyz()
-        if l0 is None:
-            l0 = np.array([bxy[0], bxy[1], 0.35]) if bxy is not None else np.array([0.0, 0.0, 0.35])
-        tg.sort(key=lambda t: float(np.linalg.norm(t[1] - l0)))
+        # ★ 표본도 **운용과 같은 선정 규칙**으로 뽑는다(거터 법선 수평거리 · 가림 제외).
+        #   기준이 다르면 '실제로는 안 고를 열매'에서 잰 수치를 보고서에 싣게 된다.
+        tg = self._sorted_targets()
         nmax = int(self.get_parameter("bench_n").value)
         fixed = [t for t in (self.get_parameter("bench_targets").value or []) if t]
         if fixed:
@@ -2690,9 +2712,14 @@ class PregraspDemo(Node):
         #   (구 영역을 먼저 걷어내지 않으면 허용 해제된 구가 열매 자리의 장애물이 된다)
         self._clear_zone()
         self._set_allow(self._bench_crops, False)
-        stalk = self._stalk_of(name)
-        if stalk:
-            self._set_allow([stalk], True)
+        # 🔴 **수확 대상 자신은 허용한다** — 목표 화방대(불가피하게 스친다)와 **목표 열매**.
+        #   열매를 충돌객체로 발행하면(publish_targets) 손에 든 사본 `grasped_<이름>` 이
+        #   장면에 남은 원본과 겹쳐 **자기 자신과의 충돌**이 접촉의 대부분으로 잡힌다
+        #   (2026-08-21 실측: 접촉 쌍 상위가 전부 `fruit_X|grasped_fruit_X` 였다).
+        #   무는 대상을 만지는 것은 충돌이 아니다.
+        allow = [x for x in (self._stalk_of(name), name) if x]
+        if allow:
+            self._set_allow(allow, True)
         cpairs = {}
         # ★ 두 전략을 **같은 해상도**로 검사한다 — 웨이포인트 밀도가 다르면 충돌 개수를
         #   비교할 수 없고, 성긴 표본은 얇은 줄기 사이를 그냥 지나친다.
@@ -2985,17 +3012,79 @@ class PregraspDemo(Node):
                     q_pre=q_grasp, q_grasp=q_grasp, q_home=q_home,
                     gopen=gopen, close=close, home=home, sol=sol)
 
-    def _frontal_dir(self, p_fruit):
-        """**정면 = 행잉베드(재배 행) 면에 수직인 수평 방향**.
+    def _scene_objects(self):
+        """장면 yaml 의 obstacles 목록(작물 전개 포함). 실패 시 [].
 
-        🔴 'base 에서 열매로 가는 방향' 이 아니다 — 그건 로봇이 행 앞에 정확히 서 있을
-        때만 법선과 같고, 옆으로 비켜 있으면 어긋난다(실측: 이 장면에서 최대 14°).
-        재배 행은 `obstacles.yaml crops.rows` 가 `x` 로 정의한다(행은 Y 로 뻗는다)
-        ⇒ 행 평면 x=const 의 수평 법선은 ±X. 목표 열매가 속한 행을 고르고, **통로(로봇)
-        쪽에서 작물 쪽으로** 향하도록 부호를 정한다.
+        🔴 **캐시한다** — 정렬키(`_order_key`)가 열매마다 이걸 부르는데, 캐시가 없으면
+        열매 74개 × 라운드마다 yaml 파싱+작물 전개가 돌아 선별이 수 분씩 걸린다
+        (2026-08-21 실측으로 드러남). 파일 mtime 이 바뀌면 자동으로 다시 읽는다."""
+        path = self.get_parameter("obstacles_file").value or self._op.default_yaml()
+        try:
+            mt = os.path.getmtime(path)
+        except OSError:
+            mt = 0.0
+        c = getattr(self, "_scene_cache", None)
+        if c and c[0] == path and c[1] == mt:
+            return c[2]
+        try:
+            import yaml
+            data = yaml.safe_load(open(path)) or {}
+            try:
+                self._op.expand_crops(data)
+            except Exception:                           # noqa: BLE001
+                pass
+            objs = list(data.get("obstacles", []))
+        except Exception:                               # noqa: BLE001
+            objs = []
+        self._scene_cache = (path, mt, objs)
+        self._gutter_cache = None                       # 장면이 바뀌면 거터도 다시
+        return objs
+
+    def _gutters(self):
+        """장면의 재배 거터(행잉베드) 목록 [(중심 xyz, rpy, size), ...].
+
+        이름 접두사(`gutter_prefix`, 기본 'gutter')로 고른다. 거터는 박스이고
+        **긴 축이 행 방향**, 짧은 수평축이 **법선**이다."""
+        objs = self._scene_objects()                    # 캐시 무효화도 여기서 일어난다
+        c = getattr(self, "_gutter_cache", None)
+        if c is not None:
+            return c
+        pre = str(self.get_parameter("gutter_prefix").value or "gutter").strip()
+        out = []
+        for o in objs:
+            if not str(o.get("name", "")).startswith(pre):
+                continue
+            if o.get("type") != "box" or "size" not in o:
+                continue
+            pose = o.get("pose") or {}
+            out.append((str(o["name"]),
+                        np.array([float(v) for v in pose.get("xyz", [0, 0, 0])]),
+                        np.array([float(v) for v in pose.get("rpy", [0, 0, 0])]),
+                        np.array([float(v) for v in o["size"]])))
+        self._gutter_cache = out
+        return out
+
+    @staticmethod
+    def _rpy_mat(rpy):
+        cr, sr = math.cos(rpy[0]), math.sin(rpy[0])
+        cp, sp = math.cos(rpy[1]), math.sin(rpy[1])
+        cy, sy = math.cos(rpy[2]), math.sin(rpy[2])
+        return np.array([[cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr],
+                         [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
+                         [-sp,     cp * sr,                cp * cr]])
+
+    def _frontal_dir(self, p_fruit):
+        """**정면 = 재배 거터(행잉베드) 면에 수직인 수평 방향** (사용자 정의 2026-08-21).
+
+        🔴 'base 에서 열매로 가는 방향' 이 아니다 — 그건 로봇이 거터 앞에 정확히 서 있을
+        때만 법선과 같고, 옆으로 비켜 있으면 어긋난다(이 장면 실측 12.7°).
+
+        유도: 목표 열매에 가장 가까운 거터 박스를 골라, 그 **로컬 축 중 수평 성분이
+        가장 큰 '짧은 축'** 을 법선으로 쓴다(긴 축 = 행 방향). 박스의 `rpy` 를 그대로
+        반영하므로 거터가 돌아가 있어도 따라온다. 부호는 **통로(로봇) → 작물** 방향.
 
         · `approach_yaw_deg` 를 주면 그 값이 우선(월드 yaw[도]).
-        · 행 정보를 못 읽으면 base→열매 수평방향으로 물러선다(경고).
+        · 거터를 못 찾으면 `crops.rows[*].x` 로, 그것도 없으면 base→열매로 물러선다(경고).
         """
         yaw = float(self.get_parameter("approach_yaw_deg").value)
         if not math.isnan(yaw):
@@ -3003,6 +3092,37 @@ class PregraspDemo(Node):
                                       math.sin(math.radians(yaw)), 0.0]))
         p = np.asarray(p_fruit, float)
         bxy = self._base_xy()
+        ref = np.array([bxy[0], bxy[1]]) if bxy is not None else np.zeros(2)
+
+        g = self._gutters()
+        if g:
+            # 같은 거터에 대해서는 결과가 같다 → 거터 이름으로 캐시(정렬이 열매마다 부른다)
+            near = min(g, key=lambda t: float(np.linalg.norm(t[1][:2] - p[:2])))
+            fc = getattr(self, "_fdir_cache", None)
+            if fc is not None and fc[0] == near[0]:
+                self._frontal_src = f"거터 {near[0]}"
+                return fc[1]
+            # 열매에서 가장 가까운 거터(수평거리)
+            name, c, rpy, size = min(
+                g, key=lambda t: float(np.linalg.norm(t[1][:2] - p[:2])))
+            R = self._rpy_mat(rpy)
+            # 로컬 축 3개 중 **수평 성분이 큰 것 2개**가 상면 위 방향들 → 그중 size 가 작은 쪽이 법선
+            cand = []
+            for i in range(3):
+                ax = R[:, i]
+                horiz = float(np.hypot(ax[0], ax[1]))
+                if horiz < 0.5:                     # 거의 수직축(두께) → 법선 후보 아님
+                    continue
+                cand.append((float(size[i]), i, ax))
+            if cand:
+                _, i, ax = min(cand, key=lambda t: t[0])       # 짧은 수평축 = 법선
+                n = PG._unit(np.array([ax[0], ax[1], 0.0]))
+                if float(np.dot(n[:2], c[:2] - ref)) < 0:      # 통로 → 작물 쪽으로
+                    n = -n
+                self._frontal_src = f"거터 {name}"
+                self._fdir_cache = (name, n)
+                return n
+
         rows = []
         try:
             import yaml
@@ -3010,19 +3130,72 @@ class PregraspDemo(Node):
             data = yaml.safe_load(open(path)) or {}
             rows = [float(r["x"]) for r in ((data.get("crops") or {}).get("rows") or [])
                     if "x" in r]
-        except Exception:
+        except Exception:                                   # noqa: BLE001
             rows = []
         if rows:
+            self.get_logger().warn("거터 객체를 못 찾음 → crops.rows[*].x 로 법선 유도")
             x_row = min(rows, key=lambda x: abs(x - float(p[0])))
-            ref = float(bxy[0]) if bxy is not None else 0.0
-            sgn = 1.0 if (x_row - ref) >= 0 else -1.0
-            return np.array([sgn, 0.0, 0.0])
+            self._frontal_src = "crops.rows"
+            return np.array([1.0 if (x_row - ref[0]) >= 0 else -1.0, 0.0, 0.0])
         self.get_logger().warn(
-            "재배 행 정보(crops.rows[*].x)를 못 읽음 → 정면을 base→열매 방향으로 대체")
-        hv = (p[:2] - bxy) if bxy is not None else np.array([1.0, 0.0])
+            "거터·행 정보를 못 읽음 → 정면을 base→열매 방향으로 대체(법선이 아니다)")
+        self._frontal_src = "base→열매(폴백)"
+        hv = (p[:2] - ref)
         if np.linalg.norm(hv) < 1e-6:
             hv = np.array([1.0, 0.0])
         return PG._unit(np.array([hv[0], hv[1], 0.0]))
+
+    def _canopy_entry_dist(self, a, p_grasp):
+        """직선 진입을 시작할 거리[m] — **p_grasp 에서 뒤로 얼마나 물러설지**. 못 재면 None.
+
+        회피 없는 대조군의 직선 구간은 *캐노피 밖에서* 시작해야 한다(사용자 정의
+        2026-08-21). 마지막 12cm 만 직선이면 그 앞 구간을 무엇으로 가든 결과가 섞인다.
+
+        🔴 캐노피에 들어가는 것은 **TCP 가 아니라 그리퍼 손끝**이다. 이 팔은 파지 자세에서
+        이미 TCP 가 작물행 앞면보다 바깥에 있고(실측 0.663 vs 0.71), 손가락만 21cm 들어간다.
+        그래서 기준을 **손끝**으로 잡는다: 진입 시작점에서 손끝이 캐노피 앞면보다 밖에 있을 것.
+
+        🔴 **행 하나만 본다.** 접근축 방향으로 `canopy_depth` 안쪽에 있는 객체만 센다.
+        이걸 안 두면 통로 건너 뒷줄 거터까지 '캐노피'로 잡혀 진입 거리가 1.7m 로 부푼다
+        (2026-08-21 실측 버그). 측방 폭(`canopy_row_width`)만으로는 행을 못 가른다 —
+        행은 **접근축 방향**으로 떨어져 있기 때문이다.
+        """
+        p = np.asarray(p_grasp, float)
+        s_g = float(np.dot(a, p))
+        lat = float(self.get_parameter("canopy_row_width").value)
+        depth = float(self.get_parameter("canopy_depth").value)
+        s_min = None
+        for o in self._scene_objects():
+            pose = o.get("pose") or {}
+            if "xyz" not in pose:
+                continue
+            c = np.array([float(v) for v in pose["xyz"]])
+            s = float(np.dot(a, c))
+            if s > s_g + depth or s < s_g - depth:      # 다른 행 — 제외
+                continue
+            d = c - p
+            if float(np.linalg.norm(d - np.dot(d, a) * a)) > lat:
+                continue
+            t = o.get("type")
+            if t == "box" and "size" in o:
+                R = self._rpy_mat([float(v) for v in (pose.get("rpy") or [0, 0, 0])])
+                size = [float(v) for v in o["size"]]
+                rad = sum(0.5 * size[k] * abs(float(np.dot(R[:, k], a))) for k in range(3))
+            elif t == "cylinder" and "radius" in o and "height" in o:
+                R = self._rpy_mat([float(v) for v in (pose.get("rpy") or [0, 0, 0])])
+                zc = abs(float(np.dot(R[:, 2], a)))
+                rad = (0.5 * float(o["height"]) * zc
+                       + float(o["radius"]) * math.sqrt(max(0.0, 1.0 - zc * zc)))
+            else:
+                rad = float(o.get("radius", 0.0))
+            s0 = s - rad                                # 이 객체의 로봇 쪽 끝
+            s_min = s0 if s_min is None else min(s_min, s0)
+        if s_min is None:
+            return None
+        margin = float(self.get_parameter("canopy_margin").value)
+        # 손끝이 캐노피 앞면(−여유)보다 밖에 있으려면 TCP 를 이만큼 뒤로 뺀다
+        tip = float(self._pad_span[1]) if getattr(self, "_pad_span", None) else 0.0
+        return max(0.0, (s_g + tip) - (s_min - margin))
 
     def _strategy_frontal(self, name, p_fruit, r, sol):
         """[대조군 · 회피 알고리즘 없음] **정면에서 직선으로 진입**한다.
@@ -3045,6 +3218,7 @@ class PregraspDemo(Node):
         n = max(2, int(self.get_parameter("naive_steps").value))
 
         p_fruit = np.asarray(p_fruit, float)
+        self._frontal_src = "?"
         a = self._frontal_dir(p_fruit)
         bxy = self._base_xy()
         if bxy is not None:
@@ -3057,14 +3231,32 @@ class PregraspDemo(Node):
                     f"{math.degrees(math.acos(max(-1.0, min(1.0, float(np.dot(a, hv)))))):.1f}° 차이")
         quat = PG.mat_to_quat(PG.gaze_rotation(a, 0.0, self.approach_axis))
         p_grasp = p_fruit - a * goff
-        p_pre = p_grasp - a * d0
+        # 🔴 직선 구간은 **캐노피 밖에서** 시작한다(사용자 정의 2026-08-21) — 마지막
+        #   12cm 만 직선이면 그 앞 구간을 무엇으로 가든 결과가 섞여, '회피 없이 곧장
+        #   찔러 넣는' 동작이 온전히 드러나지 않는다.
+        entry = None
+        if bool(self.get_parameter("frontal_from_canopy").value):
+            entry = self._canopy_entry_dist(a, p_grasp)
+        if entry is None:
+            entry, how = d0, f"standoff {d0*100:.0f}cm(캐노피 경계 불명)"
+        else:
+            entry = max(entry, d0)              # 최소한 standoff 만큼은 직선으로
+            how = f"캐노피 밖 {entry*100:.0f}cm(손끝 기준)"
+        p_pre = p_grasp - a * entry
         # 🔴 회피 없음 = IK 도 충돌을 보지 않는다.
         q_pre = self.solve_ik(p_pre, quat, avoid=False)
         q_grasp_ik = self.solve_ik(p_grasp, quat, avoid=False)
         if q_pre is None or q_grasp_ik is None:
-            # 정면 자세가 기구학적으로 아예 없다(도달 불가) — 회피 문제가 아니다.
+            # 정면 자세가 기구학적으로 아예 없다 — **회피 문제가 아니라 자세 제약**이다.
+            #   (정면 고정은 롤·피치까지 묶으므로 IK 해가 없을 수 있다. 어느 쪽이 없었는지
+            #    같이 남겨야 '도달 불가'와 '자세 불가'를 구분할 수 있다.)
             self.get_logger().error(
-                f"[{name}] 정면 진입 자세를 IK 가 못 찾음(도달 불가) — 대조군 계획 실패")
+                f"[{name}] 정면 진입 자세 IK 실패 — "
+                f"pre={'✗' if q_pre is None else '○'} grasp={'✗' if q_grasp_ik is None else '○'}"
+                f" · {how} · 법선 출처={self._frontal_src} "
+                f"a=[{a[0]:+.2f},{a[1]:+.2f},{a[2]:+.2f}] · "
+                f"진입점 [{p_pre[0]:.3f},{p_pre[1]:.3f},{p_pre[2]:.3f}] → "
+                f"파지점 [{p_grasp[0]:.3f},{p_grasp[1]:.3f},{p_grasp[2]:.3f}]")
             return dict(pre=(self.ARM, []), app=(self.ARM, [], "frontal/IK 실패", False),
                         q_pre=q_home, q_grasp=q_home, q_home=q_home,
                         gopen=gopen, close=close, home=None, sol=None)
@@ -3076,7 +3268,7 @@ class PregraspDemo(Node):
         pre_wp = [[float(q_home[j] + (q_pre[j] - q_home[j]) * k / (n - 1)) for j in self.ARM]
                   for k in range(n)]
         self.get_logger().info(
-            f"① home→정면 pre-grasp 관절보간 {n}점 — 플래너 사용 안 함")
+            f"① home→진입시작점({how}) 관절보간 {n}점 — 플래너 사용 안 함")
 
         # ② pre-grasp → grasp : 정면 직선(충돌검사 없음)
         self._set({j: q_pre[j] for j in self.ARM})
@@ -3087,14 +3279,17 @@ class PregraspDemo(Node):
         cart = self.cartesian_to(gp_pose, avoid=False)
         if cart is not None and cart[2] > 0.99:
             app_n, app_wp = cart[0], cart[1]
-            method = f"frontal/직선진입 fraction={cart[2]:.2f} (회피 없음)"
+            method = (f"frontal/거터법선 직선진입 {entry*100:.0f}cm "
+                      f"fraction={cart[2]:.2f} (회피 없음)")
         else:
             frac = cart[2] if cart is not None else 0.0
             app_n = self.ARM
             app_wp = [[float(q_pre[j] + (q_grasp_ik[j] - q_pre[j]) * k / 9)
                        for j in self.ARM] for k in range(10)]
             method = f"frontal/관절보간 진입(Cartesian frac={frac:.2f}) (회피 없음)"
-        self.get_logger().info(f"② 정면 진입 {len(app_wp)}점 — {method}")
+        self.get_logger().info(
+            f"② 정면 진입 {len(app_wp)}점 — {method} · 법선 출처={self._frontal_src} "
+            f"a=[{a[0]:+.2f},{a[1]:+.2f},{a[2]:+.2f}]")
         q_grasp = ({nm: app_wp[-1][i] for i, nm in enumerate(app_n)}
                    if app_wp else dict(q_grasp_ik))
 
@@ -3104,8 +3299,8 @@ class PregraspDemo(Node):
 
         self.cur = {j: 0.0 for j in self.ARM}
         self.cur.update({f: gopen for f in self.FINGERS})
-        frontal_sol = dict(c=PG.build_candidates([0.0], [0.0], [0.0], [d0],
-                                                 1.0, 0.5, 2.0, d0)[0],
+        frontal_sol = dict(c=PG.build_candidates([0.0], [0.0], [0.0], [entry],
+                                                 1.0, 0.5, 2.0, entry)[0],
                            a=a, p_pre=p_pre, p_grasp=p_grasp, quat=quat,
                            q=q_pre, q_grasp=q_grasp_ik)
         return dict(pre=(self.ARM, pre_wp), app=(app_n, app_wp, method, False),
@@ -3174,9 +3369,10 @@ class PregraspDemo(Node):
             self._crops_cache = self._crop_objects()
         self._clear_zone()
         self._set_allow(self._crops_cache, False)
-        stalk = self._stalk_of(name)
-        if stalk:
-            self._set_allow([stalk], True)
+        # 목표 화방대 + **목표 열매 자신**을 허용(무는 대상을 만지는 건 충돌이 아니다).
+        allow = [x for x in (self._stalk_of(name), name) if x]
+        if allow:
+            self._set_allow(allow, True)
 
     def _play_cycle(self, name, p_fruit, r, c):
         """계획 dict c(전략 산출)의 한 수확 사이클(home→pre→접근→파지→후퇴→home)을 실행/재생.
@@ -3730,15 +3926,126 @@ class PregraspDemo(Node):
             return False
         return _ik_ok()
 
+    def _camera_xyz(self):
+        """가림 판정에 쓸 **카메라 원점의 world 좌표**. 못 찾으면 None.
+
+        `camera_link:='auto'` 면 eye-to-hand(sensor2) 계열 링크를 TF 에서 차례로 찾는다.
+        손끝 카메라(sensor1)는 팔이 움직이면 시점이 따라 움직여 '지금 보이는가' 가
+        후보마다 달라지므로 선정 기준으로는 쓰지 않는다."""
+        want = str(self.get_parameter("camera_link").value or "auto").strip()
+        cands = ([want] if want and want.lower() != "auto" else
+                 ["sensor2_camera_color_optical_frame", "sensor2_camera_depth_optical_frame",
+                  "sensor2_camera_link", "sensor2_base_link"])
+        self._ensure_tf()
+        for ln in cands:
+            try:
+                tf = self._tf.lookup_transform(self.world, ln, rclpy.time.Time())
+            except Exception:                               # noqa: BLE001
+                continue
+            t = tf.transform.translation
+            self._cam_link_used = ln
+            return np.array([t.x, t.y, t.z])
+        return None
+
+    @staticmethod
+    def _seg_point_dist(a, b, p):
+        """선분 a→b 와 점 p 의 최단거리, 그리고 발의 매개변수 t(0~1)."""
+        d = b - a
+        L2 = float(np.dot(d, d))
+        if L2 < 1e-12:
+            return float(np.linalg.norm(p - a)), 0.0
+        t = float(np.dot(p - a, d) / L2)
+        t = max(0.0, min(1.0, t))
+        return float(np.linalg.norm(a + t * d - p)), t
+
+    def _occluders(self, name, p, others, cam):
+        """열매 `p` 가 카메라 시선에서 **다른 열매**에 가려지는지 → 가리는 이름 목록.
+
+        판정: 카메라→열매중심 선분에 대해, 다른 열매 구(반경 r_j + 여유)가 그 선분과
+        만나고 **그 열매보다 앞(카메라 쪽)** 에 있으면 가림.
+        🔴 줄기·화방대는 세지 않는다 — 사용자 정의가 "다른 토마토에 가려지지 않은 것"이다."""
+        m = float(self.get_parameter("occlusion_margin").value)
+        seg = float(np.linalg.norm(p - cam))
+        hit = []
+        for nm, q, rq in others:
+            if nm == name:
+                continue
+            if float(np.linalg.norm(q - cam)) >= seg:       # 목표보다 뒤 → 못 가린다
+                continue
+            d, t = self._seg_point_dist(cam, p, q)
+            if t <= 0.0 or t >= 1.0:
+                continue
+            if d < float(rq) + m:
+                hit.append(nm)
+        return hit
+
+    def _visible_targets(self, tg):
+        """가림 필터. `require_visible` 이 꺼져 있거나 카메라를 못 찾으면 그대로 통과."""
+        if not tg or not bool(self.get_parameter("require_visible").value):
+            return tg
+        cam = self._camera_xyz()
+        if cam is None:
+            self.get_logger().warn(
+                "가림 판정용 카메라 TF 를 못 찾음 → 가림 필터를 건너뛴다"
+                "(camera_link 인자로 링크를 직접 지정할 수 있다)")
+            return tg
+        out, blocked = [], []
+        for nm, p, r in tg:
+            occ = self._occluders(nm, p, tg, cam)
+            if occ:
+                blocked.append((nm, occ))
+            else:
+                out.append((nm, p, r))
+        if blocked:
+            top = ", ".join(f"{n}←{'/'.join(o[:2])}" for n, o in blocked[:4])
+            self.get_logger().info(
+                f"가림 제외 {len(blocked)}개 (카메라 {getattr(self, '_cam_link_used', '?')} "
+                f"시선 기준): {top}" + (" …" if len(blocked) > 4 else ""))
+        if not out and tg:
+            self.get_logger().warn(
+                "가림 필터가 후보를 전부 배제했다 — require_visible:=false 로 끄거나 "
+                "occlusion_margin 을 줄여 볼 것.")
+        return out
+
+    def _order_key(self, p):
+        """선정 정렬키. `select_order` 규칙에 따라 결정.
+
+        normal(기본) = **거터 법선 방향 수평거리** — 통로에서 작물행 쪽으로 잰 수직거리다.
+        같은 값이 많이 나올 수 있으므로(같은 행) 3D 거리를 2차 키로 쓴다."""
+        l0 = self._base_xyz()
+        if l0 is None:
+            bxy = self._base_xy()
+            l0 = np.array([bxy[0], bxy[1], 0.35]) if bxy is not None else np.zeros(3)
+        p = np.asarray(p, float)
+        d3 = float(np.linalg.norm(p - l0))
+        mode = str(self.get_parameter("select_order").value or "normal").strip().lower()
+        if mode.startswith("z"):
+            return (abs(float(p[2] - l0[2])), d3)
+        if mode.startswith("dist"):
+            return (d3, d3)
+        a = self._frontal_dir(p)                    # 거터 법선(= 정면 접근축)
+        return (abs(float(np.dot(a, p - l0))), d3)
+
     def _sorted_targets(self):
-        """목표 열매 전부를 팔 base(link0) 기준 **가까운 순**으로. 수확된 것은 이미 빠져 있다."""
-        tg = self._all_targets()
-        bxy = self._base_xy()
-        if bxy is not None and tg:
-            l0 = self._base_xyz()
-            if l0 is None:
-                l0 = np.array([bxy[0], bxy[1], 0.35])
-            tg.sort(key=lambda t: float(np.linalg.norm(t[1] - l0)))
+        """목표 열매를 **선정 규칙**대로 정렬해 돌려준다. 수확된 것은 이미 빠져 있다.
+
+        규칙(사용자 정의 2026-08-21):
+          ① **거터 법선 방향 수평거리가 가까운 것부터**(통로에 가까운 = 얕게 박힌 열매)
+          ② **다른 토마토에 가려진 것은 뺀다**(eye-to-hand 카메라 시선 기준)
+        `select_order` / `require_visible` 로 종전 동작(3D 거리 · 필터 없음)으로 되돌릴 수 있다."""
+        tg = self._visible_targets(self._all_targets())
+        if tg and (self._base_xy() is not None or self._base_xyz() is not None):
+            tg.sort(key=lambda t: self._order_key(t[1]))
+            # 순서를 눈으로 확인할 수 있게 상위 몇 개만 남긴다. 이 함수는 자주 불리므로
+            #   **1순위가 바뀔 때만** 찍는다(로그 폭주 방지).
+            head = tg[0][0]
+            if getattr(self, "_order_head", None) != head:
+                self._order_head = head
+                mode = str(self.get_parameter("select_order").value or "normal")
+                top = " · ".join(f"{n}({self._order_key(p)[0]*100:.0f}cm)"
+                                 for n, p, _ in tg[:4])
+                self.get_logger().info(f"선정 순서[{mode}] {len(tg)}개 → {top}"
+                                       + (" …" if len(tg) > 4 else ""))
         return tg
 
     OCTOMAP_ID = "<octomap>"

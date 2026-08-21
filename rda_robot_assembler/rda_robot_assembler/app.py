@@ -17,6 +17,7 @@ import pyvista as pv
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from rda_robot_assembler import part_registry as reg
+from rda_robot_assembler import presets as pre
 from rda_robot_assembler import urdf_loader as ul
 from rda_robot_assembler.assembly import Mount, compute_placements
 from rda_robot_assembler import collision as col
@@ -261,6 +262,12 @@ class Assembler(QtWidgets.QMainWindow):
         self.joint_pose = {}      # slot -> {joint: rad}
         self.active_slot = "arm"
         self.collider = col.CollisionChecker()   # 자충돌 검사기
+        # 현재 로봇 구성 프리셋(presets.yaml). 이 값이 **어떤 mounts 파일을 읽고 쓰는지**를
+        #   정한다 — 스탠드 같은 시험 구성을 정본 mounts.yaml 에 덮어쓰지 않기 위한 장치다.
+        try:
+            self.preset_name = pre.default_name()
+        except Exception:                                   # noqa: BLE001
+            self.preset_name = "base"
         self._dirty = False       # 저장 후 변경 여부(제목 * 표시)
         self._grid_origin = None  # 현재 격자 기준점(파트 베이스) — None 이면 재생성
         self._bounds = GRID_BOUNDS   # 현재 격자 경계(카메라 맞춤용)
@@ -352,6 +359,9 @@ class Assembler(QtWidgets.QMainWindow):
                             "현재 결합값·초기 포즈를 mounts.yaml 로 저장")
         self.act_load = act("불러오기", self._load, QtGui.QKeySequence.Open,
                             "mounts.yaml 에서 결합값·초기 포즈를 다시 읽음")
+        self.act_preset = act("로봇 구성 불러오기…", self._choose_preset, None,
+                              "presets.yaml 에 등록된 구성(base·stand …)을 골라 불러온다. "
+                              "저장도 그 구성의 mounts 파일로 간다.")
         self.act_reset = act("기본값으로 되돌리기", self._reset, None,
                              "결합값을 초안 기본값으로 되돌림(저장 전까지 파일은 그대로)")
         self.act_quit = act("종료", self.close, QtGui.QKeySequence.Quit)
@@ -382,7 +392,7 @@ class Assembler(QtWidgets.QMainWindow):
     def _build_menu(self):
         mb = self.menuBar()
         m = mb.addMenu("파일(&F)")
-        m.addAction(self.act_save); m.addAction(self.act_load)
+        m.addAction(self.act_save); m.addAction(self.act_load); m.addAction(self.act_preset)
         m.addSeparator(); m.addAction(self.act_reset)
         m.addSeparator(); m.addAction(self.act_quit)
 
@@ -578,7 +588,9 @@ class Assembler(QtWidgets.QMainWindow):
 
     def _update_title(self):
         star = "*" if self._dirty else ""
-        self.setWindowTitle(f"{APP_NAME} — mounts.yaml{star}")
+        self.setWindowTitle(
+            f"{APP_NAME} — [{getattr(self, 'preset_name', 'base')}] "
+            f"{os.path.basename(self._mounts_path())}{star}")
 
     def _set_dirty(self, dirty=True):
         self._dirty = dirty
@@ -1093,8 +1105,47 @@ class Assembler(QtWidgets.QMainWindow):
 
     # ---------- 파일 ----------
     def _mounts_path(self):
-        # 소스 위치에 저장(재빌드 없이 xacro·launch 가 읽도록)
-        return os.path.expanduser("~/robot_ws/src/rda_robot_description/config/mounts.yaml")
+        """현재 구성 프리셋의 mounts 파일(소스 위치 — 재빌드 없이 launch 가 읽는다)."""
+        try:
+            return pre.resolve(self.preset_name)["mounts"]
+        except Exception:                                   # noqa: BLE001
+            return os.path.expanduser(
+                "~/robot_ws/src/rda_robot_description/config/mounts.yaml")
+
+    def _choose_preset(self):
+        """구성 프리셋을 골라 그 구성으로 갈아탄다(그 프리셋의 mounts 를 불러온다)."""
+        try:
+            items = [f"{n} — {pre.resolve(n)['label']}" for n in pre.names()]
+        except Exception as e:                              # noqa: BLE001
+            QtWidgets.QMessageBox.warning(self, "구성", f"프리셋을 읽지 못했습니다:\n{e}")
+            return
+        if not items:
+            return
+        cur = next((i for i, t in enumerate(items)
+                    if t.split(" — ")[0] == self.preset_name), 0)
+        txt, ok = QtWidgets.QInputDialog.getItem(
+            self, "로봇 구성 불러오기",
+            "구성을 고르면 그 구성의 mounts 를 읽고, 이후 저장도 그 파일로 갑니다.\n"
+            "(정본 mounts.yaml 을 시험 구성으로 덮어쓰지 않기 위한 장치입니다)",
+            items, cur, False)
+        if not ok:
+            return
+        if self._dirty:
+            r = QtWidgets.QMessageBox.question(
+                self, "저장하지 않은 변경",
+                "저장하지 않은 변경이 있습니다. 버리고 다른 구성을 불러올까요?",
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No)
+            if r != QtWidgets.QMessageBox.Yes:
+                return
+        self.preset_name = txt.split(" — ")[0]
+        self._load()
+        try:
+            note = (pre.resolve(self.preset_name).get("note") or "").strip()
+        except Exception:                                   # noqa: BLE001
+            note = ""
+        self._set_status(f"구성 '{self.preset_name}' 불러옴"
+                         + (f" · {note.splitlines()[0]}" if note else ""))
+        self._update_title()
 
     def _save(self):
         data = {}
