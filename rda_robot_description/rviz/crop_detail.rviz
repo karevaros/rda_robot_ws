@@ -1,0 +1,67 @@
+Panels: []
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Name: Grid
+      Enabled: true
+      Plane Cell Count: 10
+      Cell Size: 0.5
+    - Class: rviz_default_plugins/RobotModel
+      Name: RobotModel
+      Enabled: true
+      Description Topic:
+        Value: /robot_description
+      Visual Enabled: true
+      Collision Enabled: false
+    - Class: rviz_default_plugins/TF
+      Name: TF
+      Enabled: false
+      Show Names: true
+      Marker Scale: 0.3
+    - Class: rviz_default_plugins/MarkerArray
+      Name: SelfCollision
+      Enabled: true
+      Topic:
+        Value: /self_collision_markers
+        Depth: 1
+        Durability Policy: Volatile
+        Reliability Policy: Reliable
+    - Class: rviz_default_plugins/MarkerArray
+      Name: Obstacles
+      # 이름표(obstacle_labels)는 끈다 — 보고서 컷에서 큰 텍스트가 형상을 덮는다
+      Namespaces:
+        obstacles: true
+        obstacle_labels: false
+        workspace: true
+      Enabled: true
+      Topic:
+        Value: /obstacle_markers
+        Depth: 1
+        Durability Policy: Transient Local
+        Reliability Policy: Reliable
+  Global Options:
+    # world = 바닥 z=0 기준. 장애물이 world 고정이라 Fixed Frame 도 world.
+    # (launch 가 world->base_link static TF 를 항상 발행한다)
+    Fixed Frame: world
+    Frame Rate: 30
+  Tools:
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/FocusCamera
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Name: Current View
+      Distance: 0.42
+      Focal Point:
+        X: 0.855
+        Y: 0.19
+        Z: 1.00
+      Pitch: 0.38
+      Yaw: 3.70
+      Target Frame: world
+  Value: true
+Window Geometry:
+  Height: 1200
+  Width: 1900
+  QMainWindow State: ""

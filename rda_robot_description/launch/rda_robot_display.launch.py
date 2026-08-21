@@ -78,7 +78,12 @@ def _scene_file(context, preset):
 
 def _launch_setup(context, *args, **kwargs):
     pkg = FindPackageShare("rda_robot_description")
-    rviz_path = PathJoinSubstitution([pkg, "rviz", "rda_robot.rviz"])
+    # RViz 설정 — 파일명만 주면 패키지 rviz/ 에서 찾는다(보고서 캡처용 고정 시점 등).
+    _rv = LaunchConfiguration("rviz_config").perform(context).strip()
+    rviz_path = (PathJoinSubstitution([pkg, "rviz", "rda_robot.rviz"])
+                 if not _rv or _rv.lower() == "auto"
+                 else (_rv if os.path.isabs(_rv)
+                       else PathJoinSubstitution([pkg, "rviz", _rv])))
     # 로봇 구성 프리셋(presets.yaml) — mounts·장면을 함께 고른다. 개별 인자가 우선.
     preset = None
     _pname = LaunchConfiguration("robot_config").perform(context).strip()
@@ -166,6 +171,10 @@ def _launch_setup(context, *args, **kwargs):
 
 
 def generate_launch_description():
+    rviz_cfg_arg = DeclareLaunchArgument(
+        "rviz_config", default_value="auto",
+        description="RViz 설정. 'auto'=rda_robot.rviz. 파일명만 주면 패키지 rviz/ 에서 찾는다 "
+                    "(예: crop_detail.rviz — 보고서 캡처용 화방 근접 고정 시점).")
     preset_arg = DeclareLaunchArgument(
         "robot_config", default_value="base",
         description="로봇 구성 프리셋(presets.yaml): base(정본) | stand(+500mm, 시험 구성). "
@@ -186,6 +195,6 @@ def generate_launch_description():
         "base_yaw", default_value="auto",
         description="world→base_link yaw[rad]. 'auto'=mounts.yaml 의 base_placement 값 사용. "
                     "숫자를 주면 그 값으로 덮어씀(예: -1.5708=시계 90°).")
-    return LaunchDescription([preset_arg, mounts_arg, collision_arg, obstacles_arg,
+    return LaunchDescription([rviz_cfg_arg, preset_arg, mounts_arg, collision_arg, obstacles_arg,
                               obstacles_file_arg, base_yaw_arg,
                               OpaqueFunction(function=_launch_setup)])
