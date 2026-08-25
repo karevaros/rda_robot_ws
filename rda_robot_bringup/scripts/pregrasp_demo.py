@@ -2881,8 +2881,12 @@ class PregraspDemo(Node):
         with open(base + ".json", "w") as f:
             json.dump(rows, f, ensure_ascii=False, indent=1)
         # bad_pairs = 접촉 쌍('링크|객체×횟수'). 개수만으론 원인을 못 좁힌다(2026-07-29 교훈).
+        # 🔴 n_chk·bad_coarse 를 빠뜨리지 말 것 — 접촉률의 분모는 n(원 웨이포인트)이 아니라
+        #    n_chk(verify_max_step 로 세분한 검사점)다. n 으로 나누면 그럴듯하게 틀린 값이 나온다
+        #    (실측: harvest_linear 0.12% ↔ n 기준 0.45%). 2026-08-25 CSV 누락 발견·수정.
         keys = ["name", "strategy", "planner", "rep", "ok", "checked", "fallback",
-                "pre_fb", "home_fb", "t", "jl", "cl", "n", "bad", "bad_pairs", "frac",
+                "pre_fb", "home_fb", "t", "jl", "cl", "n", "n_chk", "bad", "bad_coarse",
+                "bad_pairs", "frac",
                 "jl_pre", "jl_app", "jl_home",
                 "plan_calls", "plan_fail", "plan_t", "method"]
         with open(base + ".csv", "w", newline="") as f:
