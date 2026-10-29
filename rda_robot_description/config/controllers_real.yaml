@@ -40,6 +40,31 @@ arm_controller:
     state_interfaces:
       - position          # ⚠ velocity 를 넣지 말 것 — 벤더 블록에 없다(위 ① 참조)
     allow_partial_joints_goal: false
+    # 🔴 허용오차가 없으면 팔이 목표에 못 미쳐도 시간만 지나면 SUCCEEDED 다(2026-10-29 실측:
+    #    max_joint_velocity 0.01 로 5° 중 2.47° 만 갔는데 'Goal successfully reached').
+    #    수확 시퀀스는 이 결과를 '도착'으로 믿으므로 실기에서는 반드시 둔다.
+    #    goal       : 끝났을 때 관절 오차 상한[rad] (0.01 ≈ 0.57°)
+    #    trajectory : 실행 중 추종 오차 상한[rad] — 넘으면 즉시 ABORT (속도 상한·통신 지연에 걸린 경우)
+    #    goal_time  : 궤적 끝난 뒤 goal 안에 들어오기까지 기다리는 시간[s]
+    #                 ⚠ 0 이면 Humble JTC 는 기한 없이 기다린다(성공도 실패도 안 낸다) → 0 으로 두지 말 것.
     constraints:
       stopped_velocity_tolerance: 0.01
-      goal_time: 0.0
+      goal_time: 1.0
+      base:
+        trajectory: 0.1
+        goal: 0.01
+      shoulder:
+        trajectory: 0.1
+        goal: 0.01
+      elbow:
+        trajectory: 0.1
+        goal: 0.01
+      wrist1:
+        trajectory: 0.1
+        goal: 0.01
+      wrist2:
+        trajectory: 0.1
+        goal: 0.01
+      wrist3:
+        trajectory: 0.1
+        goal: 0.01
