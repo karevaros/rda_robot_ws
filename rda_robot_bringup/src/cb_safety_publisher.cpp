@@ -72,9 +72,12 @@ class CBSafetyPublisher : public rclcpp::Node {
 
     rda_robot_msgs::msg::SafetyState m;
     m.header.stamp = now();
-    m.collision_occur = (d.op_stat_collision_occur != 0);
-    m.self_collision = (d.op_stat_self_collision != 0);
-    m.soft_estop = (d.op_stat_soft_estop_occur != 0);
+    // 0/1 플래그는 `== 1` 로 읽는다(벤더 robot_node 와 동일). 실기(팔 미활성)에서
+    // op_stat_self_collision 이 2062214032 같은 쓰레기값으로 와서 `!= 0` 이면
+    // '자가충돌' 오경보가 났다(2026-10-29 실측).
+    m.collision_occur = (d.op_stat_collision_occur == 1);
+    m.self_collision = (d.op_stat_self_collision == 1);
+    m.soft_estop = (d.op_stat_soft_estop_occur == 1);
     m.ems_flag = static_cast<int8_t>(d.op_stat_ems_flag);
     m.sos_flag = static_cast<int8_t>(d.op_stat_sos_flag);
     m.collision_detect_on = (d.collision_detect_onoff != 0);
