@@ -21,6 +21,17 @@
   그리고 상태가 아예 안 들어오는 것(발행 노드 죽음·네트워크 끊김)도 결함으로 본다
   (`stale_sec`). 조용히 감시가 사라지는 게 제일 위험하다.
 
+■ ROS 쪽 하드웨어도 감시한다 (`check_hardware`, 2026-10-29 추가)
+  🔴 실측: 하드웨어 인터페이스가 `Unexpected robot state changed` 로 unconfigured 로 떨어졌는데
+  제어박스 상태는 정상이라 abort 가 **false 그대로**였다. 그 사이 컨트롤러는 'active' 로 보이고
+  /joint_states 는 굳은 값을 낸다 — 팔은 명령을 안 받는데 시퀀스는 계속 진행할 수 있다.
+  ⇒ controller_manager 의 하드웨어 컴포넌트가 **active 가 아니면** 결함으로 본다.
+
+■ ⚠ 속도바 0 은 servo_j 스트림을 못 멈춘다
+  제어박스 속도바는 servo_j 에 안 먹는다(2026-10-29 실측: 5%·20%·100% 같은 궤적).
+  실제로 팔을 세우는 건 ①궤적 취소(JTC 가 현재 자세 유지로 전환)와 ②task_stop 이다.
+  ③속도바 0 은 펜던트·move_j 계열이 이어서 튀어나가지 않게 하는 보조 수단으로만 남긴다.
+
 실행(합성 메시지로 오프라인 점검):
     ros2 run rda_robot_bringup safety_monitor.py --ros-args -p require_services:=false
     ros2 topic pub --once /safety_monitor/safety_state rda_robot_msgs/msg/SafetyState \
@@ -58,6 +69,8 @@ class SafetyMonitor(Node):
         #    require_state=false 로 끄는 건 **명시적 선택**이어야 한다(기본은 켜짐).
         self.declare_parameter("require_state", True)
         self.declare_parameter("startup_grace_sec", 10.0)
+        self.declare_parameter("check_hardware", True)
+        self.declare_parameter("controller_manager", "/controller_manager")
 
         p = lambda n: self.get_parameter(n).value
         self.stale_sec = float(p("stale_sec"))
@@ -93,6 +106,15 @@ class SafetyMonitor(Node):
         self._no_state_warned = False
         self._cancel_clis = {}
         self.create_timer(0.5, self._check_stale)
+
+        self._hw_cli = None
+        self._hw_pending = None
+        self._hw_seen = False
+        if p("check_hardware"):
+            from controller_manager_msgs.srv import ListHardwareComponents
+            self._hw_cli = self.create_client(
+                ListHardwareComponents, f"{p('controller_manager')}/list_hardware_components")
+            self.create_timer(1.0, self._check_hardware)
 
         self._publish_abort(False, "")
         self.get_logger().info(
@@ -140,6 +162,42 @@ class SafetyMonitor(Node):
         if dt > self.stale_sec:
             self._trip(f"안전 상태 수신 끊김({dt:.1f}s > {self.stale_sec}s)")
 
+    def _check_hardware(self):
+        """ROS 쪽 하드웨어 컴포넌트가 전부 active 인지 본다(1Hz)."""
+        if self._aborted or self._hw_cli is None:
+            return
+        if self._hw_pending is not None and not self._hw_pending.done():
+            return                              # 이전 조회가 아직 안 끝났다
+        if not self._hw_cli.service_is_ready():
+            grace = float(self.get_parameter("startup_grace_sec").value)
+            dt = (self.get_clock().now() - self._started).nanoseconds / 1e9
+            if dt >= grace:
+                self._trip(f"controller_manager 하드웨어 조회 불가({self._hw_cli.srv_name}) — "
+                           "ros2_control 이 죽었거나 이름이 다릅니다")
+            return
+        self._hw_pending = self._hw_cli.call_async(self._hw_cli.srv_type.Request())
+        self._hw_pending.add_done_callback(self._on_hardware)
+
+    def _on_hardware(self, fut):
+        if self._aborted:
+            return
+        try:
+            comps = fut.result().component
+        except Exception as e:                 # noqa: BLE001
+            self.get_logger().warn(f"하드웨어 조회 실패: {e}")
+            return
+        bad = [f"{c.name}={c.state.label}" for c in comps if c.state.label != "active"]
+        if not comps:
+            # 기동 직후엔 비어 있을 수 있다 — 한 번이라도 본 뒤에 사라지면 결함.
+            if self._hw_seen:
+                self._trip("하드웨어 컴포넌트가 사라졌습니다")
+            return
+        if bad:
+            if self._hw_seen:
+                self._trip("ROS 하드웨어 비활성: " + ", ".join(bad))
+            return                              # 아직 activate 전(기동 중)
+        self._hw_seen = True
+
     # ------------------------------------------------------------------ 정지
     def _trip(self, reason):
         self._aborted = True
@@ -153,7 +211,8 @@ class SafetyMonitor(Node):
                 self.get_logger().warn(f"  {name}: 액션 서버 없음 — 취소 생략")
 
         self._call(self._stop_cli, "task_stop")            # ③ 제어박스 정지
-        self._call(self._speed_cli, "set_speed_bar", speed_bar=0.0)
+        # rbpodo_msgs/SetSpeedBar 의 필드는 `speed` 다(종전 `speed_bar` 로 넣어 AttributeError 가 났다).
+        self._call(self._speed_cli, "set_speed_bar", speed=0.0)
 
     def _cancel_all(self, name):
         """해당 액션 서버의 goal 을 전부 취소한다.
@@ -185,6 +244,9 @@ class SafetyMonitor(Node):
             return
         req = cli.srv_type.Request()
         for k, v in kw.items():
+            if k not in req.get_fields_and_field_types():
+                self.get_logger().error(f"  {what}: 요청에 '{k}' 필드가 없습니다 — 호출 안 함")
+                return
             setattr(req, k, v)
         cli.call_async(req)
         self.get_logger().info(f"  {what}: 호출")

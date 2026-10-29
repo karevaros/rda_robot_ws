@@ -4,7 +4,8 @@
         use_fake_hardware:=true                  # ① 하드웨어 없이 배선만 검증
     ros2 launch rda_robot_description real_robot.launch.py \
         robot_ip:=10.0.2.7 cb_simulation:=true   # ② 제어박스 연결·팔은 안 움직임
-        # 무선 링크면 servo_t2:=0.1 을 함께 준다(0.03 은 지터에 끊긴다 — _inject_servo_t2)
+        # 무선 링크면 servo_t2:=0.1 을 함께 준다(0.03 은 지터에 끊긴다 — HW_PARAMS)
+        # 실기 기본: speed_bar 0.2 · max_joint_velocity 0.5 rad/s(하드웨어 write 에서 자름 — 속도바는 servo_j 에 안 먹는다)
     ros2 launch rda_robot_description real_robot.launch.py \
         robot_ip:=10.0.2.7 cb_simulation:=false  # ③ 실제 구동 🔴
 
@@ -99,34 +100,49 @@ def _preflight(ip, timeout=3.0):
                 "  ⚠ 이 확인을 건너뛰면 하드웨어 인터페이스가 조용히 무한 대기합니다.")
 
 
-def _inject_servo_t2(urdf_xml, value):
-    """벤더 하드웨어 블록에 <param name="servo_t2"> 를 넣는다.
+#: 벤더 패치로 생긴 하드웨어 파라미터 — (최소, 최대, 설명). 최대 None = 상한 없음.
+HW_PARAMS = {
+    # 🔴 (2026-10-29 실측) 벤더 servo_j 유지시간 t2=0.03s 는 무선 링크에서 모자라다 —
+    #    송신 간격이 10ms 로 일정해도 도착 지터로 서보가 끝나 13~16초 만에
+    #    "Unexpected robot state changed" 로 하드웨어가 내려간다. 0.1 이면 60초 끊김 0.
+    "servo_t2": (0.02, 0.2, "servo_j 유지시간[s]"),
+    # 생성자가 접속 직후 1.0(100%)을 건다. 펜던트·move_j 계열에만 먹고
+    # 🔴 servo_j 스트림엔 안 먹는다(5%·20%·100% 모두 같은 궤적, 실측) → 보조 수단일 뿐.
+    "speed_bar": (0.0, 1.0, "제어박스 속도바"),
+    # 실제 속도 상한 — 로봇으로 나가는 마지막 단계(write)에서 한 주기 이동량을 자른다.
+    "max_joint_velocity": (0.0, None, "관절 속도 상한[rad/s], 0=끔"),
+}
 
-    🔴 왜 필요한가 (2026-10-29 실측): 벤더 servo_j 유지시간 t2=0.03s 는 무선 링크에서
-    모자라다 — 노트북 송신 간격이 10ms 로 일정해도 도착 지터로 서보가 끝나 약 13~16초 만에
-    "Unexpected robot state changed" 로 하드웨어가 내려간다. t2=0.1 이면 60초 끊김 0.
 
-    ⚠ 벤더 원본은 이 파라미터를 **모른 채 조용히 무시**한다 → 설치된 플러그인에 패치가
+def _inject_hw_params(urdf_xml, values):
+    """벤더 하드웨어 블록에 패치 파라미터(<param>)를 넣는다.
+
+    ⚠ 벤더 원본은 모르는 파라미터를 **조용히 무시**한다 → 설치된 플러그인에 해당 패치가
     들어 있는지 먼저 확인하고, 없으면 멈춘다(이 프로젝트의 '조용한 무효' 패턴)."""
-    try:
-        t2 = float(value)
-    except ValueError:
-        raise RuntimeError(f"servo_t2 는 숫자여야 합니다: {value!r}")
-    if not 0.02 <= t2 <= 0.2:
-        raise RuntimeError(f"servo_t2 는 0.02~0.2 s 여야 합니다(SDK 규격): {t2}")
-
     lib = os.path.join(get_package_prefix("rbpodo_hardware"), "lib", "librbpodo_hardware.so")
     with open(lib, "rb") as f:
-        if b"servo_t2" not in f.read():
-            raise RuntimeError(
-                "설치된 rbpodo_hardware 에 servo_t2 패치가 없습니다 — 값이 조용히 무시됩니다.\n"
-                "  bash src/docs/scripts/setup_rbpodo_sdk.sh 로 패치·재빌드하세요.")
+        blob = f.read()
 
     tag = "<plugin>rbpodo_hardware/RBPodoHardwareInterface</plugin>"
     if urdf_xml.count(tag) != 1:
         raise RuntimeError("통합 URDF 에서 rbpodo 하드웨어 블록을 하나로 특정하지 못했습니다.")
-    print(f"[real_robot] servo_t2 = {t2} s")
-    return urdf_xml.replace(tag, tag + f'\n      <param name="servo_t2">{t2}</param>')
+
+    lines = []
+    for name, raw in values.items():
+        lo, hi, desc = HW_PARAMS[name]
+        try:
+            v = float(raw)
+        except ValueError:
+            raise RuntimeError(f"{name} 는 숫자여야 합니다: {raw!r}")
+        if v < lo or (hi is not None and v > hi):
+            raise RuntimeError(f"{name}({desc}) 범위 밖: {v} (허용 {lo}~{hi if hi is not None else '∞'})")
+        if name.encode() not in blob:
+            raise RuntimeError(
+                f"설치된 rbpodo_hardware 에 '{name}' 패치가 없습니다 — 값이 조용히 무시됩니다.\n"
+                "  bash src/docs/scripts/setup_rbpodo_sdk.sh 로 패치·재빌드하세요.")
+        print(f"[real_robot] {name} = {v}  ({desc})")
+        lines.append(f'\n      <param name="{name}">{v}</param>')
+    return urdf_xml.replace(tag, tag + "".join(lines))
 
 
 def _setup(context, *args, **kwargs):
@@ -146,8 +162,10 @@ def _setup(context, *args, **kwargs):
         "use_fake_hardware": cfg("use_fake_hardware"),
     })
 
-    if cfg("servo_t2") and not fake:
-        urdf_xml = _inject_servo_t2(urdf_xml, cfg("servo_t2"))
+    if not fake:
+        hw = {k: cfg(k) for k in HW_PARAMS if cfg(k)}
+        if hw:
+            urdf_xml = _inject_hw_params(urdf_xml, hw)
 
     # 조립 결과가 정말 의도한 하드웨어인지 확인하고 알린다.
     # (플러그인 이름이 조용히 반대로 들어가는 사고를 막는다 — 이 프로젝트의 '조용한 무효' 패턴)
@@ -201,11 +219,13 @@ def _setup(context, *args, **kwargs):
     # ⑤ 실행 감시 — 발행 노드와 감시 노드는 **한 단위**다.
     #    감시만 켜면 상태가 안 들어와 결함으로 잡히고(require_state), 발행만 켜면
     #    아무도 반응하지 않는다. 그래서 인자 하나(safety)로 둘을 함께 켠다.
-    #    🔴 기본 꺼짐 — cb_safety_publisher 가 데이터 채널에 **두 번째 연결**을 열기 때문.
-    #       다중 접속 허용 여부를 문서로 확인하지 못했고, 만약 안 되면 하드웨어
-    #       인터페이스의 상태 수신(팔 제어)에 영향이 갈 수 있다.
-    #       실기 첫 연결 때 ①단독 ②동시 순으로 확인한 뒤 기본값을 켜는 게 맞다.
-    if cfg("safety").lower() in ("true", "1"):
+    #    기본 auto(실기면 켬) — cb_safety_publisher 는 데이터 채널에 **두 번째 연결**을 연다.
+    #       2026-10-29 실기(rb850_old)에서 동시 접속 확인(교대 70초×6회 끊김·지연 0) 후 켰다.
+    #       fake 에선 제어박스가 없어 상태가 안 들어오므로(require_state → 결함) 끈다.
+    safety = cfg("safety").lower()
+    if safety == "auto":
+        safety = "false" if fake else "true"
+    if safety in ("true", "1"):
         if fake:
             print("[real_robot] ⚠ safety:=true 인데 use_fake_hardware 입니다 — "
                   "제어박스가 없어 안전 상태가 들어오지 않습니다(감시는 결함으로 판정).")
@@ -252,14 +272,20 @@ def generate_launch_description():
         DeclareLaunchArgument("gripper_dry_run", default_value="false",
                               description="true=그리퍼 명령을 보내지 않고 로그만 "
                                           "(use_fake_hardware 로 배선 볼 때 함께 켠다)"),
-        DeclareLaunchArgument("safety", default_value="false",
-                              description="실행 감시(제어박스 충돌·E-stop → 즉시 정지). "
-                                          "🔴 기본 꺼짐 — 데이터 채널 두 번째 연결이 "
-                                          "미검증이라 실기 첫 연결 때 확인 후 켤 것"),
+        DeclareLaunchArgument("safety", default_value="auto",
+                              description="실행 감시(제어박스 충돌·E-stop·ROS 하드웨어 비활성 → 즉시 정지). "
+                                          "auto=실기면 켬·fake 면 끔. 데이터 채널 동시 접속은 "
+                                          "2026-10-29 실기에서 확인(교대 6회 끊김 0)"),
         DeclareLaunchArgument("servo_t2", default_value="",
                               description="servo_j 유지시간[s] 0.02~0.2(빈 값=SDK 기본 0.03). "
                                           "무선 링크면 0.1 — 0.03 은 지터에 끊긴다(2026-10-29 실측). "
                                           "벤더 패치 필요(setup_rbpodo_sdk.sh)"),
+        DeclareLaunchArgument("speed_bar", default_value="0.2",
+                              description="제어박스 속도바 0~1(빈 값=벤더 1.0). ⚠ servo_j 스트림엔 "
+                                          "안 먹는다(실측) — 펜던트·move_j 계열용 보조 수단"),
+        DeclareLaunchArgument("max_joint_velocity", default_value="0.5",
+                              description="관절 속도 상한[rad/s](0=끔 · RB5 제원 3.14). 로봇으로 "
+                                          "나가는 명령을 하드웨어 write 에서 자른다. 벤더 패치 필요"),
         DeclareLaunchArgument("preflight", default_value="true",
                               description="실기 모드에서 제어박스 접속 가능 여부를 먼저 확인 "
                                           "(false 로 끄면 접속 실패 시 조용히 무한 대기)"),

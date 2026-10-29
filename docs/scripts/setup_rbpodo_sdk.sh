@@ -43,17 +43,22 @@ else
 fi
 
 echo "[3/3] rbpodo_hardware 패치 + rbpodo_msgs·rbpodo_hardware 빌드"
-# 벤더는 gitignore 라 수정은 패치로만 남는다. 이미 적용돼 있으면 건너뛴다.
-#   servo_t2 — servo_j 유지시간을 하드웨어 파라미터로(무선 링크에서 0.03s 는 끊긴다, 2026-10-29 실측)
+# 벤더는 gitignore 라 수정은 패치로만 남는다. 패치는 **순서대로 누적**된다(같은 자리를 이어서 고친다)
+# → 개별 '이미 적용됨' 판정이 성립하지 않는다(뒤 패치가 앞 패치의 문맥을 바꾼다).
+#   ⇒ 깨끗하면 전부 적용 · 마지막 패치까지 적용돼 있으면 건너뜀 · 그 밖이면 멈추고 안내.
+#   01 servo_t2       — servo_j 유지시간(무선 링크에서 0.03s 는 끊긴다, 2026-10-29 실측)
+#   02 speed_limit    — speed_bar 설정 + 관절 속도 상한 max_joint_velocity(속도바는 servo_j 에 안 먹는다)
 VENDOR="$WS/src/vendor/rbpodo_ros2"
-for P in "$WS/src/docs/scripts/patches/"rbpodo_hardware_*.patch; do
-  if git -C "$VENDOR" apply --reverse --check "$P" 2>/dev/null; then
-    echo "  패치 이미 적용됨: $(basename "$P")"
-  else
-    git -C "$VENDOR" apply "$P"
-    echo "  패치 적용: $(basename "$P")"
-  fi
-done
+PATCHES=("$WS/src/docs/scripts/patches/"[0-9][0-9]-rbpodo_hardware_*.patch)
+if git -C "$VENDOR" diff --quiet -- rbpodo_hardware; then
+  for P in "${PATCHES[@]}"; do git -C "$VENDOR" apply "$P"; echo "  패치 적용: $(basename "$P")"; done
+elif git -C "$VENDOR" apply --reverse --check "${PATCHES[-1]}" 2>/dev/null; then
+  echo "  패치 이미 적용됨(마지막: $(basename "${PATCHES[-1]}"))"
+else
+  echo "  🔴 vendor/rbpodo_ros2/rbpodo_hardware 에 패치와 다른 변경이 있습니다." >&2
+  echo "     확인 후 되돌리고 다시 실행하세요: git -C $VENDOR checkout -- rbpodo_hardware" >&2
+  exit 1
+fi
 # ⚠ 벤더 패키지에 --symlink-install 을 섞지 말 것(CLAUDE.md 빌드 함정)
 cd "$WS"
 # shellcheck disable=SC1091
