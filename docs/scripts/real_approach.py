@@ -117,9 +117,9 @@ class Approach:
         d = dict(zip(res.solution.joint_state.name, res.solution.joint_state.position))
         return [d[j] for j in ARM], 1
 
-    def plan(self, goal):
+    def plan(self, goal, vel=0.1):
         req = MotionPlanRequest(group_name="arm", num_planning_attempts=3, allowed_planning_time=5.0,
-                                max_velocity_scaling_factor=0.1, max_acceleration_scaling_factor=0.1)
+                                max_velocity_scaling_factor=vel, max_acceleration_scaling_factor=vel)
         req.start_state.is_diff = True
         c = Constraints()
         c.joint_constraints = [JointConstraint(joint_name=j, position=v, tolerance_above=1e-3,
@@ -165,6 +165,8 @@ def main():
     ap.add_argument("--target", type=int, default=None, help="검출 id (기본: 카메라에서 가장 가까운 것)")
     ap.add_argument("--standoff", type=float, default=0.10, help="열매 표면 앞 여유[m]")
     ap.add_argument("--execute", action="store_true")
+    ap.add_argument("--vel", type=float, default=0.1, help="속도·가속 배율(0~1, 기본 0.1)")
+    ap.add_argument("--countdown", type=int, default=0, help="실행 전 카운트다운[s]")
     a = ap.parse_args()
 
     rclpy.init()
@@ -203,7 +205,7 @@ def main():
     if goal is None:
         print(f"✖ IK 실패(error_code={code}) — 도달 불가 또는 충돌"); return 3
     print("IK 관절 변화(deg):", [round(math.degrees(g - s), 1) for g, s in zip(goal, start)])
-    traj, msg = A.plan(goal)
+    traj, msg = A.plan(goal, a.vel)
     if traj is None:
         print("✖", msg); return 3
     ok, msg = A.check(traj, start, goal)
@@ -212,7 +214,11 @@ def main():
         return 3
     if not a.execute:
         print("(계획만 — 실행하려면 --execute)"); return 0
+    for k in range(a.countdown, 0, -1):
+        print(f"  … {k}", flush=True); time.sleep(1)
+    print(f"▶ 실행 시작 {time.strftime('%H:%M:%S')}", flush=True)
     ok, msg = A.execute(traj)
+    print(f"■ 실행 끝   {time.strftime('%H:%M:%S')}", flush=True)
     A.spin(1.0)
     t1, q1 = A.tcp()
     print(f"실행: {'SUCCESS' if ok else '✖'} ({msg}) · TCP 도착 오차 {np.linalg.norm(t1 - tgt)*1000:.1f} mm")
