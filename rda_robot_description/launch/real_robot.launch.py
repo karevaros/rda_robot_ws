@@ -145,6 +145,36 @@ def _inject_hw_params(urdf_xml, values):
     return urdf_xml.replace(tag, tag + "".join(lines))
 
 
+#: 이 launch 가 띄우는 노드 — 같은 이름이 이미 떠 있으면 시작하지 않는다.
+OWN_NODES = ("robot_state_publisher", "controller_manager", "joint_state_publisher",
+             "gripper_adapter", "cb_safety_publisher", "safety_monitor")
+
+
+def _check_no_stale_nodes():
+    """앞 실행의 노드가 남아 있으면 멈춘다.
+
+    🔴 왜 필요한가 (2026-10-29 실측 — 리얼 모드 첫 구동 직전): 앞 시험의 `ros2 launch` 부모만
+    죽고 자식(robot_state_publisher 등)이 고아로 남아 있었다. 새 controller_manager 는
+    `/robot_description` 토픽(TRANSIENT_LOCAL)을 구독하므로 **남아 있던 옛 URDF 를 받아**
+    cb_simulation:=false 로 띄웠는데도 `mode: Simulation`·`max_joint_velocity 0.010` 으로 접속했다.
+    이번엔 안전한 쪽(Simulation)으로 틀렸지만, 반대 방향이면 시뮬 설정을 믿고 실기가 움직인다."""
+    try:
+        out = subprocess.check_output(["ros2", "node", "list", "--no-daemon", "--spin-time", "1"],
+                                      text=True, stderr=subprocess.DEVNULL, timeout=20)
+    except (subprocess.SubprocessError, FileNotFoundError):
+        print("[real_robot] ⚠ 기존 노드 확인 실패 — 남은 노드가 없는지 직접 확인하세요(ros2 node list).")
+        return
+    stale = sorted({l.strip() for l in out.splitlines()
+                    if l.strip().rsplit("/", 1)[-1] in OWN_NODES})
+    if stale:
+        raise RuntimeError(
+            "앞 실행의 노드가 남아 있습니다 — 새 하드웨어가 옛 설정(/robot_description)을 받을 수 있습니다:\n  "
+            + "\n  ".join(stale)
+            + "\n  정리: pkill -TERM -f '[r]obot_state_publisher|[r]os2_control_node|[j]oint_state_publisher"
+              "|[g]ripper_adapter|[c]b_safety_publisher|[s]afety_monitor'"
+              "\n  (확인을 끄려면 preflight:=false — 권장하지 않음)")
+
+
 def _setup(context, *args, **kwargs):
     cfg = lambda n: LaunchConfiguration(n).perform(context)
 
@@ -153,8 +183,10 @@ def _setup(context, *args, **kwargs):
     controllers = cfg("controllers") or os.path.join(share, "config", "controllers_real.yaml")
 
     fake = cfg("use_fake_hardware").lower() in ("true", "1")
-    if not fake and cfg("preflight").lower() in ("true", "1"):
-        _preflight(cfg("robot_ip"))
+    if cfg("preflight").lower() in ("true", "1"):
+        _check_no_stale_nodes()
+        if not fake:
+            _preflight(cfg("robot_ip"))
 
     urdf_xml = compose_urdf(mounts, {
         "robot_ip": cfg("robot_ip"),
