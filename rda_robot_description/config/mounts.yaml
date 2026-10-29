@@ -28,9 +28,9 @@ mounts:
     parent_slot: endeffector
     parent_frame: rg2_hand
     xyz:
-    - 0.02
-    - 0.0
-    - 0.03
+    - 0.01035
+    - -0.009
+    - 0.054
     rpy:
     - 0.0
     - 0.0
