@@ -25,9 +25,8 @@
         gripper_macro 12,0,1,0,100,100,0,0,0,0   ← 벌림 100 · 힘 100
      = 모델 12(RG2) · 연결점 0(ToolFlange) · 기능 1(구동) · 0 · **벌림** · **힘** · 0×4.
      (종전 추정값 `12,2,2,0,<벌림>,0,…` 은 연결점·기능·힘 자리가 전부 틀렸다.)
-     ⚠ 아직 모르는 것: 벌림·힘의 **단위**(벌림 100 이 최대 개구로 보이나 mm 인지 미확인 ·
-       힘 54·100 은 RG2 정격 40N 을 넘으므로 N 이 아니라 비율일 가능성) ·
-       같은 스크립트의 `12,0,0,0…`(기능 0)·`12,0,1,0,0,0…` 줄의 의미.
+     사용자 확인(같은 날): **벌림·힘 모두 % 수치** · 기능 0 줄 = **초기화** ·
+       `12,0,1,0,0,0,…` = 벌림 0·힘 0 상태.
 
 ■ 🔴 이 노드는 '잡혔는지' 를 알 수 없다
   `Eval` 서비스의 success 는 **스크립트가 접수됐다**는 뜻일 뿐, 그리퍼가 움직였다는 뜻이
@@ -70,10 +69,11 @@ class GripperAdapter(Node):
         #    {conn}=연결점(0 ToolFlange / 1 ControlBox / 2 ToolFlange_Advanced)
         #    {width_mm}·{ratio_pct}·{force_pct} 를 쓸 수 있다.
         self.declare_parameter("cmd_move",
-                               "gripper_macro 12,{conn},1,0,{width_mm:.0f},{force_pct},0,0,0,0")
-        self.declare_parameter("cmd_init", "")       # 비우면 초기화 명령을 보내지 않는다(기능 0 줄의 의미 미확인)
+                               "gripper_macro 12,{conn},1,0,{ratio_pct:.0f},{force_pct},0,0,0,0")
+        # 기능 0 = 초기화(사용자 확인). 비우면 보내지 않는다.
+        self.declare_parameter("cmd_init", "gripper_macro 12,{conn},0,0,0,0,0,0,0,0")
         self.declare_parameter("conn_point", 0)
-        self.declare_parameter("force_pct", 54)      # 펜던트 예제 값 · 단위 미확인(위 주석)
+        self.declare_parameter("force_pct", 54)      # 힘[%] — 펜던트 예제 값
         self.declare_parameter("settle_sec", 1.0)
         self.declare_parameter("dry_run", False)     # true=명령을 보내지 않고 로그만
 

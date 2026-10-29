@@ -48,6 +48,7 @@ echo "[3/3] rbpodo_hardware 패치 + rbpodo_msgs·rbpodo_hardware 빌드"
 #   ⇒ 깨끗하면 전부 적용 · 마지막 패치까지 적용돼 있으면 건너뜀 · 그 밖이면 멈추고 안내.
 #   01 servo_t2       — servo_j 유지시간(무선 링크에서 0.03s 는 끊긴다, 2026-10-29 실측)
 #   02 speed_limit    — speed_bar 설정 + 관절 속도 상한 max_joint_velocity(속도바는 servo_j 에 안 먹는다)
+#   03 script_grace   — eval(그리퍼 gripper_macro 등) 직후 servo 끊김을 오류로 보지 않는다
 VENDOR="$WS/src/vendor/rbpodo_ros2"
 PATCHES=("$WS/src/docs/scripts/patches/"[0-9][0-9]-rbpodo_hardware_*.patch)
 if git -C "$VENDOR" diff --quiet -- rbpodo_hardware; then

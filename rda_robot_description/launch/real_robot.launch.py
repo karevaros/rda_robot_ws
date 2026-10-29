@@ -111,6 +111,10 @@ HW_PARAMS = {
     "speed_bar": (0.0, 1.0, "제어박스 속도바"),
     # 실제 속도 상한 — 로봇으로 나가는 마지막 단계(write)에서 한 주기 이동량을 자른다.
     "max_joint_velocity": (0.0, None, "관절 속도 상한[rad/s], 0=끔"),
+    # 🔴 (실측) 그리퍼 gripper_macro 도 같은 명령 채널(eval)로 나가 servo 모드를 끝낸다 →
+    #    송신 44ms 뒤 "Unexpected robot state changed" 로 하드웨어 사망. eval 직후 이 시간 동안은
+    #    robot_state 1 복귀를 허용하고 다음 servo_j 로 서보를 다시 연다. 빈 값 = 패치 기본 1.0s.
+    "script_grace": (0.0, 10.0, "eval(그리퍼 등) 직후 상태변화 유예[s]"),
 }
 
 
@@ -318,6 +322,8 @@ def generate_launch_description():
         DeclareLaunchArgument("max_joint_velocity", default_value="0.5",
                               description="관절 속도 상한[rad/s](0=끔 · RB5 제원 3.14). 로봇으로 "
                                           "나가는 명령을 하드웨어 write 에서 자른다. 벤더 패치 필요"),
+        DeclareLaunchArgument("script_grace", default_value="",
+                              description="그리퍼 등 스크립트 직후 서보 끊김 유예[s](빈 값=패치 기본 1.0)"),
         DeclareLaunchArgument("preflight", default_value="true",
                               description="실기 모드에서 제어박스 접속 가능 여부를 먼저 확인 "
                                           "(false 로 끄면 접속 실패 시 조용히 무한 대기)"),
