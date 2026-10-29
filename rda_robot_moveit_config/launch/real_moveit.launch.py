@@ -28,7 +28,7 @@ from launch_ros.actions import Node
 #: real_robot.launch.py 에 그대로 넘기는 인자(기본값은 그쪽 것을 따른다 — 빈 값이면 안 넘김)
 PASS = ("robot_ip", "cb_simulation", "use_fake_hardware", "mounts", "gripper", "gripper_dry_run",
         "safety", "servo_t2", "speed_bar", "max_joint_velocity", "script_grace", "preflight",
-        "camera", "camera_serial")
+        "camera", "camera_serial", "detect")
 
 
 def _load_yaml(path):

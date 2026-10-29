@@ -159,7 +159,7 @@ CAMERA_NAME = "sensor1_camera"
 
 #: 이 launch 가 띄우는 노드 — 같은 이름이 이미 떠 있으면 시작하지 않는다.
 OWN_NODES = ("robot_state_publisher", "controller_manager", "joint_state_publisher",
-             "gripper_adapter", "cb_safety_publisher", "safety_monitor", CAMERA_NAME)
+             "gripper_adapter", "cb_safety_publisher", "safety_monitor", CAMERA_NAME, "fruit_detector")
 
 
 def _check_no_stale_nodes():
@@ -295,6 +295,9 @@ def _setup(context, *args, **kwargs):
     if cfg("camera").lower() in ("true", "1"):
         rs_args = {"camera_name": CAMERA_NAME, "camera_namespace": "camera",
                    "publish_tf": "false", "pointcloud.enable": "true",
+                   # 격자형(organized) 클라우드 — fruit_detector 는 컬러·깊이가 픽셀 단위로 짝지어진
+                   # H×W 격자를 전제한다(드라이버 기본은 유효점만 1×N). 옥토맵은 NaN 을 건너뛴다.
+                   "pointcloud.ordered_pc": "true",
                    "align_depth.enable": "true"}
         if cfg("camera_serial"):
             rs_args["serial_no"] = f"'{cfg('camera_serial')}'"
@@ -304,6 +307,20 @@ def _setup(context, *args, **kwargs):
             launch_arguments=rs_args.items()))
         print(f"[real_robot] 손목 카메라 = realsense2_camera '{CAMERA_NAME}' "
               f"(TF 는 URDF 가 낸다 · 토픽 /camera/{CAMERA_NAME}/…)")
+        if cfg("detect").lower() in ("true", "1"):
+            # 실기 열매 검출 — 시뮬 기본값에서 바꾼 것(2026-10-29 토마토 화방 모형으로 실측):
+            #  · rgb_order=rgb   (realsense 클라우드는 PCL 관례 · Gazebo 는 bgr)
+            #  · sat_min 150 · hue_width 8 — 칸막이 주황 띠(H≈10·S≈92)가 S≥90 에선 열매로 잡혔다
+            #    (토마토 H≈1~3·S≈215~252). 바꾼 뒤 빨강 4/4 · 오검출 0 · 초록 제외.
+            #  · sphere_prior 0.025 — 모형 열매 지름 약 50 mm(영상 추정 · 실측 대기)
+            #  · max_range 1.0 — D405 근거리 전용
+            nodes.append(Node(
+                package="rda_robot_bringup", executable="fruit_detector.py", name="fruit_detector",
+                output="screen",
+                parameters=[{"cloud_topics": [f"/camera/{CAMERA_NAME}/depth/color/points"],
+                             "world_frame": "base_link", "max_range": 1.0, "rgb_order": "rgb",
+                             "sat_min": 150, "hue_width": 8, "sphere_prior": 0.025,
+                             "use_sim_time": False}]))
 
     rviz_cfg = os.path.join(share, "config", "rda_robot.rviz")
     if os.path.exists(rviz_cfg):
@@ -354,6 +371,8 @@ def generate_launch_description():
         DeclareLaunchArgument("camera", default_value="false",
                               description="손목 RealSense D405 드라이버를 함께 띄운다(realsense2_camera, "
                                           "벤더 소스 빌드 필요) — 프레임은 URDF sensor1_camera_* 사용"),
+        DeclareLaunchArgument("detect", default_value="false",
+                              description="camera:=true 와 함께 열매 검출(fruit_detector, 실기 설정) → /detected_fruits"),
         DeclareLaunchArgument("camera_serial", default_value="",
                               description="카메라 시리얼(여러 대일 때). 비우면 첫 장치"),
         DeclareLaunchArgument("preflight", default_value="true",
