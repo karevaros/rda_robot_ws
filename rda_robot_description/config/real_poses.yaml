@@ -1,0 +1,8 @@
+# 실기 이름 붙은 자세 — docs/scripts/go_pose.py <이름> 으로 이동(MoveIt 계획·검사 후 실행).
+# 값은 제어박스가 보고한 관절각(deg)을 그대로 적는다(rad 는 참고용 · 이동은 deg 를 쓴다).
+# ⚠ Gazebo/시뮬의 home(전부 0°, SRDF group_state)과는 별개 — 실기 시작 자세만 여기에 둔다.
+poses:
+  start:
+    note: "2026-10-29 사용자가 펜던트로 맞춘 자세 — 손목 D405 정면에 토마토 화방 모형(약 0.41 m)"
+    deg: {base: 1.0294, shoulder: 60.4257, elbow: -128.2270, wrist1: 59.0434, wrist2: -89.0175, wrist3: 0.8804}
+    rad: {base: 0.017967, shoulder: 1.054627, elbow: -2.237983, wrist1: 1.030502, wrist2: -1.553648, wrist3: 0.015366}

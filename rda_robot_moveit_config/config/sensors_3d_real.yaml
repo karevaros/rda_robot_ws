@@ -16,7 +16,10 @@ d405_real:
   max_range: 1.0
   # 한 장 약 35만 점(848x480) — 4점 중 1점만 써도 해상도 2 cm 옥토맵엔 충분.
   point_subsample: 4
-  padding_offset: 0.05
+  # 자기 몸 제거 여유. 5 cm 면 손가락 **끝**의 실제 점이 남아 시작 자세부터 `<octomap>↔rg2_*finger`
+  # 충돌(깊이 0.4~3 mm · 카메라에서 ~20 cm)이 났다 → 어디로도 계획 불가(2026-10-29, start 자세).
+  # 8 cm 에서 접촉 0. 손가락 바로 앞은 어차피 집을 열매가 들어올 자리라 지워져도 손해가 작다.
+  padding_offset: 0.08
   padding_scale: 1.0
   max_update_rate: 2.0
   filtered_cloud_topic: /camera/sensor1_camera/filtered_cloud
