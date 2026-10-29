@@ -42,7 +42,18 @@ else
   EXTRA_PREFIX="$PREFIX:"
 fi
 
-echo "[3/3] rbpodo_msgs·rbpodo_hardware 빌드"
+echo "[3/3] rbpodo_hardware 패치 + rbpodo_msgs·rbpodo_hardware 빌드"
+# 벤더는 gitignore 라 수정은 패치로만 남는다. 이미 적용돼 있으면 건너뛴다.
+#   servo_t2 — servo_j 유지시간을 하드웨어 파라미터로(무선 링크에서 0.03s 는 끊긴다, 2026-10-29 실측)
+VENDOR="$WS/src/vendor/rbpodo_ros2"
+for P in "$WS/src/docs/scripts/patches/"rbpodo_hardware_*.patch; do
+  if git -C "$VENDOR" apply --reverse --check "$P" 2>/dev/null; then
+    echo "  패치 이미 적용됨: $(basename "$P")"
+  else
+    git -C "$VENDOR" apply "$P"
+    echo "  패치 적용: $(basename "$P")"
+  fi
+done
 # ⚠ 벤더 패키지에 --symlink-install 을 섞지 말 것(CLAUDE.md 빌드 함정)
 cd "$WS"
 # shellcheck disable=SC1091

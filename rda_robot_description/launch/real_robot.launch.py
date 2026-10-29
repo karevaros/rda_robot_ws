@@ -4,6 +4,7 @@
         use_fake_hardware:=true                  # ① 하드웨어 없이 배선만 검증
     ros2 launch rda_robot_description real_robot.launch.py \
         robot_ip:=10.0.2.7 cb_simulation:=true   # ② 제어박스 연결·팔은 안 움직임
+        # 무선 링크면 servo_t2:=0.1 을 함께 준다(0.03 은 지터에 끊긴다 — _inject_servo_t2)
     ros2 launch rda_robot_description real_robot.launch.py \
         robot_ip:=10.0.2.7 cb_simulation:=false  # ③ 실제 구동 🔴
 
@@ -30,7 +31,7 @@
 import os
 import subprocess
 
-from ament_index_python.packages import get_package_share_directory
+from ament_index_python.packages import get_package_prefix, get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.conditions import IfCondition
@@ -98,6 +99,36 @@ def _preflight(ip, timeout=3.0):
                 "  ⚠ 이 확인을 건너뛰면 하드웨어 인터페이스가 조용히 무한 대기합니다.")
 
 
+def _inject_servo_t2(urdf_xml, value):
+    """벤더 하드웨어 블록에 <param name="servo_t2"> 를 넣는다.
+
+    🔴 왜 필요한가 (2026-10-29 실측): 벤더 servo_j 유지시간 t2=0.03s 는 무선 링크에서
+    모자라다 — 노트북 송신 간격이 10ms 로 일정해도 도착 지터로 서보가 끝나 약 13~16초 만에
+    "Unexpected robot state changed" 로 하드웨어가 내려간다. t2=0.1 이면 60초 끊김 0.
+
+    ⚠ 벤더 원본은 이 파라미터를 **모른 채 조용히 무시**한다 → 설치된 플러그인에 패치가
+    들어 있는지 먼저 확인하고, 없으면 멈춘다(이 프로젝트의 '조용한 무효' 패턴)."""
+    try:
+        t2 = float(value)
+    except ValueError:
+        raise RuntimeError(f"servo_t2 는 숫자여야 합니다: {value!r}")
+    if not 0.02 <= t2 <= 0.2:
+        raise RuntimeError(f"servo_t2 는 0.02~0.2 s 여야 합니다(SDK 규격): {t2}")
+
+    lib = os.path.join(get_package_prefix("rbpodo_hardware"), "lib", "librbpodo_hardware.so")
+    with open(lib, "rb") as f:
+        if b"servo_t2" not in f.read():
+            raise RuntimeError(
+                "설치된 rbpodo_hardware 에 servo_t2 패치가 없습니다 — 값이 조용히 무시됩니다.\n"
+                "  bash src/docs/scripts/setup_rbpodo_sdk.sh 로 패치·재빌드하세요.")
+
+    tag = "<plugin>rbpodo_hardware/RBPodoHardwareInterface</plugin>"
+    if urdf_xml.count(tag) != 1:
+        raise RuntimeError("통합 URDF 에서 rbpodo 하드웨어 블록을 하나로 특정하지 못했습니다.")
+    print(f"[real_robot] servo_t2 = {t2} s")
+    return urdf_xml.replace(tag, tag + f'\n      <param name="servo_t2">{t2}</param>')
+
+
 def _setup(context, *args, **kwargs):
     cfg = lambda n: LaunchConfiguration(n).perform(context)
 
@@ -114,6 +145,9 @@ def _setup(context, *args, **kwargs):
         "cb_simulation": cfg("cb_simulation"),
         "use_fake_hardware": cfg("use_fake_hardware"),
     })
+
+    if cfg("servo_t2") and not fake:
+        urdf_xml = _inject_servo_t2(urdf_xml, cfg("servo_t2"))
 
     # 조립 결과가 정말 의도한 하드웨어인지 확인하고 알린다.
     # (플러그인 이름이 조용히 반대로 들어가는 사고를 막는다 — 이 프로젝트의 '조용한 무효' 패턴)
@@ -222,6 +256,10 @@ def generate_launch_description():
                               description="실행 감시(제어박스 충돌·E-stop → 즉시 정지). "
                                           "🔴 기본 꺼짐 — 데이터 채널 두 번째 연결이 "
                                           "미검증이라 실기 첫 연결 때 확인 후 켤 것"),
+        DeclareLaunchArgument("servo_t2", default_value="",
+                              description="servo_j 유지시간[s] 0.02~0.2(빈 값=SDK 기본 0.03). "
+                                          "무선 링크면 0.1 — 0.03 은 지터에 끊긴다(2026-10-29 실측). "
+                                          "벤더 패치 필요(setup_rbpodo_sdk.sh)"),
         DeclareLaunchArgument("preflight", default_value="true",
                               description="실기 모드에서 제어박스 접속 가능 여부를 먼저 확인 "
                                           "(false 로 끄면 접속 실패 시 조용히 무한 대기)"),
