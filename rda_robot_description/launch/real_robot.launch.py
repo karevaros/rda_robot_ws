@@ -34,7 +34,8 @@ import subprocess
 
 from ament_index_python.packages import get_package_prefix, get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, OpaqueFunction
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, OpaqueFunction
+from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
@@ -149,9 +150,16 @@ def _inject_hw_params(urdf_xml, values):
     return urdf_xml.replace(tag, tag + "".join(lines))
 
 
+#: 손목 카메라(D405) — 통합 URDF 의 sensor1 슬롯 프레임 이름(`sensor1_camera_*`)과 같게 둔다.
+#  드라이버는 `<camera_name>_link/_depth_optical_frame/…` 로 frame_id 를 짓는다 → 이름이 같으면 연결된다.
+#  🔴 publish_tf:=false — 드라이버도 link→depth/color→optical 4개 변환을 같은 이름으로 내므로
+#     URDF(robot_state_publisher)와 **같은 연결을 두 곳에서 발행**하게 된다. 차이는 link→color
+#     0.24°·0.01mm(장치 보정값, 2026-10-29 실측)뿐이라 URDF 쪽을 쓴다(Gazebo 와 같은 프레임 구조).
+CAMERA_NAME = "sensor1_camera"
+
 #: 이 launch 가 띄우는 노드 — 같은 이름이 이미 떠 있으면 시작하지 않는다.
 OWN_NODES = ("robot_state_publisher", "controller_manager", "joint_state_publisher",
-             "gripper_adapter", "cb_safety_publisher", "safety_monitor")
+             "gripper_adapter", "cb_safety_publisher", "safety_monitor", CAMERA_NAME)
 
 
 def _check_no_stale_nodes():
@@ -278,6 +286,19 @@ def _setup(context, *args, **kwargs):
         print("[real_robot] ⚠ 실행 감시가 꺼져 있습니다(safety:=false) — "
               "충돌·E-stop 시 자동 정지하지 않습니다.")
 
+    if cfg("camera").lower() in ("true", "1"):
+        rs_args = {"camera_name": CAMERA_NAME, "camera_namespace": "camera",
+                   "publish_tf": "false", "pointcloud.enable": "true",
+                   "align_depth.enable": "true"}
+        if cfg("camera_serial"):
+            rs_args["serial_no"] = f"'{cfg('camera_serial')}'"
+        nodes.append(IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(os.path.join(
+                get_package_share_directory("realsense2_camera"), "launch", "rs_launch.py")),
+            launch_arguments=rs_args.items()))
+        print(f"[real_robot] 손목 카메라 = realsense2_camera '{CAMERA_NAME}' "
+              f"(TF 는 URDF 가 낸다 · 토픽 /camera/{CAMERA_NAME}/…)")
+
     rviz_cfg = os.path.join(share, "config", "rda_robot.rviz")
     if os.path.exists(rviz_cfg):
         nodes.append(Node(package="rviz2", executable="rviz2", output="log",
@@ -324,6 +345,11 @@ def generate_launch_description():
                                           "나가는 명령을 하드웨어 write 에서 자른다. 벤더 패치 필요"),
         DeclareLaunchArgument("script_grace", default_value="",
                               description="그리퍼 등 스크립트 직후 서보 끊김 유예[s](빈 값=패치 기본 1.0)"),
+        DeclareLaunchArgument("camera", default_value="false",
+                              description="손목 RealSense D405 드라이버를 함께 띄운다(realsense2_camera, "
+                                          "벤더 소스 빌드 필요) — 프레임은 URDF sensor1_camera_* 사용"),
+        DeclareLaunchArgument("camera_serial", default_value="",
+                              description="카메라 시리얼(여러 대일 때). 비우면 첫 장치"),
         DeclareLaunchArgument("preflight", default_value="true",
                               description="실기 모드에서 제어박스 접속 가능 여부를 먼저 확인 "
                                           "(false 로 끄면 접속 실패 시 조용히 무한 대기)"),
