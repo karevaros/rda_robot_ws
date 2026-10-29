@@ -194,6 +194,12 @@ def _setup(context, *args, **kwargs):
     mounts = cfg("mounts") or os.path.join(share, "config", "mounts.yaml")
     controllers = cfg("controllers") or os.path.join(share, "config", "controllers_real.yaml")
 
+    # 🔴 빈 값 거부 — 상위 launch 가 빈 기본값으로 인자를 선언하면 여기 기본값이 묻힌다.
+    #    cb_simulation='' 는 벤더가 "True 가 아니면 Real" 로 읽어 **조용히 Real 로 접속**하고,
+    #    safety='' 는 auto 가 아니라 '꺼짐'이 된다(2026-10-29 real_moveit 에서 실제로 발생).
+    for k in ("cb_simulation", "use_fake_hardware", "safety", "gripper", "gripper_dry_run"):
+        if cfg(k).strip() == "":
+            raise RuntimeError(f"launch 인자 '{k}' 가 빈 값입니다 — 상위 launch 가 빈 기본값으로 덮어썼는지 확인하세요.")
     fake = cfg("use_fake_hardware").lower() in ("true", "1")
     if cfg("preflight").lower() in ("true", "1"):
         _check_no_stale_nodes()

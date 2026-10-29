@@ -8,7 +8,8 @@ real_robot 의 인자(robot_ip·cb_simulation·gripper·speed_bar·max_joint_vel
 
 ■ 시뮬용 perception_demo(execute:=true)와 다른 점
   · use_sim_time=false (실시간). Gazebo 가 없다.
-  · 장면에 온실 장애물을 넣지 않는다 — 실제 주변은 모델과 다르다. **충돌 회피는 자기충돌뿐**이므로
+  · camera:=true 면 손목 D405 포인트클라우드 → 옥토맵(config/sensors_3d_real.yaml) — 카메라가 본 것만 피한다.
+  · 장면에 온실 장애물을 넣지 않는다 — 실제 주변은 모델과 다르다. camera 없으면 **충돌 회피는 자기충돌뿐**이므로
     실기에서는 짧은 이동만 하고, 계획 결과를 실행 전에 검사할 것(docs/scripts/real_moveit_smoke.py).
   · 속도·가속 배율은 joint_limits.yaml 기본(0.1). 하드웨어 상한(max_joint_velocity)이 그 아래를 한 번 더 막는다.
 """
@@ -38,7 +39,12 @@ def _load_yaml(path):
 def _setup(context, *args, **kwargs):
     cfg = get_package_share_directory("rda_robot_moveit_config")
     desc = get_package_share_directory("rda_robot_description")
-    lc = lambda n: LaunchConfiguration(n).perform(context)
+    # ⚠ PASS 인자는 여기서 선언하지 않는다 — launch 인자는 전역이라, 빈 기본값("")으로 선언하면
+    #   포함된 real_robot.launch.py 의 기본값(gripper_dry_run=false · safety=auto …)을 덮어쓴다.
+    #   2026-10-29 실측: 그래서 safety 가 '' → **안전 감시가 꺼진 채** 실기 MoveIt 이 돌았고,
+    #   gripper_adapter 는 dry_run='' 타입 오류로 죽었다. 사용자가 준 값만 그대로 넘긴다.
+    given = context.launch_configurations
+    lc = lambda n: given.get(n, "")
 
     mounts = lc("mounts") or os.path.join(desc, "config", "mounts.yaml")
     # move_group 용 URDF — 기하만 쓰므로 하드웨어 인자 없이 조립해도 된다(링크·관절 동일).
@@ -66,15 +72,20 @@ def _setup(context, *args, **kwargs):
         _load_yaml(os.path.join(cfg, "config", "moveit_controllers.yaml")),
         {"use_sim_time": False},
     ]
+    if lc("camera").lower() in ("true", "1"):
+        # 손목 D405 → 옥토맵(카메라가 본 것만 장애물). 고정 프레임에 쌓아야 팔이 움직여도 지도가 남는다.
+        params += [_load_yaml(os.path.join(cfg, "config", "sensors_3d_real.yaml")),
+                   {"octomap_frame": "base_link",
+                    "octomap_resolution": float(LaunchConfiguration("octomap_resolution").perform(context))}]
     move_group = Node(package="moveit_ros_move_group", executable="move_group",
                       output="screen", parameters=params)
 
     real = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(desc, "launch", "real_robot.launch.py")),
-        launch_arguments={k: lc(k) for k in PASS if lc(k)}.items())
+        launch_arguments={k: given[k] for k in PASS if k in given}.items())
 
     nodes = [real, move_group]
-    if lc("rviz").lower() in ("true", "1"):
+    if LaunchConfiguration("rviz").perform(context).lower() in ("true", "1"):
         nodes.append(Node(package="rviz2", executable="rviz2", output="log",
                           arguments=["-d", os.path.join(cfg, "config", "moveit.rviz")],
                           parameters=params[:4]))
@@ -83,6 +94,7 @@ def _setup(context, *args, **kwargs):
 
 def generate_launch_description():
     return LaunchDescription(
-        [DeclareLaunchArgument(k, default_value="") for k in PASS]
-        + [DeclareLaunchArgument("rviz", default_value="false"),
+        [DeclareLaunchArgument("rviz", default_value="false"),
+           DeclareLaunchArgument("octomap_resolution", default_value="0.02",
+                                 description="camera:=true 일 때 옥토맵 해상도[m]"),
            OpaqueFunction(function=_setup)])

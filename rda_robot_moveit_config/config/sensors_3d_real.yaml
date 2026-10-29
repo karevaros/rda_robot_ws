@@ -1,0 +1,22 @@
+# 3D 센서 → MoveIt 옥토맵 — **실기**(real_moveit.launch.py camera:=true)
+#
+# 시뮬용 sensors_3d.yaml 과 다른 점: 실기엔 고정 카메라(D435i)가 없고 손목 D405 하나뿐이며,
+# 토픽 이름이 realsense2_camera 규칙(/camera/<camera_name>/…)을 따른다(camera_name=sensor1_camera).
+# 실제 주변(작물·구조물)은 모델에 없다 → **카메라가 본 것만 장애물**이 된다.
+#
+# ⚠ 손목 카메라는 화면 아래에 그리퍼 손가락을 본다(2026-10-29 영상 확인). self-filter(padding)가
+#   그걸 못 지우면 시작 자세가 충돌로 판정돼 계획이 즉시 실패한다.
+sensors:
+  - d405_real
+
+d405_real:
+  sensor_plugin: occupancy_map_monitor/PointCloudOctomapUpdater
+  point_cloud_topic: /camera/sensor1_camera/depth/color/points
+  # D405 근거리 전용(최적 7~50 cm) — 1 m 넘는 점은 부정확하고 사무실 벽까지 막아 버린다.
+  max_range: 1.0
+  # 한 장 약 35만 점(848x480) — 4점 중 1점만 써도 해상도 2 cm 옥토맵엔 충분.
+  point_subsample: 4
+  padding_offset: 0.05
+  padding_scale: 1.0
+  max_update_rate: 2.0
+  filtered_cloud_topic: /camera/sensor1_camera/filtered_cloud

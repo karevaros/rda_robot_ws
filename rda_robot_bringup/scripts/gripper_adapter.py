@@ -62,7 +62,13 @@ class GripperAdapter(Node):
         self.declare_parameter("mimic_joint", "rg2_finger_joint2")   # URDF mimic(배율 1)
         # 관절 범위 — URDF 실측(lower 0.0=닫힘 / upper 1.18=열림)
         self.declare_parameter("joint_closed", 0.0)
-        self.declare_parameter("joint_open", 1.18)
+        # 🔴 실기 RG2 '100%' = 모델 관절 약 0.6 rad (URDF 상한 1.18 이 아니다).
+        #    2026-10-29 손목 D405 영상에 모델 손가락을 투영해 확인: 실제 100% 열림 ↔ 0.6 rad 에서
+        #    패드가 겹치고(1.18 은 2.5배 넓게 찍혔다), 0% 닫힘 ↔ 0.0 rad 겹침.
+        #    ⚠ RG2 는 회전 링크라 관절각↔벌림이 선형이 아니다 — 중간값은 근사.
+        #    이 값이 틀리면 /joint_states 의 손가락이 실제와 달라 옥토맵 self-filter 가 실제 손가락을
+        #    못 지우고, 그 잔상에 모델 손가락이 걸려 계획이 막힌다(같은 날 실측).
+        self.declare_parameter("joint_open", 0.6)
         self.declare_parameter("stroke_mm", 100.0)   # RG2 최대 개구(제원 확인 후 조정)
 
         # 펜던트 실제 형식(2026-10-29, 위 주석): 모델·연결점·기능1·0·벌림·힘·0×4.
